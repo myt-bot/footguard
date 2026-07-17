@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://footguard.local/schema/command-v1.json",
+  "title": "FootGuard Device Command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command_id",
+    "target",
+    "pattern",
+    "duration_ms",
+    "expire_at_ms",
+    "reason_code"
+  ],
+  "properties": {
+    "command_id": {
+      "type": "string",
+      "pattern": "^cmd_[A-Za-z0-9_-]{1,48}$"
+    },
+    "target": {
+      "type": "string",
+      "enum": ["left", "right", "both", "none"]
+    },
+    "pattern": {
+      "type": "string",
+      "enum": ["off", "short", "double", "long"]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000
+    },
+    "expire_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "manual_test",
+        "left_load_bias",
+        "right_load_bias",
+        "forefoot_high",
+        "risk_persisted",
+        "cancel"
+      ]
+    }
+  }
+}
+

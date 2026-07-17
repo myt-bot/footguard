@@ -1,0 +1,9 @@
+{
+  "command_id": "cmd_000001",
+  "target": "left",
+  "pattern": "double",
+  "duration_ms": 800,
+  "expire_at_ms": 1760000005000,
+  "reason_code": "left_load_bias"
+}
+
