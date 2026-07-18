@@ -1,0 +1,9 @@
+﻿Found 4 connected devices:
+  sdk gphone16k x86 64 (mobile) 鈥?emulator-5554 鈥?android-x64    鈥?Android 16 (API 36) (emulator)
+  Windows (desktop)             鈥?windows       鈥?windows-x64    鈥?Microsoft Windows [鐗堟湰 10.0.26200.8875]
+  Chrome (web)                  鈥?chrome        鈥?web-javascript 鈥?Google Chrome 149.0.7827.200
+  Edge (web)                    鈥?edge          鈥?web-javascript 鈥?Microsoft Edge 150.0.4078.65
+
+Run "flutter emulators" to list and start any available device emulators.
+
+If you expected another device to be detected, please run "flutter doctor" to diagnose potential issues. You may also try increasing the time to wait for connected devices with the "--device-timeout" flag. Visit https://flutter.dev/setup/ for troubleshooting tips.
