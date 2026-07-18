@@ -1,0 +1,38 @@
+﻿[鈭歖 Flutter (Channel stable, 3.44.6, on Microsoft Windows [鐗堟湰 10.0.26200.8875], locale zh-CN) [257ms]
+    鈥?Flutter version 3.44.6 on channel stable at D:\dev\flutter
+    鈥?Upstream repository https://github.com/flutter/flutter.git
+    鈥?Framework revision ee80f08bbf (10 days ago), 2026-07-08 15:02:06 -0700
+    鈥?Engine revision 83675ed276
+    鈥?Dart version 3.12.2
+    鈥?DevTools version 2.57.0
+    鈥?Feature flags: enable-web, enable-linux-desktop, enable-macos-desktop, enable-windows-desktop, enable-android, enable-ios, cli-animations, enable-native-assets, enable-swift-package-manager, omit-legacy-version-file, enable-lldb-debugging, enable-uiscene-migration
+
+[鈭歖 Windows Version (Windows 11 or higher, 25H2, 2009) [4.2s]
+
+[鈭歖 Android toolchain - develop for Android devices (Android SDK version 36.0.0) [3.0s]
+    鈥?Android SDK at D:\Android\Sdk
+    鈥?Emulator version 36.6.11.0 (build_id 15507667) (CL:N/A)
+    鈥?Platform android-36.1, build-tools 36.0.0
+    鈥?Java binary at: D:\Android Studio\jbr\bin\java
+      This is the JDK bundled with the latest Android Studio installation on this machine.
+      To manually set the JDK path, use: `flutter config --jdk-dir="path/to/jdk"`.
+    鈥?Java version OpenJDK Runtime Environment (build 21.0.10+-14961533-b1163.108)
+    鈥?All Android licenses accepted.
+
+[鈭歖 Chrome - develop for the web [14ms]
+    鈥?Chrome at C:\Program Files\Google\Chrome\Application\chrome.exe
+
+[X] Visual Studio - develop Windows apps [13ms]
+    X Visual Studio not installed; this is necessary to develop Windows apps.
+      Download at https://visualstudio.microsoft.com/downloads/.
+      Please install the "Desktop development with C++" workload, including all of its default components
+
+[鈭歖 Connected device (4 available) [457ms]
+    鈥?sdk gphone16k x86 64 (mobile) 鈥?emulator-5554 鈥?android-x64    鈥?Android 16 (API 36) (emulator)
+    鈥?Windows (desktop)             鈥?windows       鈥?windows-x64    鈥?Microsoft Windows [鐗堟湰 10.0.26200.8875]
+    鈥?Chrome (web)                  鈥?chrome        鈥?web-javascript 鈥?Google Chrome 149.0.7827.200
+    鈥?Edge (web)                    鈥?edge          鈥?web-javascript 鈥?Microsoft Edge 150.0.4078.65
+
+[!] Network resources [21.4s]
+    X A network error occurred while checking "https://maven.google.com/": 淇″彿鐏秴鏃舵椂闂村凡鍒?
+! Doctor found issues in 2 categories.

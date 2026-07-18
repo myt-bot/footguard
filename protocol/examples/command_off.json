@@ -1,0 +1,9 @@
+{
+  "protocol_version": 1,
+  "command_id": "cmd_000002",
+  "target": "both",
+  "pattern": "off",
+  "duration_ms": 0,
+  "expire_at_ms": 1760000005000,
+  "reason_code": "cancel"
+}

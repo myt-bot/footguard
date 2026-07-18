@@ -5,6 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "protocol_version",
     "command_id",
     "target",
     "pattern",
@@ -13,13 +14,17 @@
     "reason_code"
   ],
   "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
     "command_id": {
       "type": "string",
       "pattern": "^cmd_[A-Za-z0-9_-]{1,48}$"
     },
     "target": {
       "type": "string",
-      "enum": ["left", "right", "both", "none"]
+      "enum": ["left", "right", "both"]
     },
     "pattern": {
       "type": "string",
@@ -45,6 +50,43 @@
         "cancel"
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"pattern": {"const": "off"}},
+        "required": ["pattern"]
+      },
+      "then": {
+        "properties": {"duration_ms": {"type": "integer", "const": 0}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"pattern": {"const": "short"}},
+        "required": ["pattern"]
+      },
+      "then": {
+        "properties": {"duration_ms": {"type": "integer", "minimum": 100, "maximum": 1000}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"pattern": {"const": "double"}},
+        "required": ["pattern"]
+      },
+      "then": {
+        "properties": {"duration_ms": {"type": "integer", "minimum": 200, "maximum": 2000}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"pattern": {"const": "long"}},
+        "required": ["pattern"]
+      },
+      "then": {
+        "properties": {"duration_ms": {"type": "integer", "minimum": 1000, "maximum": 5000}}
+      }
+    }
+  ]
 }
-

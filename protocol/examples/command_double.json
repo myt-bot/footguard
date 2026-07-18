@@ -1,4 +1,5 @@
 {
+  "protocol_version": 1,
   "command_id": "cmd_000001",
   "target": "left",
   "pattern": "double",
@@ -6,4 +7,3 @@
   "expire_at_ms": 1760000005000,
   "reason_code": "left_load_bias"
 }
-

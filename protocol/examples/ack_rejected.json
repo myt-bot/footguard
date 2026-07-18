@@ -2,8 +2,7 @@
   "protocol_version": 1,
   "command_id": "cmd_000001",
   "device_id": "foot_left_001",
-  "status": "executed",
+  "status": "rejected",
   "ack_at_ms": 1760000000100,
-  "executed_at_ms": 1760000000100,
-  "error_code": "none"
+  "error_code": "time_unsynced"
 }
