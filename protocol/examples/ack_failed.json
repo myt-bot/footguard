@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "command_id": "cmd_000001",
+  "device_id": "foot_left_001",
+  "status": "failed",
+  "ack_at_ms": 1760000000200,
+  "error_code": "motor_fault"
+}

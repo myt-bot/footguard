@@ -13,12 +13,13 @@ BLE 编码：0 表示 left，1 表示 right。
 - csv_replay
 - ble
 
-## command target
+## BLE command target
 
 - left
 - right
 - both
-- none
+
+`none` 不是可下发到设备的目标，只能用于 risk_side 等内部无目标状态。App 不得向 DeviceCommand 写入 `target=none`。
 
 ## command pattern
 
@@ -29,7 +30,7 @@ BLE 编码：0 表示 left，1 表示 right。
 
 内部编码建议：0=off，1=short，2=double，3=long。
 
-## command 和 ACK status
+## 后端命令状态
 
 - pending
 - sent
@@ -37,6 +38,48 @@ BLE 编码：0 表示 left，1 表示 right。
 - rejected
 - expired
 - failed
+
+## 设备 ACK status
+
+- executed
+- rejected
+- expired
+- failed
+
+ESP32 不得在 AckEvent 中返回 pending 或 sent。
+
+## ACK error_code
+
+- none
+- invalid_json
+- unsupported_protocol
+- target_mismatch
+- invalid_pattern
+- invalid_duration
+- command_expired
+- time_unsynced
+- motor_fault
+- command_conflict
+- internal_error
+
+`executed` 必须配合 `error_code=none`。其他状态使用最具体的错误码。
+
+## DeviceStatus state
+
+- booting
+- idle
+- streaming
+- error
+
+## DeviceStatus error_code
+
+- none
+- sensor_error
+- calibration_error
+- imu_error
+- motor_error
+- low_battery
+- internal_error
 
 ## risk_type
 
@@ -90,5 +133,4 @@ BLE 编码：0 表示 left，1 表示 right。
 | 14 | 0x00004000 | PACKET_GAP | 数据包序号跳变 |
 | 15～31 | - | RESERVED | 保留，发送端必须置 0 |
 
-quality_flags=0 表示当前帧未发现质量异常。
-
+quality_flags=0 表示当前帧未发现质量异常。接收端发现保留位非 0 时应记录协议告警；v1 不把未知保留位解释为已知状态。

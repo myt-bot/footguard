@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://footguard.local/schema/ack-v1.json",
+  "title": "FootGuard Device ACK v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "command_id",
+    "device_id",
+    "status",
+    "ack_at_ms",
+    "error_code"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "command_id": {
+      "type": "string",
+      "pattern": "^cmd_[A-Za-z0-9_-]{1,48}$"
+    },
+    "device_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,16}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["executed", "rejected", "expired", "failed"]
+    },
+    "ack_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "executed_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "none",
+        "invalid_json",
+        "unsupported_protocol",
+        "target_mismatch",
+        "invalid_pattern",
+        "invalid_duration",
+        "command_expired",
+        "time_unsynced",
+        "motor_fault",
+        "command_conflict",
+        "internal_error"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "executed"}},
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["executed_at_ms"],
+        "properties": {"error_code": {"type": "string", "const": "none"}}
+      },
+      "else": {
+        "not": {"required": ["executed_at_ms"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "expired"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {"error_code": {"type": "string", "const": "command_expired"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "failed"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "error_code": {"type": "string", "enum": ["motor_fault", "internal_error"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "rejected"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "enum": [
+              "invalid_json",
+              "unsupported_protocol",
+              "target_mismatch",
+              "invalid_pattern",
+              "invalid_duration",
+              "command_expired",
+              "time_unsynced",
+              "command_conflict"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://footguard.local/schema/device-status-v1.json",
+  "title": "FootGuard Device Status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "firmware_version",
+    "device_id",
+    "side",
+    "sensor_layout_version",
+    "battery",
+    "state",
+    "error_code",
+    "time_synced",
+    "sync_id"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "firmware_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,12}$"
+    },
+    "device_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,16}$"
+    },
+    "side": {
+      "type": "string",
+      "enum": ["left", "right"]
+    },
+    "sensor_layout_version": {
+      "type": "string",
+      "const": "layout_6p3t_v1"
+    },
+    "battery": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "state": {
+      "type": "string",
+      "enum": ["booting", "idle", "streaming", "error"]
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "none",
+        "sensor_error",
+        "calibration_error",
+        "imu_error",
+        "motor_error",
+        "low_battery",
+        "internal_error"
+      ]
+    },
+    "time_synced": {
+      "type": "boolean"
+    },
+    "sync_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"time_synced": {"const": false}},
+        "required": ["time_synced"]
+      },
+      "then": {
+        "properties": {"sync_id": {"type": "integer", "const": 0}}
+      },
+      "else": {
+        "properties": {"sync_id": {"type": "integer", "minimum": 1}}
+      }
+    }
+  ]
+}

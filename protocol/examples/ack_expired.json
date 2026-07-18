@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "command_id": "cmd_000001",
+  "device_id": "foot_left_001",
+  "status": "expired",
+  "ack_at_ms": 1760000005100,
+  "error_code": "command_expired"
+}
