@@ -1,0 +1,35 @@
+#ifndef FOOTGUARD_CONFIG_H
+#define FOOTGUARD_CONFIG_H
+
+#include "footguard_protocol.h"
+
+#define FOOTGUARD_FIRMWARE_NAME "FootGuard"
+#define FOOTGUARD_FIRMWARE_VERSION "0.1.0"
+
+#define FOOTGUARD_VARIANT_LEFT 0
+#define FOOTGUARD_VARIANT_RIGHT 1
+
+#ifndef FOOTGUARD_DEVICE_VARIANT
+#define FOOTGUARD_DEVICE_VARIANT FOOTGUARD_VARIANT_LEFT
+#endif
+
+#if FOOTGUARD_DEVICE_VARIANT == FOOTGUARD_VARIANT_LEFT
+#define FOOTGUARD_DEVICE_SIDE FOOTGUARD_SIDE_LEFT
+#define FOOTGUARD_DEVICE_SIDE_NAME "left"
+#define FOOTGUARD_DEVICE_ID "foot_left_001"
+#define FOOTGUARD_BLE_DEVICE_NAME "FootGuard-L"
+#elif FOOTGUARD_DEVICE_VARIANT == FOOTGUARD_VARIANT_RIGHT
+#define FOOTGUARD_DEVICE_SIDE FOOTGUARD_SIDE_RIGHT
+#define FOOTGUARD_DEVICE_SIDE_NAME "right"
+#define FOOTGUARD_DEVICE_ID "foot_right_001"
+#define FOOTGUARD_BLE_DEVICE_NAME "FootGuard-R"
+#else
+#error "FOOTGUARD_DEVICE_VARIANT must be LEFT or RIGHT"
+#endif
+
+_Static_assert(sizeof(FOOTGUARD_FIRMWARE_VERSION) - 1U <= 12U,
+               "Firmware version exceeds the protocol limit");
+_Static_assert(sizeof(FOOTGUARD_DEVICE_ID) - 1U <= 16U,
+               "Device ID exceeds the protocol limit");
+
+#endif
