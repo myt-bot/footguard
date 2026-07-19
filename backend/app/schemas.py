@@ -20,14 +20,14 @@ class ImuData(StrictModel):
 
 class FootFrame(StrictModel):
     protocol_version: Literal[1]
-    sensor_layout_version: Literal["layout_6p3t_v1"]
+    sensor_layout_version: Literal["layout_6p4t_v1"]
     device_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,16}$")
     side: Literal["left", "right"]
     sync_id: int = Field(ge=0, le=4294967295)
     packet_seq: int = Field(ge=0, le=4294967295)
     timestamp_ms: int = Field(ge=0)
     pressure: list[float] = Field(min_length=6, max_length=6)
-    temperature: list[float] = Field(min_length=3, max_length=3)
+    temperature: list[float] = Field(min_length=4, max_length=4)
     imu: ImuData
     battery: int = Field(ge=0, le=100)
     quality_flags: int = Field(ge=0, le=4294967295)
@@ -52,7 +52,7 @@ class FootFrame(StrictModel):
         if self.quality_flags & 0xFFFF8000:
             raise ValueError("quality_flags reserved bits must be zero")
         if self.sync_id == 0 and (
-            self.timestamp_ms != 0 or not self.quality_flags & 0x00000400
+            self.timestamp_ms != 0 or not self.quality_flags & 0x00000800
         ):
             raise ValueError("unsynced frame requires timestamp_ms=0 and TIME_UNSYNCED")
         return self
@@ -72,7 +72,12 @@ class SensorBatchResponse(StrictModel):
 
 class RiskState(StrictModel):
     risk_type: Literal[
-        "normal", "left_load_bias", "right_load_bias", "forefoot_high", "data_incomplete"
+        "normal",
+        "left_load_bias",
+        "right_load_bias",
+        "forefoot_high",
+        "temperature_asymmetry",
+        "data_incomplete",
     ]
     risk_side: Literal["left", "right", "both", "none"]
     risk_level: int = Field(ge=0, le=3)
@@ -87,6 +92,17 @@ class RealtimeResponse(StrictModel):
     load_bias: float | None
     load_diff: float | None
     risk: RiskState
+    regional_analysis: "RegionalAnalysis | None" = None
+
+
+class RegionalAnalysis(StrictModel):
+    baseline_ready: bool
+    baseline_source: Literal["personal", "layout_default"]
+    left_pressure_scores: list[float] = Field(min_length=6, max_length=6)
+    right_pressure_scores: list[float] = Field(min_length=6, max_length=6)
+    temperature_delta_c: list[float] = Field(min_length=4, max_length=4)
+    left_temperature_scores: list[float] = Field(min_length=4, max_length=4)
+    right_temperature_scores: list[float] = Field(min_length=4, max_length=4)
 
 
 class DeviceCommand(StrictModel):
@@ -101,6 +117,7 @@ class DeviceCommand(StrictModel):
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "temperature_asymmetry",
         "risk_persisted",
         "cancel",
     ]

@@ -35,6 +35,7 @@ class SensorFrame(Base):
     t1: Mapped[float] = mapped_column(Float)
     t2: Mapped[float] = mapped_column(Float)
     t3: Mapped[float] = mapped_column(Float)
+    t4: Mapped[float] = mapped_column(Float)
     ax: Mapped[float] = mapped_column(Float)
     ay: Mapped[float] = mapped_column(Float)
     az: Mapped[float] = mapped_column(Float)

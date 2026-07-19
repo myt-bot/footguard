@@ -32,7 +32,7 @@ def ingest_batch(
     if latest is None:
         latest = evaluate_risk(session)
     else:
-        # Start the short device-command TTL only after the whole upload has finished.
+        # Start the human-facing device-command TTL only after the whole upload finishes.
         latest = evaluate_risk(
             session, record=True, allow_motor_command=True
         )

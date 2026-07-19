@@ -46,7 +46,7 @@ def scenario_frames(name: str) -> list[dict]:
                     "packet_seq": int(row["packet_seq"]),
                     "timestamp_ms": int(row["timestamp_ms"]),
                     "pressure": [float(row[f"p{i}"]) for i in range(1, 7)],
-                    "temperature": [float(row[f"t{i}"]) for i in range(1, 4)],
+                    "temperature": [float(row[f"t{i}"]) for i in range(1, 5)],
                     "imu": {name: float(row[name]) for name in ("ax", "ay", "az", "gx", "gy", "gz")},
                     "battery": int(row["battery"]),
                     "quality_flags": int(row["quality_flags"]),
@@ -86,6 +86,7 @@ def test_normal_scenarios_do_not_create_alarm_or_motor_command(
         ("left_load_bias", "left_load_bias", "left"),
         ("right_load_bias", "right_load_bias", "right"),
         ("left_forefoot_high", "forefoot_high", "left"),
+        ("left_temperature_rise", "temperature_asymmetry", "left"),
     ],
 )
 def test_sustained_risk_creates_one_event_and_motor_vibration_command(
@@ -112,6 +113,26 @@ def test_disconnect_is_data_incomplete_and_never_vibrates(client: TestClient, ap
         assert session.scalar(select(func.count()).select_from(Command)) == 0
 
 
+def test_pressure_risk_is_invariant_to_overall_weight_scale(
+    client: TestClient,
+) -> None:
+    frames = scenario_frames("left_load_bias")
+    for frame in frames:
+        frame["pressure"] = [round(value * 0.55, 4) for value in frame["pressure"]]
+    result = upload(client, frames)
+    assert result["latest_risk"] == "left_load_bias"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["load_bias"] > 0.25
+
+
+def test_stable_pairs_build_personal_baseline(client: TestClient) -> None:
+    upload(client, scenario_frames("normal_stand"))
+    analysis = client.get("/api/v1/realtime").json()["regional_analysis"]
+    assert analysis["baseline_ready"] is True
+    assert analysis["baseline_source"] == "personal"
+    assert len(analysis["left_temperature_scores"]) == 4
+
+
 def test_replaying_same_risk_does_not_duplicate_event_or_command(client: TestClient, app) -> None:
     frames = scenario_frames("left_load_bias")
     upload(client, frames)
@@ -119,6 +140,31 @@ def test_replaying_same_risk_does_not_duplicate_event_or_command(client: TestCli
     with app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(RiskEvent)) == 1
         assert session.scalar(select(func.count()).select_from(Command)) == 1
+
+
+def test_new_sync_window_creates_a_new_motor_reminder(
+    client: TestClient,
+    app,
+) -> None:
+    first_episode = scenario_frames("left_load_bias")
+    upload(client, first_episode)
+    with app.state.session_factory() as session:
+        first_command = session.scalar(select(Command))
+        first_command.status = "expired"
+        session.commit()
+
+    second_episode = scenario_frames("left_load_bias")
+    for frame in second_episode:
+        frame["sync_id"] += 100
+        frame["timestamp_ms"] += 1_000_000
+    upload(client, second_episode)
+
+    with app.state.session_factory() as session:
+        events = list(session.scalars(select(RiskEvent)))
+        commands = list(session.scalars(select(Command)))
+        assert len(events) == 2
+        assert len(commands) == 2
+        assert sum(command.status == "pending" for command in commands) == 1
 
 
 def test_expired_motor_command_cannot_be_acknowledged_as_executed(client: TestClient, app) -> None:

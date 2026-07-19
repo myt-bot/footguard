@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = ROOT / "sample_data"
 
 PROTOCOL_VERSION = 1
-SENSOR_LAYOUT_VERSION = "layout_6p3t_v1"
+SENSOR_LAYOUT_VERSION = "layout_6p4t_v1"
 SOURCE = "csv_replay"
 DEFAULT_SEED = 20260718
 DEFAULT_FREQUENCY_HZ = 5
@@ -27,6 +27,7 @@ SCENARIOS = (
     "left_load_bias",
     "right_load_bias",
     "left_forefoot_high",
+    "left_temperature_rise",
     "right_disconnect",
     "intervention_recovery",
 )
@@ -48,6 +49,7 @@ CSV_COLUMNS = (
     "t1",
     "t2",
     "t3",
+    "t4",
     "ax",
     "ay",
     "az",
@@ -59,8 +61,8 @@ CSV_COLUMNS = (
     "source",
 )
 
-STAND_WEIGHTS = (0.18, 0.19, 0.17, 0.12, 0.18, 0.16)
-FOREFOOT_WEIGHTS = (0.27, 0.25, 0.23, 0.08, 0.09, 0.08)
+STAND_WEIGHTS = (0.16, 0.17, 0.18, 0.14, 0.18, 0.17)
+FOREFOOT_WEIGHTS = (0.23, 0.22, 0.24, 0.20, 0.06, 0.05)
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -77,13 +79,18 @@ def pressure_channels(
     return [round(value, 4) for value in values]
 
 
-def temperature_channels(side: str, time_s: float, rng: random.Random) -> list[float]:
+def temperature_channels(
+    scenario: str, side: str, time_s: float, rng: random.Random
+) -> list[float]:
     side_offset = 0.05 if side == "left" else -0.05
     drift = 0.08 * math.sin(2.0 * math.pi * time_s / 30.0)
-    bases = (30.8, 30.6, 30.4)
+    # T1=forefoot lateral, T2=forefoot medial, T3=heel centre,
+    # T4=midfoot medial.
+    bases = (30.7, 30.8, 30.4, 30.6)
+    hotspot = (0.0, 2.8, 0.0, 0.0) if scenario == "left_temperature_rise" and side == "left" else (0.0,) * 4
     return [
-        round(base + side_offset + drift + rng.uniform(-0.03, 0.03), 2)
-        for base in bases
+        round(base + hotspot[index] + side_offset + drift + rng.uniform(-0.03, 0.03), 2)
+        for index, base in enumerate(bases)
     ]
 
 
@@ -126,7 +133,9 @@ def scenario_loads(
     if scenario == "right_load_bias":
         return 1.10, 2.80, left_weights, right_weights
     if scenario == "left_forefoot_high":
-        return 2.80, 1.75, FOREFOOT_WEIGHTS, right_weights
+        return 1.80, 1.75, FOREFOOT_WEIGHTS, right_weights
+    if scenario == "left_temperature_rise":
+        return 1.80, 1.75, left_weights, right_weights
     if scenario == "intervention_recovery":
         bias_end = duration_seconds * 0.40
         recovery_end = duration_seconds * 0.60
@@ -154,7 +163,7 @@ def build_row(
     rng: random.Random,
 ) -> dict[str, object]:
     pressure = pressure_channels(total_load, weights, rng)
-    temperature = temperature_channels(side, time_s, rng)
+    temperature = temperature_channels(scenario, side, time_s, rng)
     imu = imu_channels(scenario, side, time_s, rng)
     row: dict[str, object] = {
         "protocol_version": PROTOCOL_VERSION,
@@ -169,7 +178,7 @@ def build_row(
         "source": SOURCE,
     }
     row.update({f"p{index + 1}": pressure[index] for index in range(6)})
-    row.update({f"t{index + 1}": temperature[index] for index in range(3)})
+    row.update({f"t{index + 1}": temperature[index] for index in range(4)})
     row.update(
         {
             name: value

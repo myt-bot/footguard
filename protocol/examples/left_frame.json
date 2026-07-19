@@ -1,13 +1,13 @@
 {
   "protocol_version": 1,
-  "sensor_layout_version": "layout_6p3t_v1",
+  "sensor_layout_version": "layout_6p4t_v1",
   "device_id": "foot_left_001",
   "side": "left",
   "sync_id": 1,
   "packet_seq": 1,
   "timestamp_ms": 1760000000000,
   "pressure": [0.18, 0.31, 0.42, 0.22, 0.25, 0.12],
-  "temperature": [30.8, 30.6, 30.4],
+  "temperature": [30.7, 30.8, 30.4, 30.6],
   "imu": {
     "ax": 0.02,
     "ay": -0.03,
@@ -20,4 +20,3 @@
   "quality_flags": 0,
   "source": "mock"
 }
-

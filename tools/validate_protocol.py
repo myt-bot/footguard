@@ -19,7 +19,7 @@ PROTOCOL_DIR = ROOT / "protocol"
 EXAMPLES_DIR = PROTOCOL_DIR / "examples"
 
 PROTOCOL_VERSION = 1
-SENSOR_LAYOUT_VERSION = "layout_6p3t_v1"
+SENSOR_LAYOUT_VERSION = "layout_6p4t_v1"
 FRAME_FIELDS = {
     "protocol_version",
     "sensor_layout_version",
@@ -38,8 +38,8 @@ FRAME_FIELDS = {
 IMU_FIELDS = {"ax", "ay", "az", "gx", "gy", "gz"}
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 UINT32_MAX = 0xFFFFFFFF
-RESERVED_QUALITY_MASK = 0xFFFF8000
-TIME_UNSYNCED = 0x00000400
+RESERVED_QUALITY_MASK = 0xFFFF0000
+TIME_UNSYNCED = 0x00000800
 
 
 class ProtocolValidationError(ValueError):
@@ -162,7 +162,7 @@ def validate_foot_frame(frame: dict[str, Any], label: str = "frame") -> None:
     _require_numeric_array(
         frame["temperature"],
         field="temperature",
-        length=3,
+        length=4,
         minimum=-40.0,
         maximum=125.0,
         label=label,
@@ -243,9 +243,9 @@ def load_hex(path: Path) -> bytes:
 
 
 def decode_sensor_frame(raw: bytes, expected_side: str | None = None) -> dict[str, Any]:
-    if len(raw) != 58:
+    if len(raw) != 60:
         raise ProtocolValidationError(
-            f"SensorData: expected 58 bytes, got {len(raw)}"
+            f"SensorData: expected 60 bytes, got {len(raw)}"
         )
     if raw[0:2] != b"FG":
         raise ProtocolValidationError("SensorData.magic: expected bytes 46 47")
@@ -253,7 +253,7 @@ def decode_sensor_frame(raw: bytes, expected_side: str | None = None) -> dict[st
         raise ProtocolValidationError(
             f"SensorData.protocol_version: unsupported {raw[2]}"
         )
-    if raw[3] != 1:
+    if raw[3] != 2:
         raise ProtocolValidationError(f"SensorData.layout_id: unsupported {raw[3]}")
     if raw[4] not in (0, 1):
         raise ProtocolValidationError(f"SensorData.side: invalid code {raw[4]}")
@@ -264,8 +264,8 @@ def decode_sensor_frame(raw: bytes, expected_side: str | None = None) -> dict[st
             f"SensorData.side: expected {expected_side}, decoded {side}"
         )
 
-    stored_crc = struct.unpack_from("<H", raw, 56)[0]
-    calculated_crc = crc16_ccitt_false(raw[:56])
+    stored_crc = struct.unpack_from("<H", raw, 58)[0]
+    calculated_crc = crc16_ccitt_false(raw[:58])
     if stored_crc != calculated_crc:
         raise ProtocolValidationError(
             f"SensorData.crc16: stored 0x{stored_crc:04X}, "
@@ -275,7 +275,7 @@ def decode_sensor_frame(raw: bytes, expected_side: str | None = None) -> dict[st
     quality_flags = struct.unpack_from("<I", raw, 5)[0]
     if quality_flags & RESERVED_QUALITY_MASK:
         raise ProtocolValidationError("SensorData.quality_flags: reserved bits must be 0")
-    battery = raw[55]
+    battery = raw[57]
     if battery > 100:
         raise ProtocolValidationError(
             f"SensorData.battery: expected 0..100, got {battery}"
@@ -290,12 +290,12 @@ def decode_sensor_frame(raw: bytes, expected_side: str | None = None) -> dict[st
         "packet_seq": struct.unpack_from("<I", raw, 13)[0],
         "timestamp_ms": struct.unpack_from("<Q", raw, 17)[0],
         "pressure": [value / 10000.0 for value in struct.unpack_from("<6H", raw, 25)],
-        "temperature": [value / 100.0 for value in struct.unpack_from("<3h", raw, 37)],
+        "temperature": [value / 100.0 for value in struct.unpack_from("<4h", raw, 37)],
         "acceleration": [
             value * 9.80665 / 1000.0
-            for value in struct.unpack_from("<3h", raw, 43)
+            for value in struct.unpack_from("<3h", raw, 45)
         ],
-        "gyroscope": [value / 10.0 for value in struct.unpack_from("<3h", raw, 49)],
+        "gyroscope": [value / 10.0 for value in struct.unpack_from("<3h", raw, 51)],
         "battery": battery,
         "crc16": stored_crc,
     }

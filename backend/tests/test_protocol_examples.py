@@ -39,10 +39,10 @@ def test_pressure_with_five_channels_is_rejected() -> None:
         validate_foot_frame(frame)
 
 
-def test_temperature_with_four_channels_is_rejected() -> None:
+def test_temperature_with_three_channels_is_rejected() -> None:
     frame = load_frame("left")
-    frame["temperature"].append(30.0)
-    with pytest.raises(ProtocolValidationError, match="array length 3"):
+    frame["temperature"].pop()
+    with pytest.raises(ProtocolValidationError, match="array length 4"):
         validate_foot_frame(frame)
 
 
@@ -76,7 +76,7 @@ def test_pressure_outside_normalized_range_is_rejected() -> None:
 
 def test_reserved_quality_flag_is_rejected() -> None:
     frame = load_frame("left")
-    frame["quality_flags"] = 1 << 15
+    frame["quality_flags"] = 1 << 16
     with pytest.raises(ProtocolValidationError, match="reserved bits"):
         validate_foot_frame(frame)
 
@@ -91,21 +91,21 @@ def test_unsynced_frame_requires_zero_timestamp_and_flag() -> None:
     with pytest.raises(ProtocolValidationError, match="TIME_UNSYNCED"):
         validate_foot_frame(frame)
 
-    frame["quality_flags"] = 0x00000400
+    frame["quality_flags"] = 0x00000800
     validate_foot_frame(frame)
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_standard_58_byte_sensor_vectors_are_valid(side: str) -> None:
+def test_standard_60_byte_sensor_vectors_are_valid(side: str) -> None:
     raw = load_hex(EXAMPLES / f"sensor_frame_{side}_v1.hex")
     decoded = decode_sensor_frame(raw, expected_side=side)
-    assert len(raw) == 58
+    assert len(raw) == 60
     assert decoded["side"] == side
 
 
 def test_sensor_frame_wrong_length_is_rejected() -> None:
     raw = load_hex(EXAMPLES / "sensor_frame_left_v1.hex")
-    with pytest.raises(ProtocolValidationError, match="expected 58 bytes"):
+    with pytest.raises(ProtocolValidationError, match="expected 60 bytes"):
         decode_sensor_frame(raw[:-1], expected_side="left")
 
 

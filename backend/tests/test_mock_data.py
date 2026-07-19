@@ -25,7 +25,7 @@ from tools.generate_mock_data import (  # noqa: E402
 
 SAMPLE_DATA = ROOT / "sample_data"
 PRESSURE_COLUMNS = tuple(f"p{index}" for index in range(1, 7))
-TEMPERATURE_COLUMNS = tuple(f"t{index}" for index in range(1, 4))
+TEMPERATURE_COLUMNS = tuple(f"t{index}" for index in range(1, 5))
 IMU_COLUMNS = ("ax", "ay", "az", "gx", "gy", "gz")
 
 
@@ -91,7 +91,7 @@ def test_protocol_fields_and_ranges(scenario: str) -> None:
     rows = read_rows(SAMPLE_DATA / f"{scenario}.csv")
     for row in rows:
         assert row["protocol_version"] == "1"
-        assert row["sensor_layout_version"] == "layout_6p3t_v1"
+        assert row["sensor_layout_version"] == "layout_6p4t_v1"
         assert row["side"] in {"left", "right"}
         assert row["source"] == "csv_replay"
         assert 0 <= int(row["battery"]) <= 100
@@ -165,9 +165,25 @@ def test_right_load_bias_is_sustained() -> None:
 
 def test_left_forefoot_channels_are_higher_than_heel() -> None:
     rows = rows_by_side(read_rows(SAMPLE_DATA / "left_forefoot_high.csv"))["left"]
-    forefoot = sum(sum(float(row[f"p{index}"]) for index in (1, 2, 3)) for row in rows) / len(rows)
-    heel = sum(sum(float(row[f"p{index}"]) for index in (5, 6)) for row in rows) / len(rows)
-    assert forefoot / 3 > heel / 2 + 0.30
+    forefoot = sum(
+        sum(float(row[f"p{index}"]) for index in (1, 2, 3, 4))
+        for row in rows
+    ) / len(rows)
+    rear = sum(
+        sum(float(row[f"p{index}"]) for index in (5, 6)) for row in rows
+    ) / len(rows)
+    assert forefoot / 4 > rear / 2 + 0.20
+
+
+def test_temperature_rise_is_relative_to_mirrored_region() -> None:
+    grouped = rows_by_side(
+        read_rows(SAMPLE_DATA / "left_temperature_rise.csv")
+    )
+    deltas = [
+        float(left["t2"]) - float(right["t2"])
+        for left, right in zip(grouped["left"], grouped["right"], strict=True)
+    ]
+    assert min(deltas) > 2.5
 
 
 def test_right_disconnect_has_unpaired_left_tail() -> None:

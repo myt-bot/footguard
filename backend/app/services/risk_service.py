@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 from time import time
 
 from sqlalchemy import select
@@ -8,8 +9,11 @@ from sqlalchemy.orm import Session
 
 from ..config import (
     ATTENTION_AFTER_MS,
+    BASELINE_BALANCED_BIAS_MAX,
+    BASELINE_MIN_SAMPLES,
     CONTINUITY_GAP_MS,
-    FOREFOOT_RATIO_THRESHOLD,
+    DEFAULT_PRESSURE_DISTRIBUTION,
+    FOREFOOT_RATIO_DELTA_THRESHOLD,
     LOAD_BIAS_ENTER_THRESHOLD,
     PAIRING_BLOCK_FLAGS,
     PAIRING_WINDOW_MS,
@@ -17,12 +21,15 @@ from ..config import (
     RECOVERY_EFFECTIVE_RATIO,
     RECOVERY_OBSERVATION_MS,
     RECOVERY_PARTIAL_RATIO,
+    REGIONAL_ASYMMETRY_FOR_SEVERE,
+    REGIONAL_SHARE_DELTA_FOR_SEVERE,
+    TEMPERATURE_DELTA_C_THRESHOLD,
     WARNING_AFTER_MS,
 )
 from ..models import Command, InterventionFeedback, RiskEvent, SensorFrame
 from ..repositories.event_repository import active_event, feedback_for_event
 from ..repositories.sensor_repository import latest_frame, recent_frames, to_schema
-from ..schemas import RealtimeResponse, RiskState
+from ..schemas import RegionalAnalysis, RealtimeResponse, RiskState
 from .command_service import ensure_motor_command
 
 
@@ -35,6 +42,21 @@ class PairMetric:
     load_diff: float
     left_forefoot_ratio: float
     right_forefoot_ratio: float
+    left_pressure: tuple[float, ...]
+    right_pressure: tuple[float, ...]
+    left_distribution: tuple[float, ...]
+    right_distribution: tuple[float, ...]
+    temperature_delta_c: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class BaselineProfile:
+    ready: bool
+    load_bias: float
+    left_distribution: tuple[float, ...]
+    right_distribution: tuple[float, ...]
+    pressure_asymmetry: tuple[float, ...]
+    temperature_delta_c: tuple[float, ...]
 
 
 def _valid_pair(left: SensorFrame, right: SensorFrame) -> bool:
@@ -50,6 +72,8 @@ def _valid_pair(left: SensorFrame, right: SensorFrame) -> bool:
 def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
     left_values = [left.p1, left.p2, left.p3, left.p4, left.p5, left.p6]
     right_values = [right.p1, right.p2, right.p3, right.p4, right.p5, right.p6]
+    left_temperature = [left.t1, left.t2, left.t3, left.t4]
+    right_temperature = [right.t1, right.t2, right.t3, right.t4]
     left_total = sum(left_values)
     right_total = sum(right_values)
     total = max(left_total + right_total, 1e-9)
@@ -60,8 +84,18 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
         timestamp_ms=max(left.timestamp_ms, right.timestamp_ms),
         load_bias=bias,
         load_diff=abs(bias),
-        left_forefoot_ratio=sum(left_values[:3]) / max(left_total, 1e-9),
-        right_forefoot_ratio=sum(right_values[:3]) / max(right_total, 1e-9),
+        left_forefoot_ratio=sum(left_values[:4]) / max(left_total, 1e-9),
+        right_forefoot_ratio=sum(right_values[:4]) / max(right_total, 1e-9),
+        left_pressure=tuple(left_values),
+        right_pressure=tuple(right_values),
+        left_distribution=tuple(value / max(left_total, 1e-9) for value in left_values),
+        right_distribution=tuple(value / max(right_total, 1e-9) for value in right_values),
+        temperature_delta_c=tuple(
+            left_value - right_value
+            for left_value, right_value in zip(
+                left_temperature, right_temperature, strict=True
+            )
+        ),
     )
 
 
@@ -76,28 +110,104 @@ def _pair_history(session: Session) -> list[PairMetric]:
     return sorted(metrics, key=lambda item: item.timestamp_ms)
 
 
-def _signal(metric: PairMetric) -> tuple[str, str] | None:
-    if metric.left_forefoot_ratio >= FOREFOOT_RATIO_THRESHOLD:
+def _channel_asymmetry(metric: PairMetric, index: int) -> float:
+    left = metric.left_pressure[index]
+    right = metric.right_pressure[index]
+    return (left - right) / max(left + right, 1e-9)
+
+
+def _median_channels(
+    metrics: list[PairMetric], field: str, channel_count: int
+) -> tuple[float, ...]:
+    return tuple(
+        median(getattr(metric, field)[index] for metric in metrics)
+        for index in range(channel_count)
+    )
+
+
+def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
+    candidates = [
+        metric
+        for metric in metrics
+        if abs(metric.load_bias) <= BASELINE_BALANCED_BIAS_MAX
+        and max(abs(value) for value in metric.temperature_delta_c) < 1.0
+        and max(
+            abs(value - DEFAULT_PRESSURE_DISTRIBUTION[index])
+            for index, value in enumerate(metric.left_distribution)
+        ) < 0.08
+        and max(
+            abs(value - DEFAULT_PRESSURE_DISTRIBUTION[index])
+            for index, value in enumerate(metric.right_distribution)
+        ) < 0.08
+    ]
+    ready = len(candidates) >= BASELINE_MIN_SAMPLES
+    if not ready:
+        return BaselineProfile(
+            ready=False,
+            load_bias=0.0,
+            left_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
+            right_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
+            pressure_asymmetry=(0.0,) * 6,
+            temperature_delta_c=(0.0,) * 4,
+        )
+    return BaselineProfile(
+        ready=True,
+        load_bias=median(metric.load_bias for metric in candidates),
+        left_distribution=_median_channels(candidates, "left_distribution", 6),
+        right_distribution=_median_channels(candidates, "right_distribution", 6),
+        pressure_asymmetry=tuple(
+            median(_channel_asymmetry(metric, index) for metric in candidates)
+            for index in range(6)
+        ),
+        temperature_delta_c=_median_channels(
+            candidates, "temperature_delta_c", 4
+        ),
+    )
+
+
+def _signal(
+    metric: PairMetric, baseline: BaselineProfile
+) -> tuple[str, str] | None:
+    corrected_temperature = [
+        value - baseline.temperature_delta_c[index]
+        for index, value in enumerate(metric.temperature_delta_c)
+    ]
+    hottest = max(corrected_temperature, key=abs)
+    if abs(hottest) >= TEMPERATURE_DELTA_C_THRESHOLD:
+        return "temperature_asymmetry", "left" if hottest > 0 else "right"
+
+    left_forefoot_baseline = sum(baseline.left_distribution[:4])
+    right_forefoot_baseline = sum(baseline.right_distribution[:4])
+    if (
+        metric.left_forefoot_ratio - left_forefoot_baseline
+        >= FOREFOOT_RATIO_DELTA_THRESHOLD
+    ):
         return "forefoot_high", "left"
-    if metric.right_forefoot_ratio >= FOREFOOT_RATIO_THRESHOLD:
+    if (
+        metric.right_forefoot_ratio - right_forefoot_baseline
+        >= FOREFOOT_RATIO_DELTA_THRESHOLD
+    ):
         return "forefoot_high", "right"
-    if metric.load_bias >= LOAD_BIAS_ENTER_THRESHOLD:
+    adjusted_bias = metric.load_bias - baseline.load_bias
+    if adjusted_bias >= LOAD_BIAS_ENTER_THRESHOLD:
         return "left_load_bias", "left"
-    if metric.load_bias <= -LOAD_BIAS_ENTER_THRESHOLD:
+    if adjusted_bias <= -LOAD_BIAS_ENTER_THRESHOLD:
         return "right_load_bias", "right"
     return None
 
 
-def _current_risk(metrics: list[PairMetric]) -> tuple[RiskState, PairMetric]:
+def _current_risk(
+    metrics: list[PairMetric], baseline: BaselineProfile
+) -> tuple[RiskState, PairMetric]:
     latest = metrics[-1]
-    current_signal = _signal(latest)
+    current_signal = _signal(latest, baseline)
     if current_signal is None:
         return RiskState(risk_type="normal", risk_side="none", risk_level=0, duration_ms=0), latest
     start = latest.timestamp_ms
     next_metric = latest
     for metric in reversed(metrics[:-1]):
         if (
-            _signal(metric) != current_signal
+            _signal(metric, baseline) != current_signal
             or metric.sync_id != latest.sync_id
             or next_metric.packet_seq != metric.packet_seq + 1
             or next_metric.timestamp_ms - metric.timestamp_ms > CONTINUITY_GAP_MS
@@ -124,6 +234,64 @@ def _current_risk(metrics: list[PairMetric]) -> tuple[RiskState, PairMetric]:
         risk_level=level,
         duration_ms=duration,
     ), latest
+
+
+def _clamp_score(value: float) -> float:
+    return round(max(0.0, min(1.0, value)), 4)
+
+
+def _regional_analysis(
+    metric: PairMetric, baseline: BaselineProfile
+) -> RegionalAnalysis:
+    left_scores: list[float] = []
+    right_scores: list[float] = []
+    for index in range(6):
+        current_asymmetry = _channel_asymmetry(metric, index)
+        corrected_asymmetry = (
+            current_asymmetry - baseline.pressure_asymmetry[index]
+        )
+        left_share_change = (
+            metric.left_distribution[index] - baseline.left_distribution[index]
+        ) / max(baseline.left_distribution[index], 0.05)
+        right_share_change = (
+            metric.right_distribution[index] - baseline.right_distribution[index]
+        ) / max(baseline.right_distribution[index], 0.05)
+        left_scores.append(
+            _clamp_score(
+                max(
+                    left_share_change / REGIONAL_SHARE_DELTA_FOR_SEVERE,
+                    corrected_asymmetry / REGIONAL_ASYMMETRY_FOR_SEVERE,
+                )
+            )
+        )
+        right_scores.append(
+            _clamp_score(
+                max(
+                    right_share_change / REGIONAL_SHARE_DELTA_FOR_SEVERE,
+                    -corrected_asymmetry / REGIONAL_ASYMMETRY_FOR_SEVERE,
+                )
+            )
+        )
+
+    corrected_temperature = [
+        round(value - baseline.temperature_delta_c[index], 2)
+        for index, value in enumerate(metric.temperature_delta_c)
+    ]
+    return RegionalAnalysis(
+        baseline_ready=baseline.ready,
+        baseline_source="personal" if baseline.ready else "layout_default",
+        left_pressure_scores=left_scores,
+        right_pressure_scores=right_scores,
+        temperature_delta_c=corrected_temperature,
+        left_temperature_scores=[
+            _clamp_score(value / TEMPERATURE_DELTA_C_THRESHOLD)
+            for value in corrected_temperature
+        ],
+        right_temperature_scores=[
+            _clamp_score(-value / TEMPERATURE_DELTA_C_THRESHOLD)
+            for value in corrected_temperature
+        ],
+    )
 
 
 def _recovery_label(before: float, after: float) -> str:
@@ -235,6 +403,26 @@ def _record_risk(
         return
     if metric is None:
         return
+    candidate_started_at_ms = metric.timestamp_ms - risk.duration_ms
+    # A device reconnect/new sync window can start the same risk type after an
+    # earlier command has already expired. Do not reuse that stale event;
+    # otherwise ensure_motor_command would correctly deduplicate the old event
+    # but the new monitoring episode would never receive a motor reminder.
+    if (
+        event is not None
+        and event.risk_type == risk.risk_type
+        and event.risk_side == risk.risk_side
+        and candidate_started_at_ms
+        > event.started_at_ms + CONTINUITY_GAP_MS
+    ):
+        _close_event(
+            session,
+            event,
+            candidate_started_at_ms,
+            event.after_load_diff,
+            "interrupted",
+        )
+        event = None
     if event is not None and (
         event.risk_type != risk.risk_type or event.risk_side != risk.risk_side
     ):
@@ -246,7 +434,7 @@ def _record_risk(
             risk_type=risk.risk_type,
             risk_side=risk.risk_side,
             risk_level=risk.risk_level,
-            started_at_ms=metric.timestamp_ms - risk.duration_ms,
+            started_at_ms=candidate_started_at_ms,
             ended_at_ms=None,
             duration_ms=risk.duration_ms,
             before_load_diff=metric.load_diff,
@@ -289,10 +477,11 @@ def evaluate_risk(
             )
         return RealtimeResponse(
             left=left, right=right, paired_timestamp_ms=None, sync_error_ms=None,
-            load_bias=None, load_diff=None, risk=risk
+            load_bias=None, load_diff=None, risk=risk, regional_analysis=None
         )
     metrics = _pair_history(session)
-    risk, metric = _current_risk(metrics)
+    baseline = _baseline_profile(metrics)
+    risk, metric = _current_risk(metrics, baseline)
     if record:
         _record_risk(
             session, risk, metric, allow_motor_command=allow_motor_command
@@ -305,4 +494,5 @@ def evaluate_risk(
         load_bias=metric.load_bias,
         load_diff=metric.load_diff,
         risk=risk,
+        regional_analysis=_regional_analysis(metric, baseline),
     )
