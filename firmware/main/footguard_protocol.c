@@ -18,10 +18,56 @@ enum {
     TIMESTAMP_MS_OFFSET = 17,
     PRESSURE_OFFSET = 25,
     TEMPERATURE_OFFSET = 37,
-    ACCELERATION_OFFSET = 43,
-    GYROSCOPE_OFFSET = 49,
-    BATTERY_OFFSET = 55
+    ACCELERATION_OFFSET = 45,
+    GYROSCOPE_OFFSET = 51,
+    BATTERY_OFFSET = 57
 };
+
+_Static_assert(FOOTGUARD_PROTOCOL_VERSION == 1,
+               "Unexpected protocol version");
+_Static_assert(FOOTGUARD_LAYOUT_ID_6P4T_V1 == 2,
+               "Unexpected sensor layout ID");
+_Static_assert(MAGIC_OFFSET + 2 == PROTOCOL_VERSION_OFFSET,
+               "magic field layout mismatch");
+_Static_assert(PROTOCOL_VERSION_OFFSET + 1 == LAYOUT_ID_OFFSET,
+               "protocol version field layout mismatch");
+_Static_assert(LAYOUT_ID_OFFSET + 1 == SIDE_OFFSET,
+               "layout ID field layout mismatch");
+_Static_assert(SIDE_OFFSET + 1 == QUALITY_FLAGS_OFFSET,
+               "side field layout mismatch");
+_Static_assert(QUALITY_FLAGS_OFFSET + sizeof(uint32_t) == SYNC_ID_OFFSET,
+               "quality flags field layout mismatch");
+_Static_assert(SYNC_ID_OFFSET + sizeof(uint32_t) == PACKET_SEQ_OFFSET,
+               "sync ID field layout mismatch");
+_Static_assert(PACKET_SEQ_OFFSET + sizeof(uint32_t) == TIMESTAMP_MS_OFFSET,
+               "packet sequence field layout mismatch");
+_Static_assert(TIMESTAMP_MS_OFFSET + sizeof(uint64_t) == PRESSURE_OFFSET,
+               "timestamp field layout mismatch");
+_Static_assert(PRESSURE_OFFSET +
+                       FOOTGUARD_PRESSURE_CHANNEL_COUNT * sizeof(uint16_t) ==
+                   TEMPERATURE_OFFSET,
+               "pressure field layout mismatch");
+_Static_assert(TEMPERATURE_OFFSET +
+                       FOOTGUARD_TEMPERATURE_CHANNEL_COUNT * sizeof(int16_t) ==
+                   ACCELERATION_OFFSET,
+               "temperature field layout mismatch");
+_Static_assert(ACCELERATION_OFFSET +
+                       FOOTGUARD_IMU_AXIS_COUNT * sizeof(int16_t) ==
+                   GYROSCOPE_OFFSET,
+               "acceleration field layout mismatch");
+_Static_assert(GYROSCOPE_OFFSET +
+                       FOOTGUARD_IMU_AXIS_COUNT * sizeof(int16_t) ==
+                   BATTERY_OFFSET,
+               "gyroscope field layout mismatch");
+_Static_assert(BATTERY_OFFSET + sizeof(uint8_t) ==
+                   FOOTGUARD_SENSOR_FRAME_CRC_OFFSET,
+               "battery field layout mismatch");
+_Static_assert(FOOTGUARD_SENSOR_FRAME_CRC_INPUT_SIZE ==
+                   FOOTGUARD_SENSOR_FRAME_CRC_OFFSET,
+               "CRC input length mismatch");
+_Static_assert(FOOTGUARD_SENSOR_FRAME_CRC_OFFSET + sizeof(uint16_t) ==
+                   FOOTGUARD_SENSOR_FRAME_SIZE,
+               "SensorData frame size mismatch");
 
 static void write_u16_le(uint8_t *output, size_t offset, uint16_t value)
 {
@@ -153,7 +199,7 @@ bool footguard_protocol_encode_sensor_data(
     output[MAGIC_OFFSET] = 0x46U;
     output[MAGIC_OFFSET + 1U] = 0x47U;
     output[PROTOCOL_VERSION_OFFSET] = FOOTGUARD_PROTOCOL_VERSION;
-    output[LAYOUT_ID_OFFSET] = FOOTGUARD_LAYOUT_ID_6P3T_V1;
+    output[LAYOUT_ID_OFFSET] = FOOTGUARD_LAYOUT_ID_6P4T_V1;
     output[SIDE_OFFSET] = (uint8_t)sensor_data->side;
     write_u32_le(output, QUALITY_FLAGS_OFFSET, sensor_data->quality_flags);
     write_u32_le(output, SYNC_ID_OFFSET, sensor_data->sync_id);

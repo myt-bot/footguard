@@ -1,8 +1,21 @@
 # FootGuard Firmware
 
 Initial ESP-IDF firmware skeleton for the FootGuard ESP32-S3 devices. The
-project targets ESP-IDF v5.5.4 and uses the native ESP-IDF C framework. BLE and
-sensor drivers are intentionally outside this initial version.
+project targets ESP-IDF v5.5.4 and uses the native ESP-IDF C framework.
+
+## Current scope
+
+This version implements only SensorData protocol encoding and startup
+self-tests for the frozen `layout_6p4t_v1` layout:
+
+- 6 pressure channels and 4 temperature channels per foot
+- `layout_id=2`
+- fixed 60-byte SensorData frames
+- CRC-16/CCITT-FALSE over the first 58 bytes, stored little-endian at bytes
+  58 and 59
+
+BLE, ADC, NTC, FSR, MPU6050, and motor support are not connected. This firmware
+does not yet collect data from real hardware.
 
 ## Device configuration
 
