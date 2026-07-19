@@ -72,3 +72,14 @@ def latest_frame(session: Session, side: str) -> SensorFrame | None:
         .order_by(SensorFrame.timestamp_ms.desc(), SensorFrame.id.desc())
         .limit(1)
     )
+
+
+def recent_frames(session: Session, limit: int = 2_000) -> list[SensorFrame]:
+    descending = list(
+        session.scalars(
+            select(SensorFrame)
+            .order_by(SensorFrame.timestamp_ms.desc(), SensorFrame.id.desc())
+            .limit(limit)
+        )
+    )
+    return list(reversed(descending))

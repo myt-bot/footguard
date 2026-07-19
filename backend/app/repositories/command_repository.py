@@ -27,13 +27,20 @@ def to_schema(command: Command) -> DeviceCommand:
     )
 
 
-def create_command(session: Session, payload: DeviceCommand, created_at_ms: int) -> Command:
+def create_command(
+    session: Session,
+    payload: DeviceCommand,
+    created_at_ms: int,
+    event_id: str | None = None,
+) -> Command:
     existing = session.get(Command, payload.command_id)
     if existing is not None:
         if to_schema(existing) == payload:
             return existing
         raise CommandConflictError("command_id already exists with different content")
-    command = Command(**payload.model_dump(), created_at_ms=created_at_ms)
+    command = Command(
+        **payload.model_dump(), created_at_ms=created_at_ms, event_id=event_id
+    )
     session.add(command)
     session.commit()
     session.refresh(command)

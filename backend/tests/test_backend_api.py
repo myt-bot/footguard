@@ -91,7 +91,7 @@ def test_realtime_pairs_same_sync_id(client: TestClient) -> None:
     result = response.json()
     assert result["sync_error_ms"] == 20
     assert result["paired_timestamp_ms"] == 1760000000020
-    assert result["load_diff"] == pytest.approx(0.06)
+    assert result["load_diff"] == pytest.approx(0.06 / 2.94)
     assert result["risk"]["risk_type"] == "normal"
 
 

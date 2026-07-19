@@ -23,3 +23,21 @@ def add_feedback(
     session.commit()
     session.refresh(feedback)
     return feedback
+
+
+def active_event(session: Session) -> RiskEvent | None:
+    return session.scalar(
+        select(RiskEvent)
+        .where(RiskEvent.status == "active")
+        .order_by(RiskEvent.started_at_ms.desc())
+        .limit(1)
+    )
+
+
+def feedback_for_event(session: Session, event_id: str) -> InterventionFeedback | None:
+    return session.scalar(
+        select(InterventionFeedback)
+        .where(InterventionFeedback.event_id == event_id)
+        .order_by(InterventionFeedback.id.desc())
+        .limit(1)
+    )

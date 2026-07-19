@@ -66,6 +66,7 @@ class Command(Base):
     __tablename__ = "commands"
 
     command_id: Mapped[str] = mapped_column(String(52), primary_key=True)
+    event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     protocol_version: Mapped[int] = mapped_column(Integer, default=1)
     target: Mapped[str] = mapped_column(String(5), index=True)
     pattern: Mapped[str] = mapped_column(String(8))
