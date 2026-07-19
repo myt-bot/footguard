@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +19,7 @@ from tools.validate_protocol import (
     main,
     validate_foot_frame,
 )
+from backend.app.schemas import FootFrame
 
 
 EXAMPLES = ROOT / "protocol" / "examples"
@@ -79,6 +81,20 @@ def test_reserved_quality_flag_is_rejected() -> None:
     frame["quality_flags"] = 1 << 16
     with pytest.raises(ProtocolValidationError, match="reserved bits"):
         validate_foot_frame(frame)
+
+
+def test_packet_gap_quality_flag_is_accepted_by_backend_model() -> None:
+    frame = load_frame("left")
+    frame["quality_flags"] = 0x00008000
+    parsed = FootFrame.model_validate(frame)
+    assert parsed.quality_flags == 0x00008000
+
+
+def test_reserved_bit_16_is_rejected_by_backend_model() -> None:
+    frame = load_frame("left")
+    frame["quality_flags"] = 0x00010000
+    with pytest.raises(ValidationError, match="reserved bits"):
+        FootFrame.model_validate(frame)
 
 
 def test_unsynced_frame_requires_zero_timestamp_and_flag() -> None:

@@ -84,8 +84,8 @@ def temperature_channels(
 ) -> list[float]:
     side_offset = 0.05 if side == "left" else -0.05
     drift = 0.08 * math.sin(2.0 * math.pi * time_s / 30.0)
-    # T1=forefoot lateral, T2=forefoot medial, T3=heel centre,
-    # T4=midfoot medial.
+    # T1=forefoot lateral, T2=hallux/first metatarsal head adjacent,
+    # T3=heel centre, T4=central midfoot.
     bases = (30.7, 30.8, 30.4, 30.6)
     hotspot = (0.0, 2.8, 0.0, 0.0) if scenario == "left_temperature_rise" and side == "left" else (0.0,) * 4
     return [
