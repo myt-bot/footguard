@@ -33,7 +33,7 @@ class FootPressureView extends StatelessWidget {
     0.17,
   ];
   static const _pressureZones = <String>[
-    '趾端区',
+    '拇趾区',
     '前掌外侧',
     '前掌中央',
     '前掌内侧',
@@ -42,9 +42,9 @@ class FootPressureView extends StatelessWidget {
   ];
   static const _temperatureZones = <String>[
     '前掌外侧',
-    '前掌内侧',
+    '拇趾/第一跖骨头邻近',
     '足跟中央',
-    '中足内侧',
+    '中足中央',
   ];
 
   List<double> get _fallbackPressureScores {
@@ -513,8 +513,11 @@ class _FootMapPainter extends CustomPainter {
   Offset _temperaturePosition(Size size, int index) {
     const left = <Offset>[
       // Coordinates measured proportionally from the approved insole diagram.
-      // T1: forefoot lateral; T2: forefoot medial; T3: heel centre;
-      // T4: midfoot medial. The right foot mirrors these x coordinates.
+      // T1: forefoot lateral
+      // T2: hallux / first metatarsal head adjacent
+      // T3: heel centre
+      // T4: central midfoot
+      // The right foot mirrors these x coordinates.
       Offset(0.290, 0.215),
       Offset(0.690, 0.158),
       Offset(0.505, 0.842),

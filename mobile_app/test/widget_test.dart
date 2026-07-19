@@ -74,10 +74,11 @@ void main() {
     expect(find.text('左脚压力与温度分布'), findsOneWidget);
     // The risk badge and the severity legend both display this label.
     expect(find.text('严重异常'), findsNWidgets(2));
-    expect(find.textContaining('趾端区'), findsOneWidget);
+    expect(find.textContaining('拇趾区'), findsOneWidget);
     expect(find.textContaining('前掌外侧'), findsWidgets);
     expect(find.text('T1 前掌外侧'), findsOneWidget);
-    expect(find.text('T4 中足内侧'), findsOneWidget);
+    expect(find.text('T2 拇趾/第一跖骨头邻近'), findsOneWidget);
+    expect(find.text('T4 中足中央'), findsOneWidget);
     expect(find.textContaining('P1'), findsNothing);
   });
 }

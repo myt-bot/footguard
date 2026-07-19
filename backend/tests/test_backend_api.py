@@ -106,6 +106,49 @@ def test_realtime_rejects_mismatched_sync_id(client: TestClient) -> None:
     assert result["load_bias"] is None
 
 
+@pytest.mark.parametrize(
+    ("temperature_index", "invalid_flag"),
+    [
+        pytest.param(0, 0x00000040, id="T1"),
+        pytest.param(1, 0x00000080, id="T2"),
+        pytest.param(2, 0x00000100, id="T3"),
+        pytest.param(3, 0x00000200, id="T4"),
+    ],
+)
+def test_temperature_invalid_flag_blocks_pairing(
+    temperature_index: int,
+    invalid_flag: int,
+    client: TestClient,
+) -> None:
+    payload = sensor_batch()
+    payload["frames"][0]["temperature"][temperature_index] = 0.0
+    payload["frames"][0]["quality_flags"] = invalid_flag
+
+    response = client.post("/api/v1/sensor/batch", json=payload)
+    assert response.status_code == 200
+    assert response.json()["latest_risk"] == "data_incomplete"
+
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["risk"]["risk_type"] == "data_incomplete"
+    assert realtime["regional_analysis"] is None
+
+
+def test_low_battery_does_not_block_pressure_or_temperature_pairing(
+    client: TestClient,
+) -> None:
+    payload = sensor_batch()
+    payload["frames"][0]["quality_flags"] = 0x00001000
+
+    response = client.post("/api/v1/sensor/batch", json=payload)
+    assert response.status_code == 200
+    assert response.json()["latest_risk"] == "normal"
+
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["risk"]["risk_type"] == "normal"
+    assert realtime["paired_timestamp_ms"] == 1760000000020
+    assert realtime["regional_analysis"] is not None
+
+
 def test_events_are_returned_newest_first(client: TestClient, app) -> None:
     with app.state.session_factory() as session:
         session.add_all(

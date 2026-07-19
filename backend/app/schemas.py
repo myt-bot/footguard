@@ -49,7 +49,7 @@ class FootFrame(StrictModel):
 
     @model_validator(mode="after")
     def check_sync_and_reserved_flags(self) -> "FootFrame":
-        if self.quality_flags & 0xFFFF8000:
+        if self.quality_flags & 0xFFFF0000:
             raise ValueError("quality_flags reserved bits must be zero")
         if self.sync_id == 0 and (
             self.timestamp_ms != 0 or not self.quality_flags & 0x00000800
