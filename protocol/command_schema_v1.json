@@ -46,6 +46,7 @@
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "temperature_asymmetry",
         "risk_persisted",
         "cancel"
       ]

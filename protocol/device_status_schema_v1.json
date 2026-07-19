@@ -35,7 +35,7 @@
     },
     "sensor_layout_version": {
       "type": "string",
-      "const": "layout_6p3t_v1"
+      "const": "layout_6p4t_v1"
     },
     "battery": {
       "type": "integer",
