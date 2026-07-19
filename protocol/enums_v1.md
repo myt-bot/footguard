@@ -87,6 +87,7 @@ ESP32 不得在 AckEvent 中返回 pending 或 sent。
 - left_load_bias
 - right_load_bias
 - forefoot_high
+- temperature_asymmetry
 - data_incomplete
 
 ## risk_side
@@ -125,12 +126,13 @@ ESP32 不得在 AckEvent 中返回 pending 或 sent。
 | 6 | 0x00000040 | TEMPERATURE_T1_INVALID | T1 无效 |
 | 7 | 0x00000080 | TEMPERATURE_T2_INVALID | T2 无效 |
 | 8 | 0x00000100 | TEMPERATURE_T3_INVALID | T3 无效 |
-| 9 | 0x00000200 | IMU_INVALID | IMU 无效 |
-| 10 | 0x00000400 | TIME_UNSYNCED | 时间未同步 |
-| 11 | 0x00000800 | LOW_BATTERY | 低电量 |
-| 12 | 0x00001000 | CALIBRATION_INVALID | 标定无效 |
-| 13 | 0x00002000 | SENSOR_STUCK | 传感器疑似卡死 |
-| 14 | 0x00004000 | PACKET_GAP | 数据包序号跳变 |
-| 15～31 | - | RESERVED | 保留，发送端必须置 0 |
+| 9 | 0x00000200 | TEMPERATURE_T4_INVALID | T4 无效 |
+| 10 | 0x00000400 | IMU_INVALID | IMU 无效 |
+| 11 | 0x00000800 | TIME_UNSYNCED | 时间未同步 |
+| 12 | 0x00001000 | LOW_BATTERY | 低电量 |
+| 13 | 0x00002000 | CALIBRATION_INVALID | 标定无效 |
+| 14 | 0x00004000 | SENSOR_STUCK | 传感器疑似卡死 |
+| 15 | 0x00008000 | PACKET_GAP | 数据包序号跳变 |
+| 16～31 | - | RESERVED | 保留，发送端必须置 0 |
 
 quality_flags=0 表示当前帧未发现质量异常。接收端发现保留位非 0 时应记录协议告警；v1 不把未知保留位解释为已知状态。

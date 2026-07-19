@@ -34,6 +34,8 @@
 
 frames 中每一项符合 field_dictionary.md，允许左右帧交错。
 
+当前唯一支持的布局是 `layout_6p4t_v1`，即每帧 `pressure[6]` 和 `temperature[4]`。
+
 校验规则：
 
 1. 外层 protocol_version 必须为 1。
@@ -63,6 +65,7 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
   "sync_error_ms": null,
   "load_bias": null,
   "load_diff": null,
+  "regional_analysis": null,
   "risk": {
     "risk_type": "data_incomplete",
     "risk_side": "none",
@@ -71,6 +74,8 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
   }
 }
 ~~~
+
+双足配对有效时，`regional_analysis` 返回六个压力区域分数、四个温度区域分数、左右同区温差以及基线状态。压力分数由足内占比变化和左右同区差异计算，不是原始压力固定阈值；`baseline_source=personal` 表示已获得至少 10 对稳定帧的个人基线。
 
 ## GET /api/v1/events
 

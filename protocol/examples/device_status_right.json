@@ -3,7 +3,7 @@
   "firmware_version": "0.1.0",
   "device_id": "foot_right_001",
   "side": "right",
-  "sensor_layout_version": "layout_6p3t_v1",
+  "sensor_layout_version": "layout_6p4t_v1",
   "battery": 93,
   "state": "streaming",
   "error_code": "none",

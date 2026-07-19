@@ -4,6 +4,7 @@
 *.py[cod]
 .pytest_cache/
 .env
+backend/data/*.db
 
 # ESP-IDF
 firmware/build/
