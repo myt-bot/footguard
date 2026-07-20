@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../data/api_client.dart';
+import '../models/ble_connection_state.dart';
 import '../models/ble_scan_device.dart';
 import '../models/foot_frame.dart';
+import '../services/ble_connection_service.dart';
 import '../services/ble_scanner_service.dart';
 
 class DeviceScreen extends StatefulWidget {
@@ -12,10 +14,12 @@ class DeviceScreen extends StatefulWidget {
     super.key,
     required this.backendUrl,
     this.scanner,
+    this.connectionService,
   });
 
   final String backendUrl;
   final BleScannerService? scanner;
+  final BleConnectionService? connectionService;
 
   @override
   State<DeviceScreen> createState() => _DeviceScreenState();
@@ -24,10 +28,15 @@ class DeviceScreen extends StatefulWidget {
 class _DeviceScreenState extends State<DeviceScreen> {
   late final BleScannerService _scanner;
   late final bool _ownsScanner;
+  late final BleConnectionService _connectionService;
+  late final bool _ownsConnectionService;
   late final Future<RealtimeSnapshot> _backendSnapshot;
   StreamSubscription<BleScanSnapshot>? _snapshotSubscription;
   StreamSubscription<String?>? _errorSubscription;
+  StreamSubscription<BleConnectionsSnapshot>? _connectionSubscription;
   BleScanSnapshot _scan = const BleScanSnapshot.empty();
+  BleConnectionsSnapshot _connections =
+      const BleConnectionsSnapshot.disconnected();
   String? _scanError;
 
   @override
@@ -35,7 +44,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
     super.initState();
     _ownsScanner = widget.scanner == null;
     _scanner = widget.scanner ?? BleScannerService();
+    _ownsConnectionService = widget.connectionService == null;
+    _connectionService = widget.connectionService ?? BleConnectionService();
     _scan = _scanner.current;
+    _connections = _connectionService.current;
     _snapshotSubscription = _scanner.snapshots.listen((snapshot) {
       if (mounted) {
         setState(() => _scan = snapshot);
@@ -44,6 +56,11 @@ class _DeviceScreenState extends State<DeviceScreen> {
     _errorSubscription = _scanner.errors.listen((message) {
       if (mounted) {
         setState(() => _scanError = message);
+      }
+    });
+    _connectionSubscription = _connectionService.snapshots.listen((snapshot) {
+      if (mounted) {
+        setState(() => _connections = snapshot);
       }
     });
     final api = FootGuardApiClient(baseUrl: widget.backendUrl);
@@ -67,12 +84,34 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   Future<void> _stopScan() => _scanner.stopScan();
 
+  Future<void> _connect(FootSide side) async {
+    final device = side == FootSide.left ? _scan.left : _scan.right;
+    if (device == null) {
+      return;
+    }
+    if (_scan.isScanning) {
+      await _scanner.stopScan();
+    }
+    try {
+      await _connectionService.connect(device);
+    } catch (_) {
+      // BleConnectionService publishes the user-facing failure state.
+    }
+  }
+
+  Future<void> _disconnect(FootSide side) =>
+      _connectionService.disconnect(side);
+
   @override
   void dispose() {
     _snapshotSubscription?.cancel();
     _errorSubscription?.cancel();
+    _connectionSubscription?.cancel();
     if (_ownsScanner) {
       unawaited(_scanner.dispose());
+    }
+    if (_ownsConnectionService) {
+      unawaited(_connectionService.dispose());
     }
     super.dispose();
   }
@@ -100,12 +139,18 @@ class _DeviceScreenState extends State<DeviceScreen> {
           title: '左脚BLE设备',
           expectedName: 'FootGuard-L',
           device: _scan.left,
+          connection: _connections.left,
+          onConnect: () => _connect(FootSide.left),
+          onDisconnect: () => _disconnect(FootSide.left),
         ),
         const SizedBox(height: 10),
         _BleDeviceCard(
           title: '右脚BLE设备',
           expectedName: 'FootGuard-R',
           device: _scan.right,
+          connection: _connections.right,
+          onConnect: () => _connect(FootSide.right),
+          onDisconnect: () => _disconnect(FootSide.right),
         ),
         const SizedBox(height: 20),
         Text(
@@ -229,15 +274,33 @@ class _BleDeviceCard extends StatelessWidget {
     required this.title,
     required this.expectedName,
     required this.device,
+    required this.connection,
+    required this.onConnect,
+    required this.onDisconnect,
   });
 
   final String title;
   final String expectedName;
   final BleScanDevice? device;
+  final BleConnectionInfo connection;
+  final Future<void> Function() onConnect;
+  final Future<void> Function() onDisconnect;
 
   @override
   Widget build(BuildContext context) {
     final found = device != null;
+    final busy = connection.state == BleLinkState.connecting ||
+        connection.state == BleLinkState.discovering;
+    final connected = connection.state == BleLinkState.ready;
+    final canDisconnect = connection.state != BleLinkState.disconnected;
+    final status = connection.deviceStatus;
+    final stateLabel = switch (connection.state) {
+      BleLinkState.disconnected => found ? '已发现' : '未发现',
+      BleLinkState.connecting => '连接中',
+      BleLinkState.discovering => '校验服务',
+      BleLinkState.ready => '已连接',
+      BleLinkState.error => '连接失败',
+    };
     return Card(
       elevation: 0,
       child: Padding(
@@ -248,9 +311,12 @@ class _BleDeviceCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  found ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                  color:
-                      found ? const Color(0xFF147D73) : const Color(0xFF718096),
+                  connected
+                      ? Icons.bluetooth_connected
+                      : Icons.bluetooth_disabled,
+                  color: connected
+                      ? const Color(0xFF147D73)
+                      : const Color(0xFF718096),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -262,20 +328,66 @@ class _BleDeviceCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                Chip(label: Text(found ? '已发现' : '未发现')),
+                Chip(label: Text(stateLabel)),
               ],
             ),
             const Divider(),
             Text('广播名称：${device?.name ?? expectedName}'),
             Text('remoteId：${device?.remoteId ?? '--'}'),
             Text('信号强度：${device == null ? '--' : '${device!.rssi} dBm'}'),
-            const SizedBox(height: 6),
-            Text(
-              found ? '已发现，尚未建立GATT连接' : '等待扫描结果',
-              style: const TextStyle(
-                color: Color(0xFF718096),
-                fontSize: 12,
+            if (connected && status != null) ...[
+              const SizedBox(height: 8),
+              Text('MTU：${connection.mtu}'),
+              Text('device_id：${status.deviceId}'),
+              Text('固件版本：${status.firmwareVersion}'),
+              Text('电量：${status.battery}%'),
+              Text('设备状态：${status.state}'),
+              Text('时间同步：${status.timeSynced ? '已同步' : '未同步'}'),
+            ] else ...[
+              const SizedBox(height: 6),
+              Text(
+                connection.error ?? (found ? '已发现，尚未建立GATT连接' : '等待扫描结果'),
+                style: TextStyle(
+                  color: connection.state == BleLinkState.error
+                      ? const Color(0xFFB54A42)
+                      : const Color(0xFF718096),
+                  fontSize: 12,
+                ),
               ),
+            ],
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    key: ValueKey('connect_$expectedName'),
+                    onPressed: found && !busy && !connected ? onConnect : null,
+                    icon: busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.link),
+                    label: Text(
+                      busy
+                          ? '连接中'
+                          : connection.state == BleLinkState.error
+                              ? '重新连接'
+                              : '连接',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: ValueKey('disconnect_$expectedName'),
+                    onPressed: canDisconnect ? onDisconnect : null,
+                    icon: const Icon(Icons.link_off),
+                    label: const Text('断开'),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
