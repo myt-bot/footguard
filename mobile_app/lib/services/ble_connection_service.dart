@@ -102,13 +102,42 @@ class BleConnectionService {
       };
       _characteristics[side] = characteristics;
 
-      final statusBytes =
-          await characteristics[FootGuardGatt.deviceStatusUuid]!.read();
+      final statusCharacteristic =
+          characteristics[FootGuardGatt.deviceStatusUuid]!;
+      final statusBytes = await statusCharacteristic.read();
       final expectedSide = side == FootSide.left ? 'left' : 'right';
-      final status = _codec.decodeDeviceStatus(
+      var status = _codec.decodeDeviceStatus(
         statusBytes,
         expectedSide: expectedSide,
       );
+
+      if (!status.timeSynced) {
+        final unixTimeMs = DateTime.now().millisecondsSinceEpoch;
+        var syncId = unixTimeMs & 0xFFFFFFFF;
+        if (syncId == 0) {
+          syncId = 1;
+        }
+        final payload = _codec.encodeTimeSync(
+          syncId: syncId,
+          unixTimeMs: unixTimeMs,
+        );
+        await characteristics[FootGuardGatt.timeSyncUuid]!.write(
+          payload,
+          withoutResponse: false,
+        );
+
+        final refreshedStatusBytes = await statusCharacteristic.read();
+        status = _codec.decodeDeviceStatus(
+          refreshedStatusBytes,
+          expectedSide: expectedSide,
+        );
+        if (!status.timeSynced || status.syncId != syncId) {
+          throw const BleConnectionException(
+            'time_sync_failed',
+            'TimeSync写入后设备未确认时间同步',
+          );
+        }
+      }
       _emit(BleConnectionInfo(
         side: side,
         state: BleLinkState.ready,
