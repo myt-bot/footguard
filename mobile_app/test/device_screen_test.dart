@@ -52,6 +52,11 @@ void main() {
   testWidgets('device page starts scanning and shows a discovered left foot', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(430, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     final scanner = _FakeScanner();
     await tester.pumpWidget(
       MaterialApp(
@@ -64,8 +69,7 @@ void main() {
       ),
     );
 
-    expect(find.text('FootGuard-L'), findsOneWidget);
-    expect(find.text('FootGuard-R'), findsOneWidget);
+    expect(find.text('双足设备'), findsOneWidget);
     await tester.tap(find.text('开始扫描'));
     await tester.pump();
     expect(find.text('正在搜索FootGuard设备…'), findsOneWidget);
@@ -83,13 +87,22 @@ void main() {
     );
     await tester.pump();
 
+    await tester.tap(find.text('停止扫描'));
+    await tester.pump();
+    expect(scanner.stopCalled, isTrue);
+
+    await tester.scrollUntilVisible(
+      find.text('广播名称：FootGuard-L'),
+      100,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text('广播名称：FootGuard-L'), findsOneWidget);
     expect(find.text('remoteId：AA:BB:CC:DD:EE:01'), findsOneWidget);
     expect(find.text('信号强度：-48 dBm'), findsOneWidget);
     expect(find.text('已发现，尚未建立GATT连接'), findsOneWidget);
 
-    await tester.tap(find.text('停止扫描'));
-    await tester.pump();
-    expect(scanner.stopCalled, isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
     await scanner.dispose();
   });
 }
