@@ -41,6 +41,10 @@ static int gatt_access_handler(uint16_t conn_handle,
                                uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *context,
                                void *arg);
+static int notify_only_access_handler(uint16_t conn_handle,
+                                      uint16_t attr_handle,
+                                      struct ble_gatt_access_ctxt *context,
+                                      void *arg);
 
 static const struct ble_gatt_svc_def s_gatt_services[] = {
     {
@@ -49,6 +53,7 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
                 .uuid = &s_sensor_data_uuid.u,
+                .access_cb = notify_only_access_handler,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_sensor_data_handle
             },
@@ -72,6 +77,7 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
             },
             {
                 .uuid = &s_ack_event_uuid.u,
+                .access_cb = notify_only_access_handler,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_ack_event_handle
             },
@@ -257,6 +263,25 @@ static int gatt_access_handler(uint16_t conn_handle,
     }
 
     return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int notify_only_access_handler(uint16_t conn_handle,
+                                      uint16_t attr_handle,
+                                      struct ble_gatt_access_ctxt *context,
+                                      void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    }
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+
+    return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
 }
 
 int footguard_gatt_register(
