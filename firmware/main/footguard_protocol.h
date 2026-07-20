@@ -17,6 +17,7 @@ enum {
 };
 
 #define FOOTGUARD_SENSOR_LAYOUT_VERSION "layout_6p4t_v1"
+#define FOOTGUARD_QUALITY_TIME_UNSYNCED UINT32_C(0x00000800)
 
 typedef enum {
     FOOTGUARD_SIDE_LEFT = 0,
