@@ -8,6 +8,8 @@ import 'ble_control_codec.dart';
 import 'ble_frame_parser.dart';
 import 'ble_gatt.dart';
 import 'ble_gatt_profile_validator.dart';
+import 'ble_known_device_store.dart';
+import 'ble_reconnect_policy.dart';
 
 class BleConnectionException implements Exception {
   const BleConnectionException(this.code, this.message);
@@ -20,18 +22,35 @@ class BleConnectionException implements Exception {
 }
 
 class BleConnectionService {
-  BleConnectionService({BleControlCodec? codec, BleFrameParser? frameParser})
-      : _codec = codec ?? const BleControlCodec(),
-        _frameParser = frameParser ?? const BleFrameParser();
+  BleConnectionService({
+    BleControlCodec? codec,
+    BleFrameParser? frameParser,
+    BleKnownDeviceStore? knownDeviceStore,
+    BleReconnectPolicy reconnectPolicy = const BleReconnectPolicy(),
+  })  : _codec = codec ?? const BleControlCodec(),
+        _frameParser = frameParser ?? const BleFrameParser(),
+        _knownDeviceStore =
+            knownDeviceStore ?? const SharedPreferencesBleKnownDeviceStore(),
+        _reconnectPolicy = reconnectPolicy {
+    unawaited(_restoreKnownDevices());
+  }
 
   final BleControlCodec _codec;
   final BleFrameParser _frameParser;
+  final BleKnownDeviceStore _knownDeviceStore;
+  final BleReconnectPolicy _reconnectPolicy;
   final _snapshots = StreamController<BleConnectionsSnapshot>.broadcast();
   final _devices = <FootSide, BluetoothDevice>{};
   final _connectionSubscriptions =
       <FootSide, StreamSubscription<BluetoothConnectionState>>{};
   final _sensorSubscriptions = <FootSide, StreamSubscription<List<int>>>{};
   final _characteristics = <FootSide, Map<String, BluetoothCharacteristic>>{};
+  final _knownDevices = <FootSide, BleScanDevice>{};
+  final _autoReconnectSides = <FootSide>{};
+  final _connectInProgress = <FootSide>{};
+  final _disconnectHandling = <FootSide>{};
+  final _reconnectAttempts = <FootSide, int>{};
+  final _reconnectTimers = <FootSide, Timer>{};
 
   BleConnectionsSnapshot _current = const BleConnectionsSnapshot.disconnected();
   bool _disposed = false;
@@ -42,20 +61,42 @@ class BleConnectionService {
   Future<void> connect(BleScanDevice scanned) async {
     _ensureActive();
     final side = scanned.side;
-    await disconnect(side);
+    _knownDevices[side] = scanned;
+    _autoReconnectSides.add(side);
+    _reconnectAttempts[side] = 0;
+    try {
+      await _knownDeviceStore.save(scanned);
+    } catch (_) {
+      // The current connection can still proceed when persistence is unavailable.
+    }
+    await _connect(scanned, isReconnect: false);
+  }
+
+  Future<void> _connect(
+    BleScanDevice scanned, {
+    required bool isReconnect,
+  }) async {
+    final side = scanned.side;
+    if (_connectInProgress.contains(side)) {
+      return;
+    }
+    _connectInProgress.add(side);
+    _reconnectTimers.remove(side)?.cancel();
+    await _clearTransport(side);
     _emit(BleConnectionInfo(
       side: side,
-      state: BleLinkState.connecting,
+      state: isReconnect ? BleLinkState.reconnecting : BleLinkState.connecting,
       remoteId: scanned.remoteId,
+      error: isReconnect ? '正在自动重连${_sideLabel(side)}设备' : null,
     ));
 
     final device = BluetoothDevice.fromId(scanned.remoteId);
     _devices[side] = device;
     _connectionSubscriptions[side] = device.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected &&
-          _current.forSide(side).state != BleLinkState.error) {
-        _characteristics.remove(side);
-        _emit(BleConnectionInfo.disconnected(side));
+          !_connectInProgress.contains(side) &&
+          _autoReconnectSides.contains(side)) {
+        unawaited(_handleUnexpectedDisconnect(side));
       }
     });
 
@@ -65,6 +106,10 @@ class BleConnectionService {
           license: License.nonprofit,
           mtu: null,
         );
+      }
+      if (!_autoReconnectSides.contains(side)) {
+        await _clearTransport(side);
+        return;
       }
       _emit(BleConnectionInfo(
         side: side,
@@ -142,6 +187,10 @@ class BleConnectionService {
           );
         }
       }
+      if (!_autoReconnectSides.contains(side)) {
+        await _clearTransport(side);
+        return;
+      }
       _emit(BleConnectionInfo(
         side: side,
         state: BleLinkState.ready,
@@ -162,18 +211,31 @@ class BleConnectionService {
         onError: (Object error) => _handleSensorError(side, error),
       );
       await sensorCharacteristic.setNotifyValue(true);
+      _reconnectAttempts[side] = 0;
     } catch (error) {
+      if (!_autoReconnectSides.contains(side)) {
+        await _clearTransport(side);
+        return;
+      }
       final message = error is BleConnectionException
           ? error.message
           : 'BLE连接或服务发现失败：$error';
-      _emit(BleConnectionInfo(
-        side: side,
-        state: BleLinkState.error,
-        remoteId: scanned.remoteId,
-        error: message,
-      ));
-      await device.disconnect();
-      rethrow;
+      await _clearTransport(side);
+      if (_autoReconnectSides.contains(side)) {
+        _scheduleReconnect(side, reason: message);
+      } else {
+        _emit(BleConnectionInfo(
+          side: side,
+          state: BleLinkState.error,
+          remoteId: scanned.remoteId,
+          error: message,
+        ));
+      }
+      if (!isReconnect) {
+        rethrow;
+      }
+    } finally {
+      _connectInProgress.remove(side);
     }
   }
 
@@ -184,6 +246,20 @@ class BleConnectionService {
       _characteristics[side]?[uuid.toLowerCase()];
 
   Future<void> disconnect(FootSide side) async {
+    _autoReconnectSides.remove(side);
+    _knownDevices.remove(side);
+    _reconnectAttempts.remove(side);
+    _reconnectTimers.remove(side)?.cancel();
+    try {
+      await _knownDeviceStore.remove(side);
+    } catch (_) {
+      // Manual disconnect still takes effect when persistence is unavailable.
+    }
+    await _clearTransport(side);
+    _emit(BleConnectionInfo.disconnected(side));
+  }
+
+  Future<void> _clearTransport(FootSide side) async {
     await _sensorSubscriptions.remove(side)?.cancel();
     await _connectionSubscriptions.remove(side)?.cancel();
     _characteristics.remove(side);
@@ -191,8 +267,73 @@ class BleConnectionService {
     if (device != null && device.isConnected) {
       await device.disconnect();
     }
-    _emit(BleConnectionInfo.disconnected(side));
   }
+
+  Future<void> _restoreKnownDevices() async {
+    for (final side in FootSide.values) {
+      try {
+        final known = await _knownDeviceStore.load(side);
+        if (_disposed || known == null) {
+          continue;
+        }
+        _knownDevices[side] = known;
+        _autoReconnectSides.add(side);
+        _reconnectAttempts[side] = 0;
+        _scheduleReconnect(side, immediate: true, reason: '正在恢复上次连接');
+      } catch (_) {
+        // Start normally when no saved device is available.
+      }
+    }
+  }
+
+  Future<void> _handleUnexpectedDisconnect(FootSide side) async {
+    if (_disposed ||
+        !_autoReconnectSides.contains(side) ||
+        _disconnectHandling.contains(side)) {
+      return;
+    }
+    _disconnectHandling.add(side);
+    try {
+      await _clearTransport(side);
+      _scheduleReconnect(side, reason: '${_sideLabel(side)}设备连接已中断');
+    } finally {
+      _disconnectHandling.remove(side);
+    }
+  }
+
+  void _scheduleReconnect(
+    FootSide side, {
+    bool immediate = false,
+    String? reason,
+  }) {
+    if (_disposed || !_autoReconnectSides.contains(side)) {
+      return;
+    }
+    final known = _knownDevices[side];
+    if (known == null) {
+      return;
+    }
+    _reconnectTimers.remove(side)?.cancel();
+    final attempt = (_reconnectAttempts[side] ?? 0) + 1;
+    _reconnectAttempts[side] = attempt;
+    final delay =
+        immediate ? Duration.zero : _reconnectPolicy.delayForAttempt(attempt);
+    final delayText =
+        delay == Duration.zero ? '立即重连' : '${delay.inSeconds}秒后重连';
+    _emit(BleConnectionInfo(
+      side: side,
+      state: BleLinkState.reconnecting,
+      remoteId: known.remoteId,
+      error: '${reason ?? '连接失败'}，$delayText（第$attempt次）',
+    ));
+    _reconnectTimers[side] = Timer(
+      delay,
+      () => unawaited(_connect(known, isReconnect: true)),
+    );
+  }
+
+  static String _sideLabel(FootSide side) =>
+      side == FootSide.left ? '左脚' : '右脚';
 
   void _handleSensorData({
     required FootSide side,
@@ -239,9 +380,14 @@ class BleConnectionService {
     if (_disposed) {
       return;
     }
-    await disconnect(FootSide.left);
-    await disconnect(FootSide.right);
     _disposed = true;
+    _autoReconnectSides.clear();
+    for (final timer in _reconnectTimers.values) {
+      timer.cancel();
+    }
+    _reconnectTimers.clear();
+    await _clearTransport(FootSide.left);
+    await _clearTransport(FootSide.right);
     await _snapshots.close();
   }
 }

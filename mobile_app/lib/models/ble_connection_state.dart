@@ -5,6 +5,7 @@ import 'foot_frame.dart';
 enum BleLinkState {
   disconnected,
   connecting,
+  reconnecting,
   discovering,
   ready,
   error,
