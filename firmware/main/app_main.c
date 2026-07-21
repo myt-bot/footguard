@@ -7,7 +7,7 @@
 #include "footguard_ntc.h"
 #include "footguard_protocol_selftest.h"
 #include "footguard_command.h"
-#include "footguard_command_executor.h"
+#include "footguard_command_service.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -177,9 +177,9 @@ void app_main(void)
         return;
     }
 
-    error = footguard_command_executor_init(NULL);
+    error = footguard_command_service_init();
     if (error != ESP_OK) {
-        ESP_LOGE(TAG, "Command executor initialization failed: %s",
+        ESP_LOGE(TAG, "Command service initialization failed: %s",
                  esp_err_to_name(error));
         return;
     }

@@ -4,6 +4,7 @@ idf_component_register(
         "footguard_ble.c"
         "footguard_command.c"
         "footguard_command_executor.c"
+        "footguard_command_service.c"
         "footguard_crc16.c"
         "footguard_fsr.c"
         "footguard_gatt.c"
