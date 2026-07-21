@@ -3,6 +3,7 @@
 #include "footguard_ble.h"
 #include "footguard_config.h"
 #include "footguard_mpu6050.h"
+#include "footguard_motor.h"
 #include "footguard_ntc.h"
 #include "footguard_protocol_selftest.h"
 
@@ -102,6 +103,86 @@ static void start_mpu6050_validation_task(void)
     }
 }
 
+static void motor_validation_task(void *arg)
+{
+    esp_err_t error;
+
+    (void)arg;
+
+    error = footguard_motor_init();
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Motor validation initialization failed: %s",
+                 esp_err_to_name(error));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Motor test starts in 3 seconds");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    ESP_LOGI(TAG, "Motor test: SHORT ON 300ms");
+    error = footguard_motor_set(true);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    error = footguard_motor_set(false);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    ESP_LOGI(TAG, "Motor test: DOUBLE pulse 1 ON 250ms");
+    error = footguard_motor_set(true);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(250));
+    error = footguard_motor_set(false);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    ESP_LOGI(TAG, "Motor test: DOUBLE pulse 2 ON 250ms");
+    error = footguard_motor_set(true);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(250));
+    error = footguard_motor_set(false);
+    if (error != ESP_OK) {
+        goto failed;
+    }
+
+    ESP_LOGI(TAG, "Motor test finished; output forced OFF");
+    vTaskDelete(NULL);
+    return;
+
+failed:
+    (void)footguard_motor_set(false);
+    ESP_LOGE(TAG, "Motor test failed: %s; output forced OFF",
+             esp_err_to_name(error));
+    vTaskDelete(NULL);
+}
+
+static void start_motor_validation_task(void)
+{
+    if (xTaskCreate(motor_validation_task,
+                    "footguard_motor",
+                    3072,
+                    NULL,
+                    tskIDLE_PRIORITY + 1,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Motor validation task creation failed");
+    }
+}
+
 static const char *selftest_status(bool passed)
 {
     return passed ? "PASS" : "FAIL";
@@ -137,4 +218,5 @@ void app_main(void)
 
     start_ntc_validation_task();
     start_mpu6050_validation_task();
+    start_motor_validation_task();
 }

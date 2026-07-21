@@ -6,6 +6,7 @@ idf_component_register(
         "footguard_fsr.c"
         "footguard_gatt.c"
         "footguard_mock_sensor.c"
+        "footguard_motor.c"
         "footguard_mpu6050.c"
         "footguard_ntc.c"
         "footguard_protocol.c"
