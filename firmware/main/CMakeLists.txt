@@ -3,13 +3,15 @@ idf_component_register(
         "app_main.c"
         "footguard_ble.c"
         "footguard_crc16.c"
+        "footguard_fsr.c"
         "footguard_gatt.c"
         "footguard_mock_sensor.c"
+        "footguard_ntc.c"
         "footguard_protocol.c"
         "footguard_protocol_selftest.c"
         "footguard_time.c"
     INCLUDE_DIRS "."
-    REQUIRES bt esp_timer nvs_flash
+    REQUIRES bt esp_adc esp_driver_gpio esp_timer nvs_flash
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
