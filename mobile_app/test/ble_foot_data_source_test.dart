@@ -85,4 +85,107 @@ void main() {
     await source.dispose();
     await connection.dispose();
   });
+
+  test('BLE source reports frame timeout and recovers on a new frame',
+      () async {
+    final connection = _FakeBleConnectionService();
+    final source = BleFootDataSource(
+      connection,
+      frameTimeout: const Duration(milliseconds: 40),
+      freshnessCheckInterval: const Duration(milliseconds: 10),
+    );
+    await source.start();
+
+    const firstFrame = FootFrame(
+      protocolVersion: 1,
+      sensorLayoutVersion: 'layout_6p4t_v1',
+      deviceId: 'foot_left_001',
+      side: 'left',
+      syncId: 7,
+      packetSeq: 12,
+      timestampMs: 1784600800030,
+      pressure: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+      temperature: [30.1, 30.2, 30.3, 30.4],
+      imu: ImuData(
+        ax: 0,
+        ay: 0,
+        az: 9.8,
+        gx: 0,
+        gy: 0,
+        gz: 0,
+      ),
+      battery: 95,
+      qualityFlags: 0,
+      source: 'ble',
+    );
+    connection.emit(
+      const BleConnectionsSnapshot(
+        left: BleConnectionInfo(
+          side: FootSide.left,
+          state: BleLinkState.ready,
+          latestFrame: firstFrame,
+          receivedFrames: 1,
+        ),
+        right: BleConnectionInfo.disconnected(FootSide.right),
+      ),
+    );
+
+    final timeoutMessageFuture = source.errorState.firstWhere(
+      (value) => value?.contains('左脚实时数据超过3秒未更新') ?? false,
+    );
+    final timedOut = await source.connectionState
+        .firstWhere((value) => value.left == FootConnectionStatus.error)
+        .timeout(const Duration(seconds: 1));
+    expect(timedOut.left, FootConnectionStatus.error);
+
+    final timeoutMessage =
+        await timeoutMessageFuture.timeout(const Duration(seconds: 1));
+    expect(timeoutMessage, contains('左脚实时数据超过3秒未更新'));
+
+    final recoveredConnection = source.connectionState.firstWhere(
+      (value) => value.left == FootConnectionStatus.connected,
+    );
+    final clearedError = source.errorState.firstWhere((value) => value == null);
+    connection.emit(
+      const BleConnectionsSnapshot(
+        left: BleConnectionInfo(
+          side: FootSide.left,
+          state: BleLinkState.ready,
+          latestFrame: FootFrame(
+            protocolVersion: 1,
+            sensorLayoutVersion: 'layout_6p4t_v1',
+            deviceId: 'foot_left_001',
+            side: 'left',
+            syncId: 7,
+            packetSeq: 13,
+            timestampMs: 1784600800230,
+            pressure: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            temperature: [30.1, 30.2, 30.3, 30.4],
+            imu: ImuData(
+              ax: 0,
+              ay: 0,
+              az: 9.8,
+              gx: 0,
+              gy: 0,
+              gz: 0,
+            ),
+            battery: 95,
+            qualityFlags: 0,
+            source: 'ble',
+          ),
+          receivedFrames: 2,
+        ),
+        right: BleConnectionInfo.disconnected(FootSide.right),
+      ),
+    );
+
+    expect(
+      (await recoveredConnection.timeout(const Duration(seconds: 1))).left,
+      FootConnectionStatus.connected,
+    );
+    expect(await clearedError.timeout(const Duration(seconds: 1)), isNull);
+
+    await source.dispose();
+    await connection.dispose();
+  });
 }
