@@ -18,6 +18,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: value.backendUrl);
 
   @override
+  void didUpdateWidget(covariant SettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.settings, widget.settings)) {
+      value = widget.settings;
+      backend.text = value.backendUrl;
+    }
+  }
+
+  @override
   void dispose() {
     backend.dispose();
     super.dispose();
@@ -43,6 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
           DropdownButtonFormField<FootDataMode>(
+            key: ValueKey('data-mode-${value.dataMode.name}'),
             initialValue: value.dataMode,
             decoration: const InputDecoration(
                 labelText: '数据源', border: OutlineInputBorder()),
@@ -55,6 +65,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
           DropdownButtonFormField<String>(
+            key: ValueKey('mock-scenario-${value.mockScenario}'),
             initialValue: value.mockScenario,
             decoration: const InputDecoration(
                 labelText: 'Mock 场景', border: OutlineInputBorder()),
