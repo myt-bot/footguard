@@ -167,6 +167,7 @@ class BleFootDataSource implements FootDataSource {
     return switch (connection.state) {
       BleLinkState.disconnected => FootConnectionStatus.disconnected,
       BleLinkState.connecting ||
+      BleLinkState.reconnecting ||
       BleLinkState.discovering =>
         FootConnectionStatus.connecting,
       BleLinkState.ready => FootConnectionStatus.connected,
