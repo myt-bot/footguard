@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/services/ble_control_codec.dart';
 import 'package:footguard/services/ble_gatt.dart';
+import 'package:footguard/models/device_command.dart';
 
 Map<String, dynamic> _status({String side = 'left'}) => {
       'protocol_version': 1,
@@ -159,6 +160,69 @@ void main() {
     expect(
       () => codec.encodeTimeSync(syncId: 1, unixTimeMs: -1),
       throwsA(_codecError('invalid_unix_time')),
+    );
+  });
+
+  test('encodes DeviceCommand as compact protocol v1 JSON', () {
+    const command = DeviceCommand(
+      commandId: 'cmd_bridge_left_1',
+      target: 'left',
+      pattern: 'double',
+      durationMs: 800,
+      expireAtMs: 1784609999999,
+      reasonCode: 'left_load_bias',
+    );
+    expect(
+      utf8.decode(codec.encodeDeviceCommand(command)),
+      '{"protocol_version":1,"command_id":"cmd_bridge_left_1","target":"left","pattern":"double","duration_ms":800,"expire_at_ms":1784609999999,"reason_code":"left_load_bias"}',
+    );
+  });
+
+  test('rejects DeviceCommand duration that conflicts with pattern', () {
+    const command = DeviceCommand(
+      commandId: 'cmd_bad_duration',
+      target: 'left',
+      pattern: 'short',
+      durationMs: 99,
+      expireAtMs: 1784609999999,
+      reasonCode: 'manual_test',
+    );
+    expect(
+      () => codec.encodeDeviceCommand(command),
+      throwsA(_codecError('invalid_duration')),
+    );
+  });
+
+  test('decodes an executed AckEvent and preserves its exact fields', () {
+    final ack = codec.decodeAckEvent(
+      utf8.encode(
+        '{"protocol_version":1,"command_id":"cmd_bridge_left_1","device_id":"foot_left_001","status":"executed","ack_at_ms":1784600000900,"executed_at_ms":1784600000800,"error_code":"none"}',
+      ),
+      expectedDeviceId: 'foot_left_001',
+    );
+    expect(ack.commandId, 'cmd_bridge_left_1');
+    expect(ack.status, 'executed');
+    expect(ack.executedAtMs, 1784600000800);
+    expect(ack.toJson()['device_id'], 'foot_left_001');
+  });
+
+  test('rejects an invalid or mismatched AckEvent', () {
+    expect(
+      () => codec.decodeAckEvent(
+        utf8.encode(
+          '{"protocol_version":1,"command_id":"cmd_bridge_left_1","device_id":"foot_left_001","status":"executed","ack_at_ms":1784600000900,"error_code":"none"}',
+        ),
+      ),
+      throwsA(_codecError('invalid_ack_state')),
+    );
+    expect(
+      () => codec.decodeAckEvent(
+        utf8.encode(
+          '{"protocol_version":1,"command_id":"cmd_bridge_left_1","device_id":"foot_left_001","status":"expired","ack_at_ms":1784600000900,"error_code":"command_expired"}',
+        ),
+        expectedDeviceId: 'foot_right_001',
+      ),
+      throwsA(_codecError('ack_device_mismatch')),
     );
   });
 }
