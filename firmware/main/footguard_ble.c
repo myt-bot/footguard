@@ -76,6 +76,25 @@ static void notify_device_status(void)
     footguard_gatt_notify_device_status(state.conn_handle, state.mtu);
 }
 
+int footguard_ble_notify_ack_event(const char *json, size_t json_size)
+{
+    footguard_ble_state_t state = get_state();
+
+    if (json == NULL || json_size == 0U) {
+        return BLE_HS_EINVAL;
+    }
+    if (!state.connected) {
+        return BLE_HS_ENOTCONN;
+    }
+    if (!state.ack_subscribed || json_size + 3U > state.mtu) {
+        return BLE_HS_EINVAL;
+    }
+
+    return footguard_gatt_notify_ack_event(state.conn_handle,
+                                           json,
+                                           json_size);
+}
+
 static bool refresh_streaming_state(void)
 {
     bool previous_streaming;

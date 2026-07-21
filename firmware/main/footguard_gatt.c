@@ -171,6 +171,25 @@ int footguard_gatt_notify_sensor_data(uint16_t conn_handle,
     return ble_gatts_notify_custom(conn_handle, s_sensor_data_handle, packet);
 }
 
+int footguard_gatt_notify_ack_event(uint16_t conn_handle,
+                                    const char *json,
+                                    size_t json_size)
+{
+    struct os_mbuf *packet;
+
+    if (json == NULL || json_size == 0U ||
+        json_size > DEVICE_STATUS_MAX_SIZE) {
+        return BLE_HS_EINVAL;
+    }
+
+    packet = ble_hs_mbuf_from_flat(json, (uint16_t)json_size);
+    if (packet == NULL) {
+        return BLE_HS_ENOMEM;
+    }
+
+    return ble_gatts_notify_custom(conn_handle, s_ack_event_handle, packet);
+}
+
 static int read_device_status(struct ble_gatt_access_ctxt *context)
 {
     char json[DEVICE_STATUS_MAX_SIZE + 1];
