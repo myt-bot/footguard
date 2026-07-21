@@ -7,6 +7,7 @@
 #include "footguard_ntc.h"
 #include "footguard_protocol_selftest.h"
 #include "footguard_command.h"
+#include "footguard_command_executor.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -172,6 +173,13 @@ void app_main(void)
     error = footguard_motor_init();
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "Motor initialization failed: %s",
+                 esp_err_to_name(error));
+        return;
+    }
+
+    error = footguard_command_executor_init(NULL);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Command executor initialization failed: %s",
                  esp_err_to_name(error));
         return;
     }
