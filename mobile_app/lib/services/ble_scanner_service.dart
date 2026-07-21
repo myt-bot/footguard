@@ -17,8 +17,7 @@ class BleScannerException implements Exception {
 }
 
 typedef BleAdapterStateReader = BluetoothAdapterState Function();
-typedef BleAdapterStateStreamReader
-    = Stream<BluetoothAdapterState> Function();
+typedef BleAdapterStateStreamReader = Stream<BluetoothAdapterState> Function();
 
 class BleScannerService {
   BleScannerService({
@@ -46,65 +45,65 @@ class BleScannerService {
   BleScanSnapshot get current => _current;
 
   bool _isPendingAdapterState(BluetoothAdapterState state) {
-  return state == BluetoothAdapterState.unknown ||
-      state == BluetoothAdapterState.turningOn ||
-      state == BluetoothAdapterState.turningOff;
-}
+    return state == BluetoothAdapterState.unknown ||
+        state == BluetoothAdapterState.turningOn ||
+        state == BluetoothAdapterState.turningOff;
+  }
 
-Future<BluetoothAdapterState> _readAdapterState() async {
-  var state = _adapterStateReader();
+  Future<BluetoothAdapterState> _readAdapterState() async {
+    var state = _adapterStateReader();
 
-  if (!_isPendingAdapterState(state)) {
+    if (!_isPendingAdapterState(state)) {
+      return state;
+    }
+
+    try {
+      state = await _adapterStateStreamReader()
+          .where((value) => !_isPendingAdapterState(value))
+          .first
+          .timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      state = _adapterStateReader();
+    }
+
     return state;
   }
 
-  try {
-    state = await _adapterStateStreamReader()
-        .where((value) => !_isPendingAdapterState(value))
-        .first
-        .timeout(const Duration(seconds: 3));
-  } on TimeoutException {
-    state = _adapterStateReader();
+  Future<void> _requireBluetoothReady() async {
+    final state = await _readAdapterState();
+
+    switch (state) {
+      case BluetoothAdapterState.on:
+        return;
+
+      case BluetoothAdapterState.off:
+      case BluetoothAdapterState.turningOff:
+        throw const BleScannerException(
+          'bluetooth_off',
+          '手机蓝牙当前处于关闭状态，请打开蓝牙后重试',
+        );
+
+      case BluetoothAdapterState.unauthorized:
+        throw const BleScannerException(
+          'bluetooth_unauthorized',
+          'FootGuard没有蓝牙扫描权限，请在系统设置中允许“附近的设备”权限',
+        );
+
+      case BluetoothAdapterState.unavailable:
+        throw const BleScannerException(
+          'bluetooth_unavailable',
+          '当前手机的Bluetooth Low Energy不可用',
+        );
+
+      case BluetoothAdapterState.unknown:
+      case BluetoothAdapterState.turningOn:
+        throw const BleScannerException(
+          'bluetooth_state_unknown',
+          '暂时无法读取手机蓝牙状态，请等待几秒后重试',
+        );
+    }
   }
 
-  return state;
-}
-
-Future<void> _requireBluetoothReady() async {
-  final state = await _readAdapterState();
-
-  switch (state) {
-    case BluetoothAdapterState.on:
-      return;
-
-    case BluetoothAdapterState.off:
-    case BluetoothAdapterState.turningOff:
-      throw const BleScannerException(
-        'bluetooth_off',
-        '手机蓝牙当前处于关闭状态，请打开蓝牙后重试',
-      );
-
-    case BluetoothAdapterState.unauthorized:
-      throw const BleScannerException(
-        'bluetooth_unauthorized',
-        'FootGuard没有蓝牙扫描权限，请在系统设置中允许“附近的设备”权限',
-      );
-
-    case BluetoothAdapterState.unavailable:
-      throw const BleScannerException(
-        'bluetooth_unavailable',
-        '当前手机的Bluetooth Low Energy不可用',
-      );
-
-    case BluetoothAdapterState.unknown:
-    case BluetoothAdapterState.turningOn:
-      throw const BleScannerException(
-        'bluetooth_state_unknown',
-        '暂时无法读取手机蓝牙状态，请等待几秒后重试',
-      );
-  }
-}
-  
   Future<void> startScan() async {
     _ensureActive();
     if (!await FlutterBluePlus.isSupported) {
