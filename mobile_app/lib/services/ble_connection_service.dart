@@ -4,6 +4,9 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../models/ble_connection_state.dart';
 import '../models/ble_scan_device.dart';
+import '../models/device_ack.dart';
+import '../models/device_command.dart';
+import 'ble_command_gateway.dart';
 import 'ble_control_codec.dart';
 import 'ble_frame_parser.dart';
 import 'ble_gatt.dart';
@@ -21,7 +24,7 @@ class BleConnectionException implements Exception {
   String toString() => 'BleConnectionException($code): $message';
 }
 
-class BleConnectionService {
+class BleConnectionService implements BleCommandGateway {
   BleConnectionService({
     BleControlCodec? codec,
     BleFrameParser? frameParser,
@@ -40,10 +43,12 @@ class BleConnectionService {
   final BleKnownDeviceStore _knownDeviceStore;
   final BleReconnectPolicy _reconnectPolicy;
   final _snapshots = StreamController<BleConnectionsSnapshot>.broadcast();
+  final _acknowledgements = StreamController<DeviceAck>.broadcast();
   final _devices = <FootSide, BluetoothDevice>{};
   final _connectionSubscriptions =
       <FootSide, StreamSubscription<BluetoothConnectionState>>{};
   final _sensorSubscriptions = <FootSide, StreamSubscription<List<int>>>{};
+  final _ackSubscriptions = <FootSide, StreamSubscription<List<int>>>{};
   final _characteristics = <FootSide, Map<String, BluetoothCharacteristic>>{};
   final _knownDevices = <FootSide, BleScanDevice>{};
   final _autoReconnectSides = <FootSide>{};
@@ -56,6 +61,9 @@ class BleConnectionService {
   bool _disposed = false;
 
   Stream<BleConnectionsSnapshot> get snapshots => _snapshots.stream;
+  @override
+  Stream<DeviceAck> get acknowledgements => _acknowledgements.stream;
+  @override
   BleConnectionsSnapshot get current => _current;
 
   Future<void> connect(BleScanDevice scanned) async {
@@ -111,6 +119,7 @@ class BleConnectionService {
         await _clearTransport(side);
         return;
       }
+
       _emit(BleConnectionInfo(
         side: side,
         state: BleLinkState.discovering,
@@ -191,6 +200,19 @@ class BleConnectionService {
         await _clearTransport(side);
         return;
       }
+
+      final ackCharacteristic = characteristics[FootGuardGatt.ackEventUuid]!;
+      await _ackSubscriptions.remove(side)?.cancel();
+      _ackSubscriptions[side] = ackCharacteristic.onValueReceived.listen(
+        (bytes) => _handleAckEvent(
+          side: side,
+          deviceId: status.deviceId,
+          bytes: bytes,
+        ),
+        onError: (Object error) => _handleAckError(side, error),
+      );
+      await ackCharacteristic.setNotifyValue(true);
+
       _emit(BleConnectionInfo(
         side: side,
         state: BleLinkState.ready,
@@ -245,6 +267,56 @@ class BleConnectionService {
   ) =>
       _characteristics[side]?[uuid.toLowerCase()];
 
+  @override
+  Future<void> sendCommand(DeviceCommand command) async {
+    _ensureActive();
+    if (command.expired) {
+      throw const BleConnectionException(
+        'command_expired',
+        '命令已经过期，未写入设备',
+      );
+    }
+    final sides = switch (command.target) {
+      'left' => const [FootSide.left],
+      'right' => const [FootSide.right],
+      'both' => const [FootSide.left, FootSide.right],
+      _ => throw const BleConnectionException(
+          'invalid_target',
+          '命令目标必须是left、right或both',
+        ),
+    };
+    final payload = _codec.encodeDeviceCommand(command);
+    final writes = <Future<void>>[];
+    for (final side in sides) {
+      final connection = _current.forSide(side);
+      final characteristic =
+          _characteristics[side]?[FootGuardGatt.deviceCommandUuid];
+      if (!connection.isReady ||
+          connection.deviceStatus == null ||
+          characteristic == null) {
+        throw BleConnectionException(
+          'device_not_ready',
+          '${_sideLabel(side)}设备尚未完成BLE连接',
+        );
+      }
+      if (!connection.deviceStatus!.timeSynced) {
+        throw BleConnectionException(
+          'time_unsynced',
+          '${_sideLabel(side)}设备尚未完成时间同步',
+        );
+      }
+      final mtu = connection.mtu ?? FootGuardGatt.preferredMtu;
+      if (payload.length > mtu - 3) {
+        throw BleConnectionException(
+          'command_too_large',
+          'DeviceCommand为${payload.length}字节，超过MTU ${mtu - 3}字节载荷',
+        );
+      }
+      writes.add(characteristic.write(payload, withoutResponse: false));
+    }
+    await Future.wait(writes);
+  }
+
   Future<void> disconnect(FootSide side) async {
     _autoReconnectSides.remove(side);
     _knownDevices.remove(side);
@@ -261,6 +333,7 @@ class BleConnectionService {
 
   Future<void> _clearTransport(FootSide side) async {
     await _sensorSubscriptions.remove(side)?.cancel();
+    await _ackSubscriptions.remove(side)?.cancel();
     await _connectionSubscriptions.remove(side)?.cancel();
     _characteristics.remove(side);
     final device = _devices.remove(side);
@@ -362,6 +435,27 @@ class BleConnectionService {
     _emit(current.copyWith(sensorError: 'SensorData解析失败：$error'));
   }
 
+  void _handleAckEvent({
+    required FootSide side,
+    required String deviceId,
+    required List<int> bytes,
+  }) {
+    try {
+      final ack = _codec.decodeAckEvent(
+        bytes,
+        expectedDeviceId: deviceId,
+      );
+      _acknowledgements.add(ack);
+    } catch (error) {
+      _handleAckError(side, error);
+    }
+  }
+
+  void _handleAckError(FootSide side, Object error) {
+    final current = _current.forSide(side);
+    _emit(current.copyWith(error: 'AckEvent解析失败：$error'));
+  }
+
   void _emit(BleConnectionInfo value) {
     if (_disposed) {
       return;
@@ -388,6 +482,7 @@ class BleConnectionService {
     _reconnectTimers.clear();
     await _clearTransport(FootSide.left);
     await _clearTransport(FootSide.right);
+    await _acknowledgements.close();
     await _snapshots.close();
   }
 }

@@ -9,12 +9,18 @@ import '../models/foot_frame.dart';
 import '../models/risk_state.dart';
 import '../models/regional_analysis.dart';
 import 'frame_pairing_service.dart';
+import 'ble_command_bridge.dart';
 
 class MonitoringController extends ChangeNotifier {
-  MonitoringController({required this.source, required this.api});
+  MonitoringController({
+    required this.source,
+    required this.api,
+    this.commandBridge,
+  });
 
   final FootDataSource source;
   final FootGuardApiClient api;
+  final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<FootFrame> _uploadQueue = [];
@@ -47,6 +53,13 @@ class MonitoringController extends ChangeNotifier {
       notifyListeners();
     }));
     await source.start();
+    if (commandBridge != null) {
+      commandBridge!.start();
+      _subscriptions.add(commandBridge!.statuses.listen((value) {
+        motorStatus = value;
+        notifyListeners();
+      }));
+    }
     await refreshBackend();
     _refreshTimer =
         Timer.periodic(const Duration(seconds: 1), (_) => refreshBackend());
@@ -55,6 +68,8 @@ class MonitoringController extends ChangeNotifier {
   bool get _bothFeetConnected =>
       connections.left == FootConnectionStatus.connected &&
       connections.right == FootConnectionStatus.connected;
+
+  bool get usesRealBleCommands => commandBridge != null;
 
   void _onConnections(FootConnectionSnapshot value) {
     connections = value;
@@ -143,15 +158,24 @@ class MonitoringController extends ChangeNotifier {
         syncErrorMs = snapshot.syncErrorMs;
         risk = snapshot.risk;
         regionalAnalysis = snapshot.regionalAnalysis;
+      } else {
+        _resetBilateralState();
+      }
+      if (commandBridge != null || backendIsFrameSource || _bothFeetConnected) {
         motorCommand = await api.pendingCommand();
         if (motorCommand != null) {
-          motorStatus =
-              '${motorCommand!.target} · ${motorCommand!.pattern} · ${motorCommand!.durationMs} ms';
+          if (commandBridge != null) {
+            await commandBridge!.submit(motorCommand!);
+            motorStatus = commandBridge!.status;
+          } else {
+            motorStatus =
+                '${motorCommand!.target} · ${motorCommand!.pattern} · ${motorCommand!.durationMs} ms';
+          }
+        } else if (commandBridge != null) {
+          motorStatus = commandBridge!.status;
         } else if (!motorStatus.startsWith('已执行')) {
           motorStatus = '暂无马达提醒';
         }
-      } else {
-        _resetBilateralState();
       }
       _backendError = null;
     } catch (error) {
@@ -192,6 +216,7 @@ class MonitoringController extends ChangeNotifier {
       subscription.cancel();
     }
     source.dispose();
+    commandBridge?.dispose();
     api.close();
     super.dispose();
   }

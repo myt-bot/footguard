@@ -24,5 +24,15 @@ class DeviceCommand {
         reasonCode: json['reason_code'] as String,
       );
 
+  Map<String, dynamic> toJson() => {
+        'protocol_version': 1,
+        'command_id': commandId,
+        'target': target,
+        'pattern': pattern,
+        'duration_ms': durationMs,
+        'expire_at_ms': expireAtMs,
+        'reason_code': reasonCode,
+      };
+
   bool get expired => DateTime.now().millisecondsSinceEpoch >= expireAtMs;
 }
