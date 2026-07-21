@@ -99,6 +99,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         FootDataMode.mock => 'Mock 实时生成',
         FootDataMode.csvReplay => 'CSV 场景回放',
         FootDataMode.backend => '仅显示后端数据',
-        FootDataMode.ble => 'BLE（等待硬件）',
+        FootDataMode.ble => 'BLE 真机实时数据',
       };
 }

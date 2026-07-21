@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'config/app_config.dart';
@@ -6,6 +8,7 @@ import 'screens/history_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/realtime_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/ble_connection_service.dart';
 
 class FootGuardApp extends StatefulWidget {
   const FootGuardApp({super.key});
@@ -17,6 +20,19 @@ class FootGuardApp extends StatefulWidget {
 class _FootGuardAppState extends State<FootGuardApp> {
   AppSettings settings = const AppSettings();
   int selectedIndex = 0;
+  late final BleConnectionService _bleConnectionService;
+
+  @override
+  void initState() {
+    super.initState();
+    _bleConnectionService = BleConnectionService();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_bleConnectionService.dispose());
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,13 +70,15 @@ class _FootGuardAppState extends State<FootGuardApp> {
               key: ValueKey(
                   '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.replaySpeed}'),
               settings: settings,
+              connectionService: _bleConnectionService,
             ),
             HistoryScreen(
                 key: ValueKey(settings.backendUrl),
                 backendUrl: settings.backendUrl),
             DeviceScreen(
                 key: ValueKey('device-${settings.backendUrl}'),
-                backendUrl: settings.backendUrl),
+                backendUrl: settings.backendUrl,
+                connectionService: _bleConnectionService),
             SettingsScreen(
               settings: settings,
               onChanged: (next) => setState(() => settings = next),
