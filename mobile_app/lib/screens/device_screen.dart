@@ -343,6 +343,22 @@ class _BleDeviceCard extends StatelessWidget {
               Text('电量：${status.battery}%'),
               Text('设备状态：${status.state}'),
               Text('时间同步：${status.timeSynced ? '已同步' : '未同步'}'),
+              const SizedBox(height: 8),
+              Text('已接收帧数：${connection.receivedFrames}'),
+              Text(
+                '最新序号：${connection.latestFrame?.packetSeq ?? '--'}',
+              ),
+              Text(
+                '最新时间戳：${connection.latestFrame?.timestampMs ?? '--'}',
+              ),
+              Text(
+                '实时数据：${connection.latestFrame == null ? '等待SensorData' : '60字节解析正常'}',
+              ),
+              if (connection.sensorError != null)
+                Text(
+                  connection.sensorError!,
+                  style: const TextStyle(color: Color(0xFFB54A42)),
+                ),
             ] else ...[
               const SizedBox(height: 6),
               Text(
