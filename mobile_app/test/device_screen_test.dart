@@ -57,6 +57,11 @@ class _FakeConnectionService extends BleConnectionService {
   BleScanDevice? connectedDevice;
   FootSide? disconnectedSide;
 
+  void emit(BleConnectionInfo connection) {
+    _current = _current.replace(connection);
+    _snapshots.add(_current);
+  }
+
   @override
   Stream<BleConnectionsSnapshot> get snapshots => _snapshots.stream;
   @override
@@ -166,6 +171,16 @@ void main() {
     expect(find.text('固件版本：1.2.0'), findsOneWidget);
     expect(find.text('电量：95%'), findsOneWidget);
     expect(find.text('时间同步：未同步'), findsOneWidget);
+
+    connection.emit(const BleConnectionInfo(
+      side: FootSide.left,
+      state: BleLinkState.reconnecting,
+      remoteId: 'AA:BB:CC:DD:EE:01',
+      error: '左脚设备连接已中断，2秒后重连（第1次）',
+    ));
+    await tester.pump();
+    expect(find.text('自动重连中'), findsNWidgets(2));
+    expect(find.text('左脚设备连接已中断，2秒后重连（第1次）'), findsOneWidget);
 
     final disconnectButton =
         find.byKey(const ValueKey('disconnect_FootGuard-L'));

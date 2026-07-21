@@ -290,6 +290,7 @@ class _BleDeviceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final found = device != null;
     final busy = connection.state == BleLinkState.connecting ||
+        connection.state == BleLinkState.reconnecting ||
         connection.state == BleLinkState.discovering;
     final connected = connection.state == BleLinkState.ready;
     final canDisconnect = connection.state != BleLinkState.disconnected;
@@ -297,6 +298,7 @@ class _BleDeviceCard extends StatelessWidget {
     final stateLabel = switch (connection.state) {
       BleLinkState.disconnected => found ? '已发现' : '未发现',
       BleLinkState.connecting => '连接中',
+      BleLinkState.reconnecting => '自动重连中',
       BleLinkState.discovering => '校验服务',
       BleLinkState.ready => '已连接',
       BleLinkState.error => '连接失败',
@@ -333,7 +335,7 @@ class _BleDeviceCard extends StatelessWidget {
             ),
             const Divider(),
             Text('广播名称：${device?.name ?? expectedName}'),
-            Text('remoteId：${device?.remoteId ?? '--'}'),
+            Text('remoteId：${device?.remoteId ?? connection.remoteId ?? '--'}'),
             Text('信号强度：${device == null ? '--' : '${device!.rssi} dBm'}'),
             if (connected && status != null) ...[
               const SizedBox(height: 8),
@@ -343,6 +345,22 @@ class _BleDeviceCard extends StatelessWidget {
               Text('电量：${status.battery}%'),
               Text('设备状态：${status.state}'),
               Text('时间同步：${status.timeSynced ? '已同步' : '未同步'}'),
+              const SizedBox(height: 8),
+              Text('已接收帧数：${connection.receivedFrames}'),
+              Text(
+                '最新序号：${connection.latestFrame?.packetSeq ?? '--'}',
+              ),
+              Text(
+                '最新时间戳：${connection.latestFrame?.timestampMs ?? '--'}',
+              ),
+              Text(
+                '实时数据：${connection.latestFrame == null ? '等待SensorData' : '60字节解析正常'}',
+              ),
+              if (connection.sensorError != null)
+                Text(
+                  connection.sensorError!,
+                  style: const TextStyle(color: Color(0xFFB54A42)),
+                ),
             ] else ...[
               const SizedBox(height: 6),
               Text(
@@ -371,7 +389,9 @@ class _BleDeviceCard extends StatelessWidget {
                         : const Icon(Icons.link),
                     label: Text(
                       busy
-                          ? '连接中'
+                          ? connection.state == BleLinkState.reconnecting
+                              ? '自动重连中'
+                              : '连接中'
                           : connection.state == BleLinkState.error
                               ? '重新连接'
                               : '连接',

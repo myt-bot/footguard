@@ -9,12 +9,18 @@ import '../models/foot_frame.dart';
 import '../models/risk_state.dart';
 import '../models/regional_analysis.dart';
 import 'frame_pairing_service.dart';
+import 'ble_command_bridge.dart';
 
 class MonitoringController extends ChangeNotifier {
-  MonitoringController({required this.source, required this.api});
+  MonitoringController({
+    required this.source,
+    required this.api,
+    this.commandBridge,
+  });
 
   final FootDataSource source;
   final FootGuardApiClient api;
+  final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<FootFrame> _uploadQueue = [];
@@ -29,7 +35,9 @@ class MonitoringController extends ChangeNotifier {
   RiskState risk = const RiskState.incomplete();
   DeviceCommand? motorCommand;
   bool backendOnline = false;
-  String? errorMessage;
+  String? _sourceError;
+  String? _backendError;
+  String? get errorMessage => _sourceError ?? _backendError;
   String motorStatus = '暂无马达提醒';
   DateTime? lastUpdated;
   double? loadBias;
@@ -39,18 +47,52 @@ class MonitoringController extends ChangeNotifier {
 
   Future<void> start() async {
     _subscriptions.add(source.frames.listen(_onFrame));
-    _subscriptions.add(source.connectionState.listen((value) {
-      connections = value;
-      notifyListeners();
-    }));
+    _subscriptions.add(source.connectionState.listen(_onConnections));
     _subscriptions.add(source.errorState.listen((value) {
-      errorMessage = value;
+      _sourceError = value;
       notifyListeners();
     }));
     await source.start();
+    if (commandBridge != null) {
+      commandBridge!.start();
+      _subscriptions.add(commandBridge!.statuses.listen((value) {
+        motorStatus = value;
+        notifyListeners();
+      }));
+    }
     await refreshBackend();
     _refreshTimer =
         Timer.periodic(const Duration(seconds: 1), (_) => refreshBackend());
+  }
+
+  bool get _bothFeetConnected =>
+      connections.left == FootConnectionStatus.connected &&
+      connections.right == FootConnectionStatus.connected;
+
+  bool get usesRealBleCommands => commandBridge != null;
+
+  void _onConnections(FootConnectionSnapshot value) {
+    connections = value;
+    if (value.left != FootConnectionStatus.connected) {
+      left = null;
+    }
+    if (value.right != FootConnectionStatus.connected) {
+      right = null;
+    }
+    if (!_bothFeetConnected) {
+      _resetBilateralState();
+    }
+    notifyListeners();
+  }
+
+  void _resetBilateralState() {
+    risk = const RiskState.incomplete();
+    loadBias = null;
+    loadDiff = null;
+    syncErrorMs = null;
+    regionalAnalysis = null;
+    motorCommand = null;
+    motorStatus = '双足数据不完整，暂停马达提醒';
   }
 
   void _onFrame(FootFrame frame) {
@@ -87,10 +129,10 @@ class MonitoringController extends ChangeNotifier {
         try {
           await api.uploadFrames(batch);
           backendOnline = true;
-          errorMessage = null;
+          _backendError = null;
         } catch (error) {
           backendOnline = false;
-          errorMessage = '数据上传失败：$error';
+          _backendError = '数据上传失败：$error';
         }
       }
     } finally {
@@ -105,24 +147,40 @@ class MonitoringController extends ChangeNotifier {
     try {
       backendOnline = await api.health();
       final snapshot = await api.realtime();
-      left = snapshot.left ?? left;
-      right = snapshot.right ?? right;
-      loadBias = snapshot.loadBias;
-      loadDiff = snapshot.loadDiff;
-      syncErrorMs = snapshot.syncErrorMs;
-      risk = snapshot.risk;
-      regionalAnalysis = snapshot.regionalAnalysis;
-      motorCommand = await api.pendingCommand();
-      if (motorCommand != null) {
-        motorStatus =
-            '${motorCommand!.target} · ${motorCommand!.pattern} · ${motorCommand!.durationMs} ms';
-      } else if (!motorStatus.startsWith('已执行')) {
-        motorStatus = '暂无马达提醒';
+      final backendIsFrameSource = !source.shouldUploadToBackend;
+      if (backendIsFrameSource) {
+        left = snapshot.left ?? left;
+        right = snapshot.right ?? right;
       }
-      errorMessage = null;
+      if (backendIsFrameSource || _bothFeetConnected) {
+        loadBias = snapshot.loadBias;
+        loadDiff = snapshot.loadDiff;
+        syncErrorMs = snapshot.syncErrorMs;
+        risk = snapshot.risk;
+        regionalAnalysis = snapshot.regionalAnalysis;
+      } else {
+        _resetBilateralState();
+      }
+      if (commandBridge != null || backendIsFrameSource || _bothFeetConnected) {
+        motorCommand = await api.pendingCommand();
+        if (motorCommand != null) {
+          if (commandBridge != null) {
+            await commandBridge!.submit(motorCommand!);
+            motorStatus = commandBridge!.status;
+          } else {
+            motorStatus =
+                '${motorCommand!.target} · ${motorCommand!.pattern} · ${motorCommand!.durationMs} ms';
+          }
+        } else if (commandBridge != null) {
+          motorStatus = commandBridge!.status;
+        } else if (!motorStatus.startsWith('已执行')) {
+          motorStatus = '暂无马达提醒';
+        }
+      }
+      _backendError = null;
     } catch (error) {
       backendOnline = false;
-      errorMessage = '后端不可用：$error';
+      _backendError = '后端不可用：$error';
     } finally {
       _refreshing = false;
       notifyListeners();
@@ -158,6 +216,7 @@ class MonitoringController extends ChangeNotifier {
       subscription.cancel();
     }
     source.dispose();
+    commandBridge?.dispose();
     api.close();
     super.dispose();
   }

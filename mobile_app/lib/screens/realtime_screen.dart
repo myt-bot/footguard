@@ -7,14 +7,21 @@ import '../data/ble_foot_data_source.dart';
 import '../data/csv_replay_data_source.dart';
 import '../data/foot_data_source.dart';
 import '../data/mock_foot_data_source.dart';
+import '../services/ble_connection_service.dart';
+import '../services/ble_command_bridge.dart';
 import '../services/monitoring_controller.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/foot_pressure_view.dart';
 import '../widgets/risk_banner.dart';
 
 class RealtimeScreen extends StatefulWidget {
-  const RealtimeScreen({super.key, required this.settings});
+  const RealtimeScreen({
+    super.key,
+    required this.settings,
+    required this.connectionService,
+  });
   final AppSettings settings;
+  final BleConnectionService connectionService;
 
   @override
   State<RealtimeScreen> createState() => _RealtimeScreenState();
@@ -31,14 +38,21 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
             assetPath: widget.settings.csvAsset,
             speed: widget.settings.replaySpeed),
         FootDataMode.backend => BackendFootDataSource(api),
-        FootDataMode.ble => BleFootDataSource(),
+        FootDataMode.ble => BleFootDataSource(widget.connectionService),
       };
 
   @override
   void initState() {
     super.initState();
     final api = FootGuardApiClient(baseUrl: widget.settings.backendUrl);
-    controller = MonitoringController(source: _source(api), api: api);
+    final commandBridge = widget.settings.dataMode == FootDataMode.ble
+        ? BleCommandBridge(api: api, gateway: widget.connectionService)
+        : null;
+    controller = MonitoringController(
+      source: _source(api),
+      api: api,
+      commandBridge: commandBridge,
+    );
     controller.start();
   }
 
@@ -145,7 +159,8 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                 title: const Text('马达提醒状态',
                     style: TextStyle(fontWeight: FontWeight.w700)),
                 subtitle: Text(controller.motorStatus),
-                trailing: controller.motorCommand == null
+                trailing: controller.motorCommand == null ||
+                        controller.usesRealBleCommands
                     ? null
                     : FilledButton(
                         onPressed: controller.executeMotorCommand,

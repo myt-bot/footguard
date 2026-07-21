@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/device_command.dart';
+import '../models/device_ack.dart';
 import '../models/foot_frame.dart';
 import '../models/regional_analysis.dart';
 import '../models/risk_state.dart';
@@ -166,6 +167,17 @@ class FootGuardApiClient {
             'executed_at_ms': now,
             'error_code': 'none',
           }),
+        )
+        .timeout(const Duration(seconds: 5));
+    await _decode(response);
+  }
+
+  Future<void> acknowledgeDevice(DeviceAck ack) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/ack'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(ack.toJson()),
         )
         .timeout(const Duration(seconds: 5));
     await _decode(response);
