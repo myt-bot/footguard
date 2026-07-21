@@ -11,6 +11,7 @@
 #include "footguard_mock_sensor.h"
 #include "footguard_protocol.h"
 #include "footguard_time.h"
+#include "footguard_command.h"
 
 enum {
     DEVICE_STATUS_MAX_SIZE = 244
@@ -187,17 +188,39 @@ static int read_device_status(struct ble_gatt_access_ctxt *context)
 
 static int write_device_command(struct ble_gatt_access_ctxt *context)
 {
+    uint8_t payload[FOOTGUARD_DEVICE_COMMAND_MAX_SIZE];
     uint16_t payload_size = OS_MBUF_PKTLEN(context->om);
+    footguard_command_t command;
+    footguard_command_parse_result_t result;
 
-    if (payload_size == 0U || payload_size > DEVICE_STATUS_MAX_SIZE) {
+    if (payload_size == 0U || payload_size > sizeof(payload)) {
         ESP_LOGW(TAG, "DeviceCommand rejected: invalid length %u",
                  payload_size);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    if (ble_hs_mbuf_to_flat(context->om,
+                            payload,
+                            sizeof(payload),
+                            NULL) != 0) {
+        ESP_LOGE(TAG, "DeviceCommand rejected: payload copy failed");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
 
+    result = footguard_command_parse(payload, payload_size, &command);
+    if (result != FOOTGUARD_COMMAND_PARSE_OK) {
+        ESP_LOGW(TAG, "DeviceCommand rejected: parse_result=%s",
+                 footguard_command_parse_result_name(result));
+        return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
+
+    ESP_LOGI(TAG,
+             "DeviceCommand parsed: id=%s duration_ms=%" PRIu32
+             " expire_at_ms=%" PRIu64,
+             command.command_id,
+             command.duration_ms,
+             command.expire_at_ms);
     ESP_LOGW(TAG,
-             "DeviceCommand rejected: execution is not implemented (length=%u)",
-             payload_size);
+             "DeviceCommand rejected: execution and AckEvent not implemented");
     return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
 }
 
