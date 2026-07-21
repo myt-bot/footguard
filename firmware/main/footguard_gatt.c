@@ -235,7 +235,23 @@ static int write_device_command(struct ble_gatt_access_ctxt *context)
     }
 
     submit_result = footguard_command_service_submit(&command);
-    if (submit_result != FOOTGUARD_COMMAND_SUBMIT_ACCEPTED) {
+    if (submit_result == FOOTGUARD_COMMAND_SUBMIT_ACCEPTED) {
+        ESP_LOGI(TAG,
+                 "DeviceCommand accepted: id=%s duration_ms=%" PRIu32
+                 " expire_at_ms=%" PRIu64,
+                 command.command_id,
+                 command.duration_ms,
+                 command.expire_at_ms);
+        return 0;
+    }
+    if (submit_result == FOOTGUARD_COMMAND_SUBMIT_DUPLICATE_PENDING ||
+        submit_result == FOOTGUARD_COMMAND_SUBMIT_DUPLICATE_REPLAYED ||
+        submit_result == FOOTGUARD_COMMAND_SUBMIT_COMMAND_CONFLICT) {
+        ESP_LOGI(TAG, "DeviceCommand handled without execution: id=%s result=%s",
+                 command.command_id,
+                 footguard_command_submit_result_name(submit_result));
+        return 0;
+    } else {
         ESP_LOGW(TAG, "DeviceCommand rejected: id=%s reason=%s",
                  command.command_id,
                  footguard_command_submit_result_name(submit_result));
@@ -248,14 +264,6 @@ static int write_device_command(struct ble_gatt_access_ctxt *context)
         }
         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     }
-
-    ESP_LOGI(TAG,
-             "DeviceCommand accepted: id=%s duration_ms=%" PRIu32
-             " expire_at_ms=%" PRIu64,
-             command.command_id,
-             command.duration_ms,
-             command.expire_at_ms);
-    return 0;
 }
 
 static int write_time_sync(struct ble_gatt_access_ctxt *context)
