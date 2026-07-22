@@ -81,4 +81,39 @@ void main() {
     expect(find.text('T4 中足中央'), findsOneWidget);
     expect(find.textContaining('P1'), findsNothing);
   });
+
+  testWidgets('pressure view treats tiny unloaded readings as no contact',
+      (tester) async {
+    const frame = FootFrame(
+      protocolVersion: 1,
+      sensorLayoutVersion: 'layout_6p4t_v1',
+      deviceId: 'foot_left_001',
+      side: 'left',
+      syncId: 1,
+      packetSeq: 1,
+      timestampMs: 1760000000000,
+      pressure: [0.0005, 0, 0, 0, 0, 0],
+      temperature: [30, 30, 30, 30],
+      imu: ImuData(ax: 0, ay: 0, az: 1, gx: 0, gy: 0, gz: 0),
+      battery: 95,
+      qualityFlags: 0,
+      source: 'ble',
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: FootPressureView(
+              side: 'left',
+              frame: frame,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('当前未发现明显的相对压力异常'), findsOneWidget);
+    expect(find.textContaining('相对异常区域'), findsNothing);
+  });
 }

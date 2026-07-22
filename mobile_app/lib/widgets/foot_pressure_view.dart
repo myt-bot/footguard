@@ -47,14 +47,20 @@ class FootPressureView extends StatelessWidget {
     '中足中央',
   ];
 
+  // Competition-prototype display gate; recalibrate after final insole assembly.
+  static const double _minimumFallbackPressure = 0.01;
+
   List<double> get _fallbackPressureScores {
     final current = frame?.pressure;
     if (current == null || current.length != 6) {
       return List.filled(6, 0.0);
     }
     final peer = oppositeFrame?.pressure;
-    final total =
-        math.max(current.fold<double>(0, (sum, value) => sum + value), 1e-9);
+    final peak = current.reduce(math.max);
+    if (peak < _minimumFallbackPressure) {
+      return List.filled(6, 0.0);
+    }
+    final total = current.fold<double>(0, (sum, value) => sum + value);
     return List.generate(6, (index) {
       final distribution = current[index] / total;
       final shareChange = math.max(

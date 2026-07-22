@@ -7,13 +7,16 @@
 #include "esp_log.h"
 
 #include "footguard_config.h"
+#include "footguard_fsr.h"
 #include "footguard_mock_sensor.h"
 #include "footguard_mpu6050.h"
 #include "footguard_ntc.h"
 
 #define FOOTGUARD_STANDARD_GRAVITY_M_S2 9.80665f
+#define FOOTGUARD_FSR_ADC_FULL_SCALE 4095.0
 
 static const char *TAG = "footguard_sensor";
+static bool s_fsr_ready;
 static bool s_ntc_ready;
 static bool s_mpu6050_ready;
 static bool s_initialized;
@@ -24,6 +27,13 @@ esp_err_t footguard_real_sensor_init(void)
 
     if (s_initialized) {
         return ESP_OK;
+    }
+
+    error = footguard_fsr_init();
+    s_fsr_ready = error == ESP_OK;
+    if (!s_fsr_ready) {
+        ESP_LOGW(TAG, "FSR unavailable; pressure will remain invalid: %s",
+                 esp_err_to_name(error));
     }
 
     error = footguard_ntc_init();
@@ -41,7 +51,8 @@ esp_err_t footguard_real_sensor_init(void)
     }
 
     s_initialized = true;
-    ESP_LOGI(TAG, "Real sensor source ready: NTC_T1=%s MPU6050=%s",
+    ESP_LOGI(TAG, "Real sensor source ready: FSR=%s NTC_T1=%s MPU6050=%s",
+             s_fsr_ready ? "ready" : "invalid",
              s_ntc_ready ? "ready" : "invalid",
              s_mpu6050_ready ? "ready" : "invalid");
     return ESP_OK;
@@ -77,6 +88,21 @@ esp_err_t footguard_real_sensor_make_data(
     sensor_data->battery = footguard_mock_sensor_battery_percent();
     if (!time_snapshot->time_synced) {
         sensor_data->quality_flags |= FOOTGUARD_QUALITY_TIME_UNSYNCED;
+    }
+
+    if (s_fsr_ready) {
+        for (size_t channel = 0;
+             channel < FOOTGUARD_FSR_CHANNEL_COUNT;
+             ++channel) {
+            int raw_average;
+
+            if (footguard_fsr_read_raw_channel(channel, &raw_average) == ESP_OK &&
+                raw_average >= 0 && raw_average <= 4095) {
+                sensor_data->pressure[channel] =
+                    (double)raw_average / FOOTGUARD_FSR_ADC_FULL_SCALE;
+                sensor_data->quality_flags &= ~(1U << channel);
+            }
+        }
     }
 
     if (s_ntc_ready) {

@@ -10,6 +10,8 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 
+#include "footguard_adc.h"
+
 enum {
     FOOTGUARD_NTC_SAMPLE_COUNT = 32,
     FOOTGUARD_NTC_FIXED_RESISTOR_OHM = 10000,
@@ -49,17 +51,10 @@ static void release_resources(void)
             s_cali_handles[channel] = NULL;
         }
     }
-    if (s_adc_handle != NULL) {
-        (void)adc_oneshot_del_unit(s_adc_handle);
-        s_adc_handle = NULL;
-    }
+    s_adc_handle = NULL;
 }
 esp_err_t footguard_ntc_init(void)
 {
-    adc_oneshot_unit_init_cfg_t unit_config = {
-        .unit_id = ADC_UNIT_1,
-        .ulp_mode = ADC_ULP_MODE_DISABLE
-    };
     adc_oneshot_chan_cfg_t channel_config = {
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_DEFAULT
@@ -70,9 +65,9 @@ esp_err_t footguard_ntc_init(void)
         return ESP_OK;
     }
 
-    error = adc_oneshot_new_unit(&unit_config, &s_adc_handle);
+    error = footguard_adc1_get_handle(&s_adc_handle);
     if (error != ESP_OK) {
-        ESP_LOGE(TAG, "ADC1 oneshot initialization failed: %s",
+        ESP_LOGE(TAG, "Shared ADC1 acquisition failed: %s",
                  esp_err_to_name(error));
         s_adc_handle = NULL;
         return error;
