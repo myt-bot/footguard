@@ -11,6 +11,8 @@
 #include "footguard_mock_sensor.h"
 #include "footguard_protocol.h"
 #include "footguard_time.h"
+#include "footguard_command.h"
+#include "footguard_command_service.h"
 
 enum {
     DEVICE_STATUS_MAX_SIZE = 244
@@ -170,6 +172,25 @@ int footguard_gatt_notify_sensor_data(uint16_t conn_handle,
     return ble_gatts_notify_custom(conn_handle, s_sensor_data_handle, packet);
 }
 
+int footguard_gatt_notify_ack_event(uint16_t conn_handle,
+                                    const char *json,
+                                    size_t json_size)
+{
+    struct os_mbuf *packet;
+
+    if (json == NULL || json_size == 0U ||
+        json_size > DEVICE_STATUS_MAX_SIZE) {
+        return BLE_HS_EINVAL;
+    }
+
+    packet = ble_hs_mbuf_from_flat(json, (uint16_t)json_size);
+    if (packet == NULL) {
+        return BLE_HS_ENOMEM;
+    }
+
+    return ble_gatts_notify_custom(conn_handle, s_ack_event_handle, packet);
+}
+
 static int read_device_status(struct ble_gatt_access_ctxt *context)
 {
     char json[DEVICE_STATUS_MAX_SIZE + 1];
@@ -187,18 +208,62 @@ static int read_device_status(struct ble_gatt_access_ctxt *context)
 
 static int write_device_command(struct ble_gatt_access_ctxt *context)
 {
+    uint8_t payload[FOOTGUARD_DEVICE_COMMAND_MAX_SIZE];
     uint16_t payload_size = OS_MBUF_PKTLEN(context->om);
+    footguard_command_t command;
+    footguard_command_parse_result_t result;
+    footguard_command_submit_result_t submit_result;
 
-    if (payload_size == 0U || payload_size > DEVICE_STATUS_MAX_SIZE) {
+    if (payload_size == 0U || payload_size > sizeof(payload)) {
         ESP_LOGW(TAG, "DeviceCommand rejected: invalid length %u",
                  payload_size);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    if (ble_hs_mbuf_to_flat(context->om,
+                            payload,
+                            sizeof(payload),
+                            NULL) != 0) {
+        ESP_LOGE(TAG, "DeviceCommand rejected: payload copy failed");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
 
-    ESP_LOGW(TAG,
-             "DeviceCommand rejected: execution is not implemented (length=%u)",
-             payload_size);
-    return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+    result = footguard_command_parse(payload, payload_size, &command);
+    if (result != FOOTGUARD_COMMAND_PARSE_OK) {
+        ESP_LOGW(TAG, "DeviceCommand rejected: parse_result=%s",
+                 footguard_command_parse_result_name(result));
+        return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
+
+    submit_result = footguard_command_service_submit(&command);
+    if (submit_result == FOOTGUARD_COMMAND_SUBMIT_ACCEPTED) {
+        ESP_LOGI(TAG,
+                 "DeviceCommand accepted: id=%s duration_ms=%" PRIu32
+                 " expire_at_ms=%" PRIu64,
+                 command.command_id,
+                 command.duration_ms,
+                 command.expire_at_ms);
+        return 0;
+    }
+    if (submit_result == FOOTGUARD_COMMAND_SUBMIT_DUPLICATE_PENDING ||
+        submit_result == FOOTGUARD_COMMAND_SUBMIT_DUPLICATE_REPLAYED ||
+        submit_result == FOOTGUARD_COMMAND_SUBMIT_COMMAND_CONFLICT) {
+        ESP_LOGI(TAG, "DeviceCommand handled without execution: id=%s result=%s",
+                 command.command_id,
+                 footguard_command_submit_result_name(submit_result));
+        return 0;
+    } else {
+        ESP_LOGW(TAG, "DeviceCommand rejected: id=%s reason=%s",
+                 command.command_id,
+                 footguard_command_submit_result_name(submit_result));
+
+        if (submit_result == FOOTGUARD_COMMAND_SUBMIT_QUEUE_FULL) {
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        if (submit_result == FOOTGUARD_COMMAND_SUBMIT_INTERNAL_ERROR) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
 }
 
 static int write_time_sync(struct ble_gatt_access_ctxt *context)

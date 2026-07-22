@@ -25,4 +25,8 @@ int footguard_gatt_notify_sensor_data(uint16_t conn_handle,
                                       const uint8_t *frame,
                                       size_t frame_size);
 
+int footguard_gatt_notify_ack_event(uint16_t conn_handle,
+                                    const char *json,
+                                    size_t json_size);
+
 #endif

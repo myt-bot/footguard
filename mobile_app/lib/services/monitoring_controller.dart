@@ -91,8 +91,10 @@ class MonitoringController extends ChangeNotifier {
     loadDiff = null;
     syncErrorMs = null;
     regionalAnalysis = null;
-    motorCommand = null;
-    motorStatus = '双足数据不完整，暂停马达提醒';
+    if (commandBridge == null) {
+      motorCommand = null;
+      motorStatus = '双足数据不完整，暂停马达提醒';
+    }
   }
 
   void _onFrame(FootFrame frame) {
