@@ -14,6 +14,10 @@
 
 static const char *TAG = "footguard";
 
+enum {
+    SENSOR_VALIDATION_LOG_TASKS_ENABLED = 0
+};
+
 static bool device_command_parser_selftest(void)
 {
     static const char valid_command[] =
@@ -189,6 +193,8 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE startup failed: %s", esp_err_to_name(error));
     }
 
-    start_ntc_validation_task();
-    start_mpu6050_validation_task();
+    if (SENSOR_VALIDATION_LOG_TASKS_ENABLED) {
+        start_ntc_validation_task();
+        start_mpu6050_validation_task();
+    }
 }
