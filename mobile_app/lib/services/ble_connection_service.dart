@@ -57,6 +57,7 @@ class BleConnectionService implements BleCommandGateway {
   final _reconnectAttempts = <FootSide, int>{};
   final _reconnectTimers = <FootSide, Timer>{};
 
+  int? _sessionSyncId;
   BleConnectionsSnapshot _current = const BleConnectionsSnapshot.disconnected();
   bool _disposed = false;
 
@@ -171,10 +172,7 @@ class BleConnectionService implements BleCommandGateway {
 
       if (!status.timeSynced) {
         final unixTimeMs = DateTime.now().millisecondsSinceEpoch;
-        var syncId = unixTimeMs & 0xFFFFFFFF;
-        if (syncId == 0) {
-          syncId = 1;
-        }
+        final syncId = _sharedSessionSyncId();
         final payload = _codec.encodeTimeSync(
           syncId: syncId,
           unixTimeMs: unixTimeMs,
@@ -403,6 +401,15 @@ class BleConnectionService implements BleCommandGateway {
       delay,
       () => unawaited(_connect(known, isReconnect: true)),
     );
+  }
+
+  int _sharedSessionSyncId() {
+    final existing = _sessionSyncId;
+    if (existing != null) return existing;
+    var created = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
+    if (created == 0) created = 1;
+    _sessionSyncId = created;
+    return created;
   }
 
   static String _sideLabel(FootSide side) =>
