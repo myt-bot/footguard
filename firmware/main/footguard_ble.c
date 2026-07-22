@@ -326,8 +326,6 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
 static void sensor_task(void *arg)
 {
-    TickType_t last_wake_time = xTaskGetTickCount();
-    uint32_t packet_seq = 0;
     uint32_t notified_count = 0;
     int last_notify_error = 0;
 
@@ -339,15 +337,39 @@ static void sensor_task(void *arg)
         footguard_time_snapshot_t time_snapshot;
         footguard_sensor_data_t sensor_data;
         int rc;
+        uint32_t packet_seq;
+        uint64_t remainder_ms;
+        uint64_t wait_ms;
 
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(SENSOR_PERIOD_MS));
         state = get_state();
         if (!state.streaming) {
             last_notify_error = 0;
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
         footguard_time_get_snapshot(&time_snapshot);
+        if (!time_snapshot.time_synced) {
+            vTaskDelay(pdMS_TO_TICKS(SENSOR_PERIOD_MS));
+            continue;
+        }
+
+        remainder_ms = time_snapshot.timestamp_ms % SENSOR_PERIOD_MS;
+        wait_ms = remainder_ms == 0U
+                      ? SENSOR_PERIOD_MS
+                      : SENSOR_PERIOD_MS - remainder_ms;
+        vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+
+        state = get_state();
+        if (!state.streaming) {
+            continue;
+        }
+        footguard_time_get_snapshot(&time_snapshot);
+        if (!time_snapshot.time_synced) {
+            continue;
+        }
+        packet_seq = (uint32_t)(time_snapshot.timestamp_ms /
+                                SENSOR_PERIOD_MS);
         if (footguard_real_sensor_make_data(packet_seq,
                                             &time_snapshot,
                                             &sensor_data) != ESP_OK) {
@@ -360,7 +382,6 @@ static void sensor_task(void *arg)
             ESP_LOGE(TAG, "Real SensorData encoding failed");
             continue;
         }
-        ++packet_seq;
 
         rc = footguard_gatt_notify_sensor_data(state.conn_handle,
                                                frame,
@@ -396,7 +417,7 @@ static void sensor_task(void *arg)
                      " accel=(%.2f,%.2f,%.2f)m/s2"
                      " gyro=(%.2f,%.2f,%.2f)dps",
                      notified_count,
-                     packet_seq - 1U,
+                     packet_seq,
                      sensor_data.quality_flags,
                      fsr_raw[0],
                      fsr_raw[1],
