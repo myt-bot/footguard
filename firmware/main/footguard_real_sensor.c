@@ -52,7 +52,6 @@ esp_err_t footguard_real_sensor_make_data(
     const footguard_time_snapshot_t *time_snapshot,
     footguard_sensor_data_t *sensor_data)
 {
-    footguard_ntc_reading_t ntc;
     footguard_mpu6050_reading_t mpu;
 
     if (!s_initialized) {
@@ -80,11 +79,20 @@ esp_err_t footguard_real_sensor_make_data(
         sensor_data->quality_flags |= FOOTGUARD_QUALITY_TIME_UNSYNCED;
     }
 
-    if (s_ntc_ready && footguard_ntc_read(&ntc) == ESP_OK &&
-        ntc.temperature_c >= -40.0f && ntc.temperature_c <= 125.0f) {
-        sensor_data->temperature_c[0] = ntc.temperature_c;
-        sensor_data->quality_flags &=
-            ~FOOTGUARD_QUALITY_TEMPERATURE_T1_INVALID;
+    if (s_ntc_ready) {
+        for (size_t channel = 0;
+             channel < FOOTGUARD_TEMPERATURE_CHANNEL_COUNT;
+             ++channel) {
+            footguard_ntc_reading_t ntc;
+
+            if (footguard_ntc_read_channel(channel, &ntc) == ESP_OK &&
+                ntc.temperature_c >= -40.0f &&
+                ntc.temperature_c <= 125.0f) {
+                sensor_data->temperature_c[channel] = ntc.temperature_c;
+                sensor_data->quality_flags &=
+                    ~(FOOTGUARD_QUALITY_TEMPERATURE_T1_INVALID << channel);
+            }
+        }
     }
 
     if (s_mpu6050_ready && footguard_mpu6050_read(&mpu) == ESP_OK) {
