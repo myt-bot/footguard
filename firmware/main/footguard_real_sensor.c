@@ -13,6 +13,7 @@
 #include "footguard_ntc.h"
 
 #define FOOTGUARD_STANDARD_GRAVITY_M_S2 9.80665f
+#define FOOTGUARD_FSR_ADC_FULL_SCALE 4095.0
 
 static const char *TAG = "footguard_sensor";
 static bool s_fsr_ready;
@@ -87,6 +88,21 @@ esp_err_t footguard_real_sensor_make_data(
     sensor_data->battery = footguard_mock_sensor_battery_percent();
     if (!time_snapshot->time_synced) {
         sensor_data->quality_flags |= FOOTGUARD_QUALITY_TIME_UNSYNCED;
+    }
+
+    if (s_fsr_ready) {
+        for (size_t channel = 0;
+             channel < FOOTGUARD_FSR_CHANNEL_COUNT;
+             ++channel) {
+            int raw_average;
+
+            if (footguard_fsr_read_raw_channel(channel, &raw_average) == ESP_OK &&
+                raw_average >= 0 && raw_average <= 4095) {
+                sensor_data->pressure[channel] =
+                    (double)raw_average / FOOTGUARD_FSR_ADC_FULL_SCALE;
+                sensor_data->quality_flags &= ~(1U << channel);
+            }
+        }
     }
 
     if (s_ntc_ready) {
