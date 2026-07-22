@@ -13,6 +13,7 @@ idf_component_register(
         "footguard_mpu6050.c"
         "footguard_ntc.c"
         "footguard_protocol.c"
+        "footguard_real_sensor.c"
         "footguard_protocol_selftest.c"
         "footguard_time.c"
     INCLUDE_DIRS "."
