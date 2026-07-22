@@ -17,14 +17,14 @@
 
 #include "footguard_config.h"
 #include "footguard_gatt.h"
-#include "footguard_mock_sensor.h"
 #include "footguard_protocol.h"
+#include "footguard_real_sensor.h"
 #include "footguard_time.h"
 
 enum {
     SENSOR_DATA_REQUIRED_MTU = FOOTGUARD_SENSOR_FRAME_SIZE + 3,
-    MOCK_SENSOR_PERIOD_MS = 200,
-    MOCK_SENSOR_LOG_INTERVAL = 25,
+    SENSOR_PERIOD_MS = 200,
+    SENSOR_LOG_INTERVAL = 25,
     DEFAULT_ATT_MTU = 23
 };
 
@@ -323,7 +323,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     }
 }
 
-static void mock_sensor_task(void *arg)
+static void sensor_task(void *arg)
 {
     TickType_t last_wake_time = xTaskGetTickCount();
     uint32_t packet_seq = 0;
@@ -339,7 +339,7 @@ static void mock_sensor_task(void *arg)
         footguard_sensor_data_t sensor_data;
         int rc;
 
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(MOCK_SENSOR_PERIOD_MS));
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(SENSOR_PERIOD_MS));
         state = get_state();
         if (!state.streaming) {
             last_notify_error = 0;
@@ -347,13 +347,16 @@ static void mock_sensor_task(void *arg)
         }
 
         footguard_time_get_snapshot(&time_snapshot);
-        footguard_mock_sensor_make_data(packet_seq,
-                                        &time_snapshot,
-                                        &sensor_data);
+        if (footguard_real_sensor_make_data(packet_seq,
+                                            &time_snapshot,
+                                            &sensor_data) != ESP_OK) {
+            ESP_LOGE(TAG, "Real SensorData acquisition failed");
+            continue;
+        }
         if (!footguard_protocol_encode_sensor_data(&sensor_data,
                                                    frame,
                                                    sizeof(frame))) {
-            ESP_LOGE(TAG, "Mock SensorData encoding failed");
+            ESP_LOGE(TAG, "Real SensorData encoding failed");
             continue;
         }
         ++packet_seq;
@@ -371,7 +374,7 @@ static void mock_sensor_task(void *arg)
 
         last_notify_error = 0;
         ++notified_count;
-        if (notified_count % MOCK_SENSOR_LOG_INTERVAL == 0U) {
+        if (notified_count % SENSOR_LOG_INTERVAL == 0U) {
             ESP_LOGI(TAG, "SensorData notifications sent: count=%" PRIu32
                           " latest_packet_seq=%" PRIu32,
                      notified_count,
@@ -454,17 +457,24 @@ esp_err_t footguard_ble_start(void)
         return ESP_FAIL;
     }
 
-    if (xTaskCreate(mock_sensor_task,
-                    "footguard_mock",
+    error = footguard_real_sensor_init();
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Real sensor source initialization failed: %s",
+                 esp_err_to_name(error));
+        return error;
+    }
+
+    if (xTaskCreate(sensor_task,
+                    "footguard_sensor",
                     4096,
                     NULL,
                     5,
                     NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Mock sensor task creation failed");
+        ESP_LOGE(TAG, "Sensor task creation failed");
         return ESP_ERR_NO_MEM;
     }
 
     nimble_port_freertos_init(host_task);
-    ESP_LOGI(TAG, "NimBLE initialized with 5 Hz mock SensorData");
+    ESP_LOGI(TAG, "NimBLE initialized with 5 Hz real SensorData");
     return ESP_OK;
 }
