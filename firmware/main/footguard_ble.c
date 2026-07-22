@@ -16,6 +16,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 #include "footguard_config.h"
+#include "footguard_fsr.h"
 #include "footguard_gatt.h"
 #include "footguard_protocol.h"
 #include "footguard_real_sensor.h"
@@ -375,16 +376,24 @@ static void sensor_task(void *arg)
         last_notify_error = 0;
         ++notified_count;
         if (notified_count % SENSOR_LOG_INTERVAL == 0U) {
+            int fsr_p1_raw = -1;
+
+            if (footguard_fsr_read_raw_channel(0U, &fsr_p1_raw) != ESP_OK) {
+                fsr_p1_raw = -1;
+            }
+
             ESP_LOGI(TAG,
                      "Real SensorData: count=%" PRIu32
                      " seq=%" PRIu32
                      " flags=0x%08" PRIX32
+                     " fsr_p1_raw=%d"
                      " temp=(%.2f,%.2f,%.2f,%.2f)C"
                      " accel=(%.2f,%.2f,%.2f)m/s2"
                      " gyro=(%.2f,%.2f,%.2f)dps",
                      notified_count,
                      packet_seq - 1U,
                      sensor_data.quality_flags,
+                     fsr_p1_raw,
                      sensor_data.temperature_c[0],
                      sensor_data.temperature_c[1],
                      sensor_data.temperature_c[2],
