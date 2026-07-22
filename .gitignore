@@ -25,3 +25,4 @@ mobile_app/android/.gradle/
 # System
 .DS_Store
 Thumbs.db
+firmware/build*/

@@ -22,3 +22,15 @@ idf_component_register(
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+
+set(FOOTGUARD_DEVICE_VARIANT "0" CACHE STRING
+    "FootGuard device variant: 0=left, 1=right")
+
+if(NOT FOOTGUARD_DEVICE_VARIANT MATCHES "^[01]$")
+    message(FATAL_ERROR
+        "FOOTGUARD_DEVICE_VARIANT must be 0 (left) or 1 (right)")
+endif()
+
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    FOOTGUARD_DEVICE_VARIANT=${FOOTGUARD_DEVICE_VARIANT}
+)

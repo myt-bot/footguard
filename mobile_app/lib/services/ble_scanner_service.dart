@@ -114,7 +114,6 @@ class BleScannerService {
     }
     await _requireBluetoothReady();
 
-    FlutterBluePlus.setOperationQueueMode(OperationQueueMode.perDevice);
     await stopScan(clearResults: true);
 
     _resultsSubscription = FlutterBluePlus.onScanResults.listen(
