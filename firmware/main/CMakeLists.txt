@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "footguard_adc.c"
         "footguard_ble.c"
         "footguard_command.c"
         "footguard_command_executor.c"
