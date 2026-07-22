@@ -15,11 +15,16 @@ FootGuard ESP32-S3 双足设备固件，基于 ESP-IDF v5.5.4 和内置 NimBLE C
 - 单路 FSR ADC 驱动验证代码；
 - 单路 NTC 10K B3950 温度采集验证；
 - 单个 GY-521 MPU6050 六轴数据采集验证；
-- GPIO13 高电平有效的马达控制和一次性测试时序。
+- GPIO13 高电平有效的真实马达控制；
+- DeviceCommand JSON 解析、校验和异步执行队列；
+- `off`、`short`、`double`、`long` 四种震动模式；
+- 重复命令去重、命令冲突拒绝和 AckEvent Notify。
 
 当前 BLE SensorData 仍使用模拟数据，尚未把真实 FSR、NTC 和 MPU6050 数据写入固定 60 字节帧。电量值也是模拟值。
 
-DeviceCommand 仍会被拒绝，真实命令执行、重复命令去重和 AckEvent 通知尚未实现。GPIO13 马达时序已通过串口验证，但真实马达和驱动模块尚未完成接线震动测试。
+DeviceCommand 已接入真实马达执行链路，不再以“不支持”直接拒绝。固件会校验 JSON、协议版本、目标脚、震动模式、持续时间、时间同步状态和命令过期时间，并通过深度为 4 的异步队列执行命令。最近至少 32 个命令会参与去重：相同 `command_id` 且内容相同只重发缓存 ACK，不重复震动；相同 `command_id` 但内容不同会返回 `rejected/command_conflict`。
+
+左脚板已完成真实马达和驱动模块接线，并实测 `short`、`double`、`long`、`off`、重复命令和冲突命令。App 已跑通“后端 pending 命令 → BLE DeviceCommand → ESP32 真实震动 → AckEvent → App 上传后端”的完整闭环。右脚板尚未完成马达实机接线与闭环验证。
 
 ## 固定协议
 
@@ -41,7 +46,7 @@ DeviceCommand 仍会被拒绝，真实命令执行、重复命令去重和 AckEv
 | NTC T1 | GPIO7 / ADC1_CH6 | 已完成桌面、手指加热和冷却变化验证 |
 | MPU6050 SDA | GPIO11 | 已完成静止、改变姿态和快速转动验证 |
 | MPU6050 SCL | GPIO12 | I2C 100 kHz，地址 0x68 |
-| 马达 IO/PWM | GPIO13 | 高电平启动；软件时序已验证，真实震动待验证 |
+| 马达 IO/PWM | GPIO13 | 高电平启动；左脚真实震动与命令闭环已验证，右脚待实机验证 |
 
 左右脚开发板使用相同的传感器和马达引脚分配，通过 `main/footguard_config.h` 选择设备身份。
 
@@ -82,17 +87,20 @@ DeviceCommand 仍会被拒绝，真实命令执行、重复命令去重和 AckEv
 
 已完成静止、直立和快速转动验证。快速转动时达到 ±2 g 或 ±250 °/s 属于当前量程饱和，不代表通信故障。模块未连接时启动日志会报告 `ESP_ERR_NOT_FOUND`。
 
-## 马达 GPIO 验证
+## 马达命令与 AckEvent 闭环
 
-`footguard_motor.c` 使用 GPIO13 控制高电平有效的 MOSFET 马达驱动模块：
+`footguard_motor.c` 使用 GPIO13 控制高电平有效的 MOSFET 马达驱动模块。初始化时强制输出低电平，固件启动后不会自动震动，只有通过校验的 DeviceCommand 才能控制马达。
 
-- 初始化后首先强制输出低电平；
-- 启动 3 秒后输出一次 300 ms 高电平；
-- 等待 1 秒；
-- 输出两次各 250 ms 的高电平，中间间隔 200 ms；
-- 测试结束后强制恢复低电平并删除测试任务。
+当前支持以下模式：
 
-该启动测试只用于硬件验证，后续实现 DeviceCommand 时应移除自动震动，改为由通过校验的命令控制，并在执行后通过 AckEvent 返回真实结果。
+- `off`：立即关闭输出，不产生震动；
+- `short`：按命令中的 `duration_ms` 持续震动；
+- `double`：执行两段震动，两段之间固定间隔 200 ms；
+- `long`：按命令中的 `duration_ms` 持续震动。
+
+DeviceCommand 由独立任务异步执行，避免 BLE GATT 写回调被震动时序阻塞。执行结束后生成包含 `command_id`、`device_id`、`status`、`ack_at_ms`、`executed_at_ms` 和 `error_code` 的 AckEvent JSON，并通过 Notify 返回 App。AckEvent 需要客户端先完成订阅，且 MTU 必须能够承载完整 JSON。
+
+设备保存最近至少 32 个命令的内容和 ACK：完全相同的重复命令不会再次震动，只重发原 ACK；相同 `command_id` 携带不同内容时拒绝执行并返回 `command_conflict`。`target=both` 时，左右板分别校验、执行并返回各自的 ACK。
 
 ## BLE 服务
 
@@ -107,7 +115,7 @@ DeviceCommand 仍会被拒绝，真实命令执行、重复命令去重和 AckEv
 
 App 应协商 MTU 247。TimeSync 为 12 字节小端载荷：4 字节非零 `sync_id`，随后是 8 字节 Unix 毫秒时间。设备断开连接后会清除时间基准，重新连接必须再次同步。
 
-当前 DeviceCommand 不会控制马达，也不会生成虚假的 `executed` ACK。
+DeviceCommand 写入成功只表示命令已通过校验并进入执行队列；固件仅在真实执行结束后返回 `executed` ACK。执行失败时不得伪造 `executed`。左脚板已在 MTU 247 且订阅 AckEvent 的条件下完成真实 Notify 验证。
 
 ## 设备配置
 
@@ -145,8 +153,8 @@ idf.py -p COM14 flash monitor
 
 ## 后续工作
 
-1. 完成真实马达和驱动模块接线验证；
-2. 实现 DeviceCommand 校验、马达执行、命令去重和 AckEvent；
-3. 将 6 路压力、4 路温度和 MPU6050 真实数据接入 SensorData；
-4. 完成左右脚固件烧录和 App 双足联调；
-5. 完成电池电量采集及最终鞋垫装配验证。
+1. 将 6 路压力、4 路温度和 MPU6050 真实数据接入 SensorData；
+2. 完成右脚马达接线、固件烧录和 AckEvent 实机验证；
+3. 完成 App 双足同时连接、同步采样和左右足真实数据联调；
+4. 完成电池电量采集及最终鞋垫装配验证；
+5. 使用真实数据验证异常提醒后的压力改善评估闭环。
