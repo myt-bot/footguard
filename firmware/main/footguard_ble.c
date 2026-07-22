@@ -375,10 +375,22 @@ static void sensor_task(void *arg)
         last_notify_error = 0;
         ++notified_count;
         if (notified_count % SENSOR_LOG_INTERVAL == 0U) {
-            ESP_LOGI(TAG, "SensorData notifications sent: count=%" PRIu32
-                          " latest_packet_seq=%" PRIu32,
+            ESP_LOGI(TAG,
+                     "Real SensorData: count=%" PRIu32
+                     " seq=%" PRIu32
+                     " flags=0x%08" PRIX32
+                     " T1=%.2fC accel=(%.2f,%.2f,%.2f)m/s2"
+                     " gyro=(%.2f,%.2f,%.2f)dps",
                      notified_count,
-                     packet_seq - 1U);
+                     packet_seq - 1U,
+                     sensor_data.quality_flags,
+                     sensor_data.temperature_c[0],
+                     sensor_data.acceleration_m_s2[0],
+                     sensor_data.acceleration_m_s2[1],
+                     sensor_data.acceleration_m_s2[2],
+                     sensor_data.gyroscope_deg_s[0],
+                     sensor_data.gyroscope_deg_s[1],
+                     sensor_data.gyroscope_deg_s[2]);
         }
     }
 }
