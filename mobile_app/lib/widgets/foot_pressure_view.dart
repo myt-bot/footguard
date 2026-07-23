@@ -50,12 +50,24 @@ class FootPressureView extends StatelessWidget {
   // Competition-prototype display gate; recalibrate after final insole assembly.
   static const double _minimumFallbackPressure = 0.01;
 
+  // Pressure and temperature form one diabetic-foot assessment frame. If the
+  // current frame is incomplete, do not render cached backend risk scores.
+  bool get _sensorFrameValid =>
+      frame != null &&
+      frame!.pressureChannelsValid &&
+      frame!.temperatureChannelsValid;
+
   List<double> get _fallbackPressureScores {
+    if (!_sensorFrameValid) {
+      return List.filled(6, 0.0);
+    }
     final current = frame?.pressure;
     if (current == null || current.length != 6) {
       return List.filled(6, 0.0);
     }
-    final peer = oppositeFrame?.pressure;
+    final peer = oppositeFrame?.pressureChannelsValid == true
+        ? oppositeFrame?.pressure
+        : null;
     final peak = current.reduce(math.max);
     if (peak < _minimumFallbackPressure) {
       return List.filled(6, 0.0);
@@ -84,6 +96,9 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedPressureScores {
+    if (!_sensorFrameValid) {
+      return List.filled(6, 0.0);
+    }
     final values = pressureScores;
     return values != null && values.length == 6
         ? values
@@ -93,6 +108,10 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _fallbackTemperatureScores {
+    if (frame?.temperatureChannelsValid != true ||
+        oppositeFrame?.temperatureChannelsValid != true) {
+      return List.filled(4, 0.0);
+    }
     final current = frame?.temperature;
     final peer = oppositeFrame?.temperature;
     if (current == null ||
@@ -109,6 +128,9 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedTemperatureScores {
+    if (frame?.temperatureChannelsValid != true) {
+      return List.filled(4, 0.0);
+    }
     final values = temperatureScores;
     return values != null && values.length == 4
         ? values
@@ -118,6 +140,10 @@ class FootPressureView extends StatelessWidget {
   }
 
   double? _sideTemperatureDelta(int index) {
+    if (frame?.temperatureChannelValid(index) != true ||
+        oppositeFrame?.temperatureChannelValid(index) != true) {
+      return null;
+    }
     final values = temperatureDeltaC;
     if (values != null && values.length == 4) {
       return side == 'left' ? values[index] : -values[index];
@@ -243,7 +269,10 @@ class FootPressureView extends StatelessWidget {
                     child: _TemperatureTile(
                       channel: row * 2 + column + 1,
                       zone: _temperatureZones[row * 2 + column],
-                      value: frame?.temperature[row * 2 + column],
+                      value: frame?.temperatureChannelValid(row * 2 + column) ==
+                              true
+                          ? frame!.temperature[row * 2 + column]
+                          : null,
                       delta: _sideTemperatureDelta(row * 2 + column),
                       score: temperatureSeverity[row * 2 + column],
                     ),

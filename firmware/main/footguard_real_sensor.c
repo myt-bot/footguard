@@ -15,6 +15,13 @@
 #define FOOTGUARD_STANDARD_GRAVITY_M_S2 9.80665f
 #define FOOTGUARD_FSR_ADC_FULL_SCALE 4095.0
 
+/*
+ * Engineering plausibility window for detecting an open, floating, or
+ * otherwise invalid NTC channel. This is not a clinical alarm threshold.
+ */
+#define FOOTGUARD_NTC_PLAUSIBLE_MIN_C 10.0f
+#define FOOTGUARD_NTC_PLAUSIBLE_MAX_C 60.0f
+
 static const char *TAG = "footguard_sensor";
 static bool s_fsr_ready;
 static bool s_ntc_ready;
@@ -112,8 +119,8 @@ esp_err_t footguard_real_sensor_make_data(
             footguard_ntc_reading_t ntc;
 
             if (footguard_ntc_read_channel(channel, &ntc) == ESP_OK &&
-                ntc.temperature_c >= -40.0f &&
-                ntc.temperature_c <= 125.0f) {
+                ntc.temperature_c >= FOOTGUARD_NTC_PLAUSIBLE_MIN_C &&
+                ntc.temperature_c <= FOOTGUARD_NTC_PLAUSIBLE_MAX_C) {
                 sensor_data->temperature_c[channel] = ntc.temperature_c;
                 sensor_data->quality_flags &=
                     ~(FOOTGUARD_QUALITY_TEMPERATURE_T1_INVALID << channel);
