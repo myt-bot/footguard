@@ -73,8 +73,20 @@ class FootFrame {
   final int qualityFlags;
   final String source;
 
+  static const int pressureInvalidMask = 0x0000003f;
+  static const int temperatureInvalidMask = 0x000003c0;
+
   double get totalLoad => pressure.fold(0, (sum, value) => sum + value);
   bool get qualityOk => qualityFlags == 0;
+  bool get pressureChannelsValid => qualityFlags & pressureInvalidMask == 0;
+  bool get temperatureChannelsValid =>
+      qualityFlags & temperatureInvalidMask == 0;
+
+  bool pressureChannelValid(int index) =>
+      index >= 0 && index < 6 && qualityFlags & (1 << index) == 0;
+
+  bool temperatureChannelValid(int index) =>
+      index >= 0 && index < 4 && qualityFlags & (0x40 << index) == 0;
 
   static List<double> _channels(dynamic raw, int length, String field) {
     if (raw is! List ||
