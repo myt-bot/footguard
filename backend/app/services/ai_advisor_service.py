@@ -1,12 +1,62 @@
 from __future__ import annotations
 
-from ..config import MOTOR_COMMAND_LEVEL, MOTOR_PATTERN
+import json
+import logging
+from dataclasses import dataclass
+
+import httpx
+from pydantic import Field
+
+from ..config import (
+    MOTOR_COMMAND_LEVEL,
+    MOTOR_PATTERN,
+    ai_api_key,
+    ai_base_url,
+    ai_model,
+    ai_provider,
+    ai_timeout_seconds,
+)
 from ..schemas import AiAdviceRequest, AiAdviceResponse
+from ..schemas import StrictModel
 
 
 MOCK_PROVIDER = "mock-risk-advisor-v1"
+FALLBACK_PROVIDER = "mock-risk-advisor-v1:fallback"
 MEDICAL_BOUNDARY = "本建议仅用于原型辅助提示，不能替代医疗诊断。"
 SUPPORTED_PATTERNS = {"off", "short", "double", "long"}
+logger = logging.getLogger(__name__)
+
+
+class CloudAdviceError(RuntimeError):
+    pass
+
+
+class _CloudNarrative(StrictModel):
+    explanation: str = Field(min_length=1, max_length=500)
+    advice: str = Field(min_length=1, max_length=430)
+
+
+@dataclass(frozen=True)
+class _CloudSettings:
+    base_url: str
+    api_key: str
+    model: str
+    timeout_seconds: float
+
+
+def _cloud_settings() -> _CloudSettings | None:
+    if ai_provider() != "openai_compatible":
+        return None
+    api_key = ai_api_key()
+    model = ai_model()
+    if not api_key or not model:
+        return None
+    return _CloudSettings(
+        base_url=ai_base_url(),
+        api_key=api_key,
+        model=model,
+        timeout_seconds=ai_timeout_seconds(),
+    )
 
 
 def _risk_target(payload: AiAdviceRequest) -> str:
@@ -95,3 +145,102 @@ def generate_mock_advice(payload: AiAdviceRequest) -> AiAdviceResponse:
         target=target,
         candidate_pattern=_candidate_pattern(payload, target),
     )
+
+
+def _cloud_prompt(payload: AiAdviceRequest) -> list[dict[str, str]]:
+    system_prompt = (
+        "你是糖尿病足辅助监测原型的风险解释助手。"
+        "只根据用户提供的结构化数据，用简洁中文输出 JSON 对象，"
+        '且只能包含 "explanation" 和 "advice" 两个字符串字段。'
+        "不得诊断疾病，不得虚构数值，不得决定或描述马达控制参数。"
+        "explanation 说明规则引擎已经识别出的现象；"
+        "advice 给出低风险、可执行的观察或检查建议。"
+    )
+    user_payload = json.dumps(
+        payload.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_payload},
+    ]
+
+
+def _request_cloud_narrative(
+    payload: AiAdviceRequest,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> _CloudNarrative:
+    owns_client = client is None
+    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    try:
+        response = active_client.post(
+            f"{settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.model,
+                "messages": _cloud_prompt(payload),
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise CloudAdviceError("cloud response content is not text")
+        return _CloudNarrative.model_validate_json(content)
+    except (
+        httpx.HTTPError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise CloudAdviceError("cloud provider returned an invalid response") from error
+    finally:
+        if owns_client:
+            active_client.close()
+
+
+def _cloud_provider_name(model: str) -> str:
+    return f"openai-compatible:{model}"[:64]
+
+
+def _safe_cloud_advice(
+    payload: AiAdviceRequest,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> AiAdviceResponse:
+    narrative = _request_cloud_narrative(payload, settings, client)
+    target = _risk_target(payload)
+    advice = narrative.advice
+    if payload.risk.risk_type not in {"normal", "data_incomplete"}:
+        advice = f"{advice.rstrip()}{MEDICAL_BOUNDARY}"
+    return AiAdviceResponse(
+        provider=_cloud_provider_name(settings.model),
+        risk_level=payload.risk.risk_level,
+        explanation=narrative.explanation,
+        advice=advice,
+        target=target,
+        candidate_pattern=_candidate_pattern(payload, target),
+    )
+
+
+def generate_advice(
+    payload: AiAdviceRequest,
+    client: httpx.Client | None = None,
+) -> AiAdviceResponse:
+    """Use a configured cloud model, with a deterministic fail-safe fallback."""
+    settings = _cloud_settings()
+    if settings is None:
+        return generate_mock_advice(payload)
+    try:
+        return _safe_cloud_advice(payload, settings, client)
+    except CloudAdviceError as error:
+        logger.warning("Cloud AI unavailable; falling back to mock advice: %s", error)
+        fallback = generate_mock_advice(payload)
+        return fallback.model_copy(update={"provider": FALLBACK_PROVIDER})
