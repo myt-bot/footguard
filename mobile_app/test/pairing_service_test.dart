@@ -19,15 +19,15 @@ FootFrame frame(String side, int timestamp) => FootFrame(
     );
 
 void main() {
-  test('pairs left and right within 50 ms', () {
+  test('pairs left and right within 100 ms', () {
     final service = FramePairingService();
     expect(service.add(frame('left', 1000)), isNull);
-    expect(service.add(frame('right', 1020)), hasLength(2));
+    expect(service.add(frame('right', 1100)), hasLength(2));
   });
 
   test('does not pair frames outside sync window', () {
     final service = FramePairingService();
     service.add(frame('left', 1000));
-    expect(service.add(frame('right', 1100)), isNull);
+    expect(service.add(frame('right', 1101)), isNull);
   });
 }
