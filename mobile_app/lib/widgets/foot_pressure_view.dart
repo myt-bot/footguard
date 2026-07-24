@@ -54,8 +54,7 @@ class FootPressureView extends StatelessWidget {
 
   // Pressure rendering must not disappear just because a temperature channel
   // is temporarily invalid. Each sensor family follows its own quality flags.
-  bool get _pressureFrameValid =>
-      frame != null && frame!.pressureChannelsValid;
+  bool get _pressureFrameValid => frame != null && frame!.pressureChannelsValid;
 
   List<double> get _fallbackPressureScores {
     if (!_pressureFrameValid) {

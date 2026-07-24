@@ -21,8 +21,7 @@ class FramePairingService {
     if (left.syncId != right.syncId || left.packetSeq != right.packetSeq) {
       return null;
     }
-    if ((left.timestampMs - right.timestampMs).abs() >
-        maxTimestampDeltaMs) {
+    if ((left.timestampMs - right.timestampMs).abs() > maxTimestampDeltaMs) {
       return null;
     }
     _left = null;
