@@ -105,6 +105,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.leftTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
+                    useBackendAnalysis: !controller.usesRealBleCommands,
                   ),
                 ),
                 const SizedBox(width: 12, height: 12),
@@ -117,6 +118,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.rightTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
+                    useBackendAnalysis: !controller.usesRealBleCommands,
                   ),
                 ),
               ];
@@ -134,6 +136,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                           temperatureScores: analysis?.leftTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
+                          useBackendAnalysis: !controller.usesRealBleCommands,
                         ),
                         const SizedBox(height: 12),
                         FootPressureView(
@@ -144,6 +147,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                           temperatureScores: analysis?.rightTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
+                          useBackendAnalysis: !controller.usesRealBleCommands,
                         ),
                       ],
                     );
