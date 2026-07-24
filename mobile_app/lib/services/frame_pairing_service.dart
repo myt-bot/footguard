@@ -1,6 +1,9 @@
 import '../models/foot_frame.dart';
 
 class FramePairingService {
+  FramePairingService({this.maxTimestampDeltaMs = 100});
+
+  final int maxTimestampDeltaMs;
   FootFrame? _left;
   FootFrame? _right;
 
@@ -18,7 +21,8 @@ class FramePairingService {
     if (left.syncId != right.syncId || left.packetSeq != right.packetSeq) {
       return null;
     }
-    if ((left.timestampMs - right.timestampMs).abs() > 50) {
+    if ((left.timestampMs - right.timestampMs).abs() >
+        maxTimestampDeltaMs) {
       return null;
     }
     _left = null;
