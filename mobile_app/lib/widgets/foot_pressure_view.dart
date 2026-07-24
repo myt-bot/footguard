@@ -14,6 +14,7 @@ class FootPressureView extends StatelessWidget {
     this.temperatureScores,
     this.temperatureDeltaC,
     this.baselineReady = false,
+    this.useBackendAnalysis = true,
   });
 
   final String side;
@@ -23,6 +24,7 @@ class FootPressureView extends StatelessWidget {
   final List<double>? temperatureScores;
   final List<double>? temperatureDeltaC;
   final bool baselineReady;
+  final bool useBackendAnalysis;
 
   static const _defaultDistribution = <double>[
     0.16,
@@ -50,15 +52,13 @@ class FootPressureView extends StatelessWidget {
   // Competition-prototype display gate; recalibrate after final insole assembly.
   static const double _minimumFallbackPressure = 0.01;
 
-  // Pressure and temperature form one diabetic-foot assessment frame. If the
-  // current frame is incomplete, do not render cached backend risk scores.
-  bool get _sensorFrameValid =>
-      frame != null &&
-      frame!.pressureChannelsValid &&
-      frame!.temperatureChannelsValid;
+  // Pressure rendering must not disappear just because a temperature channel
+  // is temporarily invalid. Each sensor family follows its own quality flags.
+  bool get _pressureFrameValid =>
+      frame != null && frame!.pressureChannelsValid;
 
   List<double> get _fallbackPressureScores {
-    if (!_sensorFrameValid) {
+    if (!_pressureFrameValid) {
       return List.filled(6, 0.0);
     }
     final current = frame?.pressure;
@@ -96,11 +96,11 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedPressureScores {
-    if (!_sensorFrameValid) {
+    if (!_pressureFrameValid) {
       return List.filled(6, 0.0);
     }
     final values = pressureScores;
-    return values != null && values.length == 6
+    return useBackendAnalysis && values != null && values.length == 6
         ? values
             .map((value) => value.clamp(0.0, 1.0).toDouble())
             .toList(growable: false)
@@ -132,7 +132,7 @@ class FootPressureView extends StatelessWidget {
       return List.filled(4, 0.0);
     }
     final values = temperatureScores;
-    return values != null && values.length == 4
+    return useBackendAnalysis && values != null && values.length == 4
         ? values
             .map((value) => value.clamp(0.0, 1.0).toDouble())
             .toList(growable: false)
@@ -145,7 +145,7 @@ class FootPressureView extends StatelessWidget {
       return null;
     }
     final values = temperatureDeltaC;
-    if (values != null && values.length == 4) {
+    if (useBackendAnalysis && values != null && values.length == 4) {
       return side == 'left' ? values[index] : -values[index];
     }
     final current = frame?.temperature;
