@@ -9,7 +9,7 @@ DATA_DIR = ROOT / "backend" / "data"
 DEFAULT_DATABASE_URL = f"sqlite:///{(DATA_DIR / 'footguard.db').as_posix()}"
 
 # Competition prototype thresholds. These are engineering defaults, not medical standards.
-PAIRING_WINDOW_MS = 50
+PAIRING_WINDOW_MS = 100
 CONTINUITY_GAP_MS = 1_000
 PRESSURE_INVALID_MASK = 0x0000003F
 TEMPERATURE_INVALID_MASK = 0x000003C0
