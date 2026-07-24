@@ -98,14 +98,15 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _onFrame(FootFrame frame) {
-    if (frame.side == 'left') {
-      left = frame;
-    } else {
-      right = frame;
-    }
-    lastUpdated = DateTime.now();
     final pair = _pairing.add(frame);
-    if (pair != null && source.shouldUploadToBackend) {
+    if (pair == null) {
+      return;
+    }
+
+    left = pair.firstWhere((item) => item.side == 'left');
+    right = pair.firstWhere((item) => item.side == 'right');
+    lastUpdated = DateTime.now();
+    if (source.shouldUploadToBackend) {
       _enqueuePair(pair);
     }
     notifyListeners();
