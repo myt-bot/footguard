@@ -106,6 +106,59 @@ def test_realtime_rejects_mismatched_sync_id(client: TestClient) -> None:
     assert result["load_bias"] is None
 
 
+def test_realtime_holds_recent_complete_pair_during_brief_side_skew(
+    client: TestClient,
+) -> None:
+    initial = sensor_batch()
+    client.post("/api/v1/sensor/batch", json=initial)
+
+    initial_packet_seq = initial["frames"][0]["packet_seq"]
+    next_left = dict(initial["frames"][0])
+    next_left["packet_seq"] = initial_packet_seq + 1
+    next_left["timestamp_ms"] += 200
+    response = client.post(
+        "/api/v1/sensor/batch",
+        json={
+            "protocol_version": 1,
+            "app_received_at_ms": next_left["timestamp_ms"],
+            "frames": [next_left],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["latest_risk"] == "normal"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["risk"]["risk_type"] == "normal"
+    assert realtime["left"]["packet_seq"] == initial_packet_seq
+    assert realtime["right"]["packet_seq"] == initial_packet_seq
+    assert realtime["paired_timestamp_ms"] == 1760000000020
+
+
+def test_realtime_reports_incomplete_after_side_skew_exceeds_continuity_gap(
+    client: TestClient,
+) -> None:
+    initial = sensor_batch()
+    client.post("/api/v1/sensor/batch", json=initial)
+
+    stale_left = dict(initial["frames"][0])
+    stale_left["packet_seq"] = 6
+    stale_left["timestamp_ms"] += 1_200
+    response = client.post(
+        "/api/v1/sensor/batch",
+        json={
+            "protocol_version": 1,
+            "app_received_at_ms": stale_left["timestamp_ms"],
+            "frames": [stale_left],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["latest_risk"] == "data_incomplete"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["risk"]["risk_type"] == "data_incomplete"
+    assert realtime["paired_timestamp_ms"] is None
+
+
 @pytest.mark.parametrize(
     ("temperature_index", "invalid_flag"),
     [
