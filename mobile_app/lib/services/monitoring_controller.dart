@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/api_client.dart';
 import '../data/foot_data_source.dart';
+import '../models/ai_advice.dart';
 import '../models/device_command.dart';
 import '../models/foot_frame.dart';
 import '../models/risk_state.dart';
@@ -27,6 +28,10 @@ class MonitoringController extends ChangeNotifier {
   Timer? _refreshTimer;
   bool _uploading = false;
   bool _refreshing = false;
+  bool _disposed = false;
+  bool _aiAdviceLoading = false;
+  String? _lastAdviceSignature;
+  DateTime? _lastAdviceAttemptAt;
 
   FootFrame? left;
   FootFrame? right;
@@ -44,6 +49,10 @@ class MonitoringController extends ChangeNotifier {
   double? loadDiff;
   int? syncErrorMs;
   RegionalAnalysis? regionalAnalysis;
+  AiAdvice? aiAdvice;
+  String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
+
+  bool get aiAdviceLoading => _aiAdviceLoading;
 
   Future<void> start() async {
     _subscriptions.add(source.frames.listen(_onFrame));
@@ -160,6 +169,7 @@ class MonitoringController extends ChangeNotifier {
         syncErrorMs = snapshot.syncErrorMs;
         risk = snapshot.risk;
         regionalAnalysis = snapshot.regionalAnalysis;
+        _updateAiAdviceIfNeeded();
       } else {
         _resetBilateralState();
       }
@@ -211,8 +221,90 @@ class MonitoringController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _updateAiAdviceIfNeeded() {
+    if (risk.isIncomplete) {
+      aiAdvice = null;
+      aiAdviceStatus = '双足有效数据不完整，暂不生成 AI 解释';
+      _lastAdviceSignature = null;
+      _lastAdviceAttemptAt = null;
+      return;
+    }
+    if (risk.isNormal) {
+      aiAdvice = null;
+      aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
+      _lastAdviceSignature = null;
+      _lastAdviceAttemptAt = null;
+      return;
+    }
+
+    final signature = '${risk.riskType}|${risk.riskSide}|${risk.riskLevel}';
+    final now = DateTime.now();
+    final withinCooldown = _lastAdviceSignature == signature &&
+        _lastAdviceAttemptAt != null &&
+        now.difference(_lastAdviceAttemptAt!) < const Duration(seconds: 30);
+    final alreadyExplained =
+        _lastAdviceSignature == signature && aiAdvice != null;
+    if (_aiAdviceLoading || withinCooldown || alreadyExplained) {
+      return;
+    }
+
+    _lastAdviceSignature = signature;
+    _lastAdviceAttemptAt = now;
+    _aiAdviceLoading = true;
+    aiAdvice = null;
+    aiAdviceStatus = '正在生成辅助解释…';
+    unawaited(_requestAiAdvice(signature, risk, regionalAnalysis));
+  }
+
+  Future<void> _requestAiAdvice(
+    String signature,
+    RiskState requestedRisk,
+    RegionalAnalysis? requestedAnalysis,
+  ) async {
+    try {
+      final advice = await api.aiAdvice(
+        risk: requestedRisk,
+        loadDiff: loadDiff,
+        temperatureDeltaMaxC:
+            _maximumTemperatureDelta(requestedAnalysis?.temperatureDeltaC),
+        baselineReady: requestedAnalysis?.baselineReady ?? false,
+      );
+      if (_currentRiskSignature == signature) {
+        aiAdvice = advice;
+        aiAdviceStatus = advice.usedFallback ? '云端暂不可用，已使用本地安全降级解释' : '辅助解释已更新';
+      }
+    } catch (error) {
+      if (_currentRiskSignature == signature) {
+        aiAdviceStatus = 'AI 辅助解释暂不可用：$error';
+      }
+    } finally {
+      _aiAdviceLoading = false;
+      if (!_disposed) {
+        notifyListeners();
+      }
+    }
+  }
+
+  String get _currentRiskSignature =>
+      '${risk.riskType}|${risk.riskSide}|${risk.riskLevel}';
+
+  static double? _maximumTemperatureDelta(List<double>? values) {
+    if (values == null || values.isEmpty) {
+      return null;
+    }
+    var maximum = 0.0;
+    for (final value in values) {
+      final absolute = value.abs();
+      if (absolute > maximum) {
+        maximum = absolute;
+      }
+    }
+    return maximum;
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     _refreshTimer?.cancel();
     for (final subscription in _subscriptions) {
       subscription.cancel();

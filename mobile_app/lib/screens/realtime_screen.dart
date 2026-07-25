@@ -10,6 +10,7 @@ import '../data/mock_foot_data_source.dart';
 import '../services/ble_connection_service.dart';
 import '../services/ble_command_bridge.dart';
 import '../services/monitoring_controller.dart';
+import '../widgets/ai_advice_card.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/foot_pressure_view.dart';
 import '../widgets/risk_banner.dart';
@@ -150,6 +151,12 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
             }),
             const SizedBox(height: 12),
             _MetricsCard(controller: controller),
+            const SizedBox(height: 12),
+            AiAdviceCard(
+              advice: controller.aiAdvice,
+              status: controller.aiAdviceStatus,
+              loading: controller.aiAdviceLoading,
+            ),
             const SizedBox(height: 12),
             Card(
               elevation: 0,
