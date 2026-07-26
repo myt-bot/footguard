@@ -4,7 +4,16 @@ from fastapi import FastAPI
 
 from .config import DATA_DIR, database_url
 from .database import create_database
-from .routers import ai_advice, commands, events, feedback, health, realtime, sensor
+from .routers import (
+    ai_advice,
+    calibration,
+    commands,
+    events,
+    feedback,
+    health,
+    realtime,
+    sensor,
+)
 
 
 def create_app(database_url_override: str | None = None) -> FastAPI:
@@ -21,6 +30,7 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
     application.state.session_factory = session_factory
     application.include_router(health.router)
     application.include_router(ai_advice.router)
+    application.include_router(calibration.router)
     application.include_router(sensor.router)
     application.include_router(realtime.router)
     application.include_router(events.router)

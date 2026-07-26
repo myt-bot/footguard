@@ -97,6 +97,85 @@ def test_realtime_pairs_same_sync_id(client: TestClient) -> None:
     assert len(result["regional_analysis"]["temperature_delta_c"]) == 4
 
 
+def test_calibration_status_and_reset_start_a_new_learning_window(
+    client: TestClient,
+) -> None:
+    initial_status = client.get("/api/v1/calibration/status")
+    assert initial_status.status_code == 200
+    assert initial_status.json()["baseline_ready"] is False
+    assert initial_status.json()["sample_count"] == 0
+
+    base = sensor_batch()
+    for index in range(15):
+        frames = []
+        for source in base["frames"]:
+            frame = dict(source)
+            frame["packet_seq"] = source["packet_seq"] + index
+            frame["timestamp_ms"] = source["timestamp_ms"] + index * 200
+            frames.append(frame)
+        response = client.post(
+            "/api/v1/sensor/batch",
+            json={
+                "protocol_version": 1,
+                "app_received_at_ms": max(
+                    frame["timestamp_ms"] for frame in frames
+                ),
+                "frames": frames,
+            },
+        )
+        assert response.status_code == 200
+
+    learned = client.get("/api/v1/calibration/status").json()
+    assert learned["baseline_ready"] is True
+    assert learned["sample_count"] >= learned["required_samples"]
+
+    now_ms = int(time() * 1000)
+    with client.app.state.session_factory() as session:
+        event = RiskEvent(
+            event_id="evt_calibration_reset",
+            risk_type="left_load_bias",
+            risk_side="left",
+            risk_level=2,
+            started_at_ms=now_ms - 1_000,
+            ended_at_ms=None,
+            duration_ms=1_000,
+            before_load_diff=0.4,
+            after_load_diff=None,
+            status="active",
+        )
+        session.add(event)
+        session.commit()
+        create_command(
+            session,
+            DeviceCommand(
+                command_id="cmd_calibration_reset",
+                target="left",
+                pattern="double",
+                duration_ms=800,
+                expire_at_ms=now_ms + 30_000,
+                reason_code="left_load_bias",
+            ),
+            now_ms,
+            event_id=event.event_id,
+        )
+
+    reset = client.post("/api/v1/calibration/reset")
+    assert reset.status_code == 200
+    assert reset.json()["baseline_ready"] is False
+    assert reset.json()["sample_count"] == 0
+    assert reset.json()["reset_at_ms"] is not None
+
+    current = client.get("/api/v1/calibration/status").json()
+    assert current == reset.json()
+    with client.app.state.session_factory() as session:
+        interrupted_event = session.get(RiskEvent, "evt_calibration_reset")
+        expired_command = session.get(Command, "cmd_calibration_reset")
+        assert interrupted_event.status == "interrupted"
+        assert interrupted_event.ended_at_ms is not None
+        assert expired_command.status == "expired"
+        assert expired_command.error_code == "command_expired"
+
+
 def test_realtime_rejects_mismatched_sync_id(client: TestClient) -> None:
     payload = sensor_batch()
     payload["frames"][1]["sync_id"] = 2
@@ -278,6 +357,23 @@ def test_ack_unknown_command_returns_404(client: TestClient) -> None:
 
 
 def test_feedback_is_persisted(client: TestClient, app) -> None:
+    with app.state.session_factory() as session:
+        session.add(
+            RiskEvent(
+                event_id="evt_1",
+                risk_type="left_load_bias",
+                risk_side="left",
+                risk_level=2,
+                started_at_ms=1_000,
+                ended_at_ms=4_000,
+                duration_ms=3_000,
+                before_load_diff=1.2,
+                after_load_diff=0.3,
+                status="resolved",
+            )
+        )
+        session.commit()
+
     response = client.post(
         "/api/v1/intervention/feedback",
         json={
@@ -293,3 +389,8 @@ def test_feedback_is_persisted(client: TestClient, app) -> None:
     assert response.json() == {"recorded": True}
     with app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(InterventionFeedback)) == 1
+
+    event = client.get("/api/v1/events").json()[0]
+    assert event["intervention_action"] == "followed_vibration"
+    assert event["effect_label"] == "effective"
+    assert event["recovery_time_ms"] == 2_500

@@ -14,6 +14,8 @@ class FootPressureView extends StatelessWidget {
     this.temperatureScores,
     this.temperatureDeltaC,
     this.baselineReady = false,
+    this.baselineSampleCount = 0,
+    this.baselineRequiredSamples = 15,
   });
 
   final String side;
@@ -23,6 +25,8 @@ class FootPressureView extends StatelessWidget {
   final List<double>? temperatureScores;
   final List<double>? temperatureDeltaC;
   final bool baselineReady;
+  final int baselineSampleCount;
+  final int baselineRequiredSamples;
 
   static const _defaultDistribution = <double>[
     0.16,
@@ -195,7 +199,9 @@ class FootPressureView extends StatelessWidget {
           Text(
             baselineReady
                 ? '依据：个人动态基线 + 左右镜像同区对比'
-                : '依据：布局参考分布 + 左右镜像同区对比（基线学习中）',
+                : '依据：布局参考分布 + 左右镜像同区对比'
+                    '（基线学习中 $baselineSampleCount/'
+                    '$baselineRequiredSamples）',
             style: const TextStyle(color: Color(0xFF718096), fontSize: 11),
           ),
           const SizedBox(height: 8),

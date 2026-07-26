@@ -2,6 +2,8 @@ class RegionalAnalysis {
   const RegionalAnalysis({
     required this.baselineReady,
     required this.baselineSource,
+    this.baselineSampleCount = 0,
+    this.baselineRequiredSamples = 15,
     required this.leftPressureScores,
     required this.rightPressureScores,
     required this.temperatureDeltaC,
@@ -11,6 +13,8 @@ class RegionalAnalysis {
 
   final bool baselineReady;
   final String baselineSource;
+  final int baselineSampleCount;
+  final int baselineRequiredSamples;
   final List<double> leftPressureScores;
   final List<double> rightPressureScores;
   final List<double> temperatureDeltaC;
@@ -32,6 +36,9 @@ class RegionalAnalysis {
     return RegionalAnalysis(
       baselineReady: json['baseline_ready'] as bool,
       baselineSource: json['baseline_source'] as String,
+      baselineSampleCount: json['baseline_sample_count'] as int? ?? 0,
+      baselineRequiredSamples:
+          json['baseline_required_samples'] as int? ?? 15,
       leftPressureScores:
           _values(json['left_pressure_scores'], 6, 'left_pressure_scores'),
       rightPressureScores:

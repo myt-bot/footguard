@@ -9,7 +9,6 @@ from pydantic import Field
 
 from ..config import (
     MOTOR_COMMAND_LEVEL,
-    MOTOR_PATTERN,
     ai_api_key,
     ai_base_url,
     ai_model,
@@ -18,6 +17,7 @@ from ..config import (
 )
 from ..schemas import AiAdviceRequest, AiAdviceResponse
 from ..schemas import StrictModel
+from .command_service import motor_profile_for_level
 
 
 MOCK_PROVIDER = "mock-risk-advisor-v1"
@@ -73,9 +73,13 @@ def _risk_target(payload: AiAdviceRequest) -> str:
 def _candidate_pattern(payload: AiAdviceRequest, target: str) -> str:
     if target == "none" or payload.risk.risk_level < MOTOR_COMMAND_LEVEL:
         return "off"
-    if MOTOR_PATTERN not in SUPPORTED_PATTERNS:
-        raise RuntimeError(f"unsupported MOTOR_PATTERN: {MOTOR_PATTERN}")
-    return MOTOR_PATTERN
+    profile = motor_profile_for_level(payload.risk.risk_level)
+    if profile is None:
+        return "off"
+    pattern, _ = profile
+    if pattern not in SUPPORTED_PATTERNS:
+        raise RuntimeError(f"unsupported motor pattern: {pattern}")
+    return pattern
 
 
 def _explanation(payload: AiAdviceRequest) -> str:

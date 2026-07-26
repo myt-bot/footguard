@@ -4,6 +4,12 @@ import '../config/app_config.dart';
 import '../data/api_client.dart';
 
 typedef BackendHealthCheck = Future<bool> Function(String baseUrl);
+typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
+  String baseUrl,
+);
+typedef CalibrationResetter = Future<CalibrationStatus> Function(
+  String baseUrl,
+);
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -11,11 +17,15 @@ class SettingsScreen extends StatefulWidget {
     required this.settings,
     required this.onChanged,
     this.healthCheck,
+    this.calibrationStatusLoader,
+    this.calibrationResetter,
   });
 
   final AppSettings settings;
   final ValueChanged<AppSettings> onChanged;
   final BackendHealthCheck? healthCheck;
+  final CalibrationStatusLoader? calibrationStatusLoader;
+  final CalibrationResetter? calibrationResetter;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -28,6 +38,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _testingBackend = false;
   String? _backendStatus;
   bool _backendOnline = false;
+  bool _loadingCalibration = false;
+  CalibrationStatus? _calibrationStatus;
+  String? _calibrationError;
 
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
@@ -37,6 +50,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       backend.text = value.backendUrl;
       _backendStatus = null;
       _backendOnline = false;
+      _calibrationStatus = null;
+      _calibrationError = null;
     }
   }
 
@@ -116,6 +131,92 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<CalibrationStatus> _defaultCalibrationStatus(String baseUrl) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.calibrationStatus();
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<CalibrationStatus> _defaultResetCalibration(String baseUrl) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.resetCalibration();
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<void> _loadCalibrationStatus() async {
+    if (_backendUrlError() != null) {
+      setState(() => _calibrationError = '请先填写有效的后端地址');
+      return;
+    }
+    setState(() {
+      _loadingCalibration = true;
+      _calibrationError = null;
+    });
+    try {
+      final status = await (widget.calibrationStatusLoader ??
+          _defaultCalibrationStatus)(backend.text.trim());
+      if (!mounted) return;
+      setState(() => _calibrationStatus = status);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _calibrationError = '读取基线状态失败：$error');
+    } finally {
+      if (mounted) {
+        setState(() => _loadingCalibration = false);
+      }
+    }
+  }
+
+  Future<void> _confirmResetCalibration() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重新学习个人基线？'),
+        content: const Text(
+          '请在传感器固定、双脚自然站立且数据稳定时操作。'
+          '重新校准不会删除历史事件，但会结束当前风险并使待执行马达命令失效。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确认重新校准'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _loadingCalibration = true;
+      _calibrationError = null;
+    });
+    try {
+      final status = await (widget.calibrationResetter ??
+          _defaultResetCalibration)(backend.text.trim());
+      if (!mounted) return;
+      setState(() => _calibrationStatus = status);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('基线已重置，请自然站立完成学习')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _calibrationError = '重新校准失败：$error');
+    } finally {
+      if (mounted) {
+        setState(() => _loadingCalibration = false);
+      }
+    }
+  }
+
   void _restoreDefaults() {
     const defaults = AppSettings();
     setState(() {
@@ -145,6 +246,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onChanged: (_) => setState(() {
             _backendStatus = null;
             _backendOnline = false;
+            _calibrationStatus = null;
+            _calibrationError = null;
           }),
           decoration: InputDecoration(
             labelText: 'FastAPI 后端地址',
@@ -284,7 +387,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
           body: '个人基线至少需要 15 组稳定双足承重样本；偏载相对基线差值达到 '
               '0.25、前掌占比较基线增加 0.12，或同位置左右校正温差达到 '
               '2.0°C 时开始计时。持续 3/6/10 秒分别进入关注、警告、持续风险；'
-              '风险等级 2 起发送双振 800 ms 马达命令。以上为工程原型规则，不是医疗诊断标准。',
+              '等级 2 发送双振 800 ms，等级 3 发送长振 1500 ms。'
+              '以上为工程原型规则，不是医疗诊断标准。',
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.tune_rounded),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        '个人基线',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '刷新基线状态',
+                      onPressed:
+                          _loadingCalibration ? null : _loadCalibrationStatus,
+                      icon: _loadingCalibration
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh_rounded),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _calibrationStatus == null
+                      ? '点击刷新，从后端读取当前学习进度。'
+                      : _calibrationStatus!.baselineReady
+                          ? '已完成个人基线学习'
+                          : '学习中：${_calibrationStatus!.sampleCount}/'
+                              '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
+                  key: const ValueKey('calibration-status'),
+                ),
+                if (_calibrationStatus != null &&
+                    !_calibrationStatus!.baselineReady) ...[
+                  const SizedBox(height: 8),
+                  LinearProgressIndicator(
+                    value: _calibrationStatus!.progress,
+                  ),
+                ],
+                if (_calibrationError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _calibrationError!,
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        _loadingCalibration ? null : _confirmResetCalibration,
+                    icon: const Icon(Icons.restart_alt_rounded),
+                    label: const Text('重新校准个人基线'),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
         const SizedBox(height: 12),
         Row(

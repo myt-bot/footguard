@@ -50,8 +50,10 @@ ATTENTION_AFTER_MS = 3_000
 WARNING_AFTER_MS = 6_000
 PERSISTENT_AFTER_MS = 10_000
 MOTOR_COMMAND_LEVEL = 2
-MOTOR_PATTERN = "double"
-MOTOR_DURATION_MS = 800
+MOTOR_WARNING_PATTERN = "double"
+MOTOR_WARNING_DURATION_MS = 800
+MOTOR_PERSISTENT_PATTERN = "long"
+MOTOR_PERSISTENT_DURATION_MS = 1_500
 # Human-facing competition demo: leave enough time for the App polling cycle
 # and for the user to press the simulated execution button.
 MOTOR_COMMAND_TTL_MS = 30_000

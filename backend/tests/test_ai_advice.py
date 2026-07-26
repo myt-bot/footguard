@@ -116,6 +116,23 @@ def test_incomplete_data_only_recommends_connection_check(
     assert "检查左右脚设备连接" in result["advice"]
 
 
+def test_persistent_risk_proposes_long_pattern(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/ai/advice",
+        json=advice_payload(
+            risk_type="forefoot_high",
+            risk_side="left",
+            risk_level=3,
+            duration_ms=11_000,
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["target"] == "left"
+    assert result["candidate_pattern"] == "long"
+
+
 def test_inconsistent_risk_side_cannot_propose_motor_action(
     client: TestClient,
 ) -> None:
