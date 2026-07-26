@@ -48,6 +48,8 @@ class MonitoringController extends ChangeNotifier {
   double? loadBias;
   double? loadDiff;
   int? syncErrorMs;
+  String activityState = 'unknown';
+  double motionScore = 0.0;
   RegionalAnalysis? regionalAnalysis;
   AiAdvice? aiAdvice;
   String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
@@ -99,6 +101,8 @@ class MonitoringController extends ChangeNotifier {
     loadBias = null;
     loadDiff = null;
     syncErrorMs = null;
+    activityState = 'unknown';
+    motionScore = 0.0;
     regionalAnalysis = null;
     if (commandBridge == null) {
       motorCommand = null;
@@ -167,6 +171,8 @@ class MonitoringController extends ChangeNotifier {
         loadBias = snapshot.loadBias;
         loadDiff = snapshot.loadDiff;
         syncErrorMs = snapshot.syncErrorMs;
+        activityState = snapshot.activityState;
+        motionScore = snapshot.motionScore;
         risk = snapshot.risk;
         regionalAnalysis = snapshot.regionalAnalysis;
         _updateAiAdviceIfNeeded();
