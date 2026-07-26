@@ -16,6 +16,8 @@ class RealtimeSnapshot {
     required this.loadBias,
     required this.loadDiff,
     required this.syncErrorMs,
+    this.activityState = 'unknown',
+    this.motionScore = 0.0,
     required this.risk,
     required this.regionalAnalysis,
   });
@@ -25,6 +27,8 @@ class RealtimeSnapshot {
   final double? loadBias;
   final double? loadDiff;
   final int? syncErrorMs;
+  final String activityState;
+  final double motionScore;
   final RiskState risk;
   final RegionalAnalysis? regionalAnalysis;
 
@@ -39,6 +43,8 @@ class RealtimeSnapshot {
         loadBias: (json['load_bias'] as num?)?.toDouble(),
         loadDiff: (json['load_diff'] as num?)?.toDouble(),
         syncErrorMs: json['sync_error_ms'] as int?,
+        activityState: json['activity_state'] as String? ?? 'unknown',
+        motionScore: (json['motion_score'] as num?)?.toDouble() ?? 0.0,
         risk: RiskState.fromJson(json['risk'] as Map<String, dynamic>),
         regionalAnalysis: json['regional_analysis'] == null
             ? null
