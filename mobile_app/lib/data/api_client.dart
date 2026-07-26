@@ -57,6 +57,9 @@ class RiskEventRecord {
     required this.startedAtMs,
     required this.durationMs,
     required this.status,
+    this.endedAtMs,
+    this.beforeLoadDiff,
+    this.afterLoadDiff,
   });
 
   final String eventId;
@@ -64,8 +67,23 @@ class RiskEventRecord {
   final String riskSide;
   final int riskLevel;
   final int startedAtMs;
+  final int? endedAtMs;
   final int durationMs;
+  final double? beforeLoadDiff;
+  final double? afterLoadDiff;
   final String status;
+
+  bool get hasLoadDiffComparison =>
+      beforeLoadDiff != null && afterLoadDiff != null;
+
+  double? get loadDiffImprovementRatio {
+    final before = beforeLoadDiff;
+    final after = afterLoadDiff;
+    if (before == null || after == null || before <= 0) {
+      return null;
+    }
+    return (before - after) / before;
+  }
 
   factory RiskEventRecord.fromJson(Map<String, dynamic> json) =>
       RiskEventRecord(
@@ -74,7 +92,10 @@ class RiskEventRecord {
         riskSide: json['risk_side'] as String,
         riskLevel: json['risk_level'] as int,
         startedAtMs: json['started_at_ms'] as int,
+        endedAtMs: json['ended_at_ms'] as int?,
         durationMs: json['duration_ms'] as int,
+        beforeLoadDiff: (json['before_load_diff'] as num?)?.toDouble(),
+        afterLoadDiff: (json['after_load_diff'] as num?)?.toDouble(),
         status: json['status'] as String,
       );
 }
