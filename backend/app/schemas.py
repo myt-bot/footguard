@@ -109,6 +109,8 @@ class RealtimeResponse(StrictModel):
     sync_error_ms: int | None
     load_bias: float | None
     load_diff: float | None
+    activity_state: Literal["unknown", "stationary", "moving"]
+    motion_score: float = Field(ge=0)
     risk: RiskState
     regional_analysis: "RegionalAnalysis | None" = None
 
