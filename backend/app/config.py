@@ -28,8 +28,19 @@ LOAD_BIAS_EXIT_THRESHOLD = 0.15
 # Pressure decisions use dimensionless ratios and change from a personal
 # baseline. Raw sensor values are never compared directly with body-weight
 # dependent alarm thresholds.
-BASELINE_MIN_SAMPLES = 10
-BASELINE_BALANCED_BIAS_MAX = 0.12
+# Automatic personal-baseline calibration. A candidate must look like
+# bilateral weight-bearing rather than off-ground noise or a single-point
+# bench press. These are prototype engineering limits, not diagnostic limits.
+BASELINE_MIN_SAMPLES = 15
+BASELINE_CALIBRATION_WINDOW_SAMPLES = 50
+BASELINE_MIN_FOOT_PRESSURE = 0.08
+BASELINE_ACTIVE_PRESSURE_FLOOR = 0.005
+BASELINE_MIN_ACTIVE_CHANNELS = 3
+BASELINE_BALANCED_BIAS_MAX = 0.50
+BASELINE_MAX_TEMPERATURE_DELTA_C = 4.0
+BASELINE_LOAD_BIAS_INLIER_TOLERANCE = 0.20
+BASELINE_DISTRIBUTION_INLIER_TOLERANCE = 0.25
+BASELINE_TEMPERATURE_INLIER_TOLERANCE_C = 1.5
 DEFAULT_PRESSURE_DISTRIBUTION = (0.16, 0.17, 0.18, 0.14, 0.18, 0.17)
 FOREFOOT_RATIO_DELTA_THRESHOLD = 0.12
 REGIONAL_SHARE_DELTA_FOR_SEVERE = 0.50

@@ -69,6 +69,11 @@ def upload(client: TestClient, frames: list[dict]) -> dict:
     return response.json()
 
 
+def calibrate(client: TestClient) -> None:
+    result = upload(client, scenario_frames("normal_stand"))
+    assert result["latest_risk"] == "normal"
+
+
 @pytest.mark.parametrize("scenario", ["normal_stand", "normal_walk"])
 def test_normal_scenarios_do_not_create_alarm_or_motor_command(
     scenario: str, client: TestClient, app
@@ -92,6 +97,7 @@ def test_normal_scenarios_do_not_create_alarm_or_motor_command(
 def test_sustained_risk_creates_one_event_and_motor_vibration_command(
     scenario: str, risk_type: str, side: str, client: TestClient, app
 ) -> None:
+    calibrate(client)
     result = upload(client, scenario_frames(scenario))
     assert result["latest_risk"] == risk_type
     with app.state.session_factory() as session:
@@ -116,6 +122,7 @@ def test_disconnect_is_data_incomplete_and_never_vibrates(client: TestClient, ap
 def test_pressure_risk_is_invariant_to_overall_weight_scale(
     client: TestClient,
 ) -> None:
+    calibrate(client)
     frames = scenario_frames("left_load_bias")
     for frame in frames:
         frame["pressure"] = [round(value * 0.55, 4) for value in frame["pressure"]]
@@ -134,6 +141,7 @@ def test_stable_pairs_build_personal_baseline(client: TestClient) -> None:
 
 
 def test_replaying_same_risk_does_not_duplicate_event_or_command(client: TestClient, app) -> None:
+    calibrate(client)
     frames = scenario_frames("left_load_bias")
     upload(client, frames)
     upload(client, frames)
@@ -146,6 +154,7 @@ def test_new_sync_window_creates_a_new_motor_reminder(
     client: TestClient,
     app,
 ) -> None:
+    calibrate(client)
     first_episode = scenario_frames("left_load_bias")
     upload(client, first_episode)
     with app.state.session_factory() as session:
@@ -168,6 +177,7 @@ def test_new_sync_window_creates_a_new_motor_reminder(
 
 
 def test_expired_motor_command_cannot_be_acknowledged_as_executed(client: TestClient, app) -> None:
+    calibrate(client)
     upload(client, scenario_frames("left_load_bias"))
     with app.state.session_factory() as session:
         command = session.scalar(select(Command))
@@ -191,6 +201,7 @@ def test_expired_motor_command_cannot_be_acknowledged_as_executed(client: TestCl
 
 
 def test_duplicate_motor_ack_is_idempotent(client: TestClient, app) -> None:
+    calibrate(client)
     upload(client, scenario_frames("left_load_bias"))
     command = client.get("/api/v1/command/pending?target=left").json()["command"]
     now_ms = int(time() * 1000)
@@ -210,6 +221,7 @@ def test_duplicate_motor_ack_is_idempotent(client: TestClient, app) -> None:
 
 
 def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> None:
+    calibrate(client)
     frames = scenario_frames("intervention_recovery")
     split = 130  # first 13 seconds contain the sustained-bias phase
     upload(client, frames[:split])

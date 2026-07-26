@@ -9,8 +9,16 @@ from sqlalchemy.orm import Session
 
 from ..config import (
     ATTENTION_AFTER_MS,
+    BASELINE_ACTIVE_PRESSURE_FLOOR,
     BASELINE_BALANCED_BIAS_MAX,
+    BASELINE_CALIBRATION_WINDOW_SAMPLES,
+    BASELINE_DISTRIBUTION_INLIER_TOLERANCE,
+    BASELINE_LOAD_BIAS_INLIER_TOLERANCE,
+    BASELINE_MAX_TEMPERATURE_DELTA_C,
+    BASELINE_MIN_ACTIVE_CHANNELS,
+    BASELINE_MIN_FOOT_PRESSURE,
     BASELINE_MIN_SAMPLES,
+    BASELINE_TEMPERATURE_INLIER_TOLERANCE_C,
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
     FOREFOOT_RATIO_DELTA_THRESHOLD,
@@ -38,6 +46,8 @@ class PairMetric:
     sync_id: int
     packet_seq: int
     timestamp_ms: int
+    left_total: float
+    right_total: float
     load_bias: float
     load_diff: float
     left_forefoot_ratio: float
@@ -82,6 +92,8 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
         sync_id=left.sync_id,
         packet_seq=left.packet_seq,
         timestamp_ms=max(left.timestamp_ms, right.timestamp_ms),
+        left_total=left_total,
+        right_total=right_total,
         load_bias=bias,
         load_diff=abs(bias),
         left_forefoot_ratio=sum(left_values[:4]) / max(left_total, 1e-9),
@@ -182,46 +194,91 @@ def _median_channels(
     )
 
 
-def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
-    candidates = [
-        metric
-        for metric in metrics
-        if abs(metric.load_bias) <= BASELINE_BALANCED_BIAS_MAX
-        and max(abs(value) for value in metric.temperature_delta_c) < 1.0
-        and max(
-            abs(value - DEFAULT_PRESSURE_DISTRIBUTION[index])
-            for index, value in enumerate(metric.left_distribution)
-        ) < 0.08
-        and max(
-            abs(value - DEFAULT_PRESSURE_DISTRIBUTION[index])
-            for index, value in enumerate(metric.right_distribution)
-        ) < 0.08
-    ]
-    ready = len(candidates) >= BASELINE_MIN_SAMPLES
-    if not ready:
-        return BaselineProfile(
-            ready=False,
-            load_bias=0.0,
-            left_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
-            right_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
-            pressure_asymmetry=(0.0,) * 6,
-            temperature_delta_c=(0.0,) * 4,
-        )
+def _empty_baseline() -> BaselineProfile:
     return BaselineProfile(
-        ready=True,
-        load_bias=median(metric.load_bias for metric in candidates),
-        left_distribution=_median_channels(candidates, "left_distribution", 6),
-        right_distribution=_median_channels(candidates, "right_distribution", 6),
-        pressure_asymmetry=tuple(
-            median(_channel_asymmetry(metric, index) for metric in candidates)
-            for index in range(6)
-        ),
-        temperature_delta_c=_median_channels(
-            candidates, "temperature_delta_c", 4
-        ),
+        ready=False,
+        load_bias=0.0,
+        left_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
+        right_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
+        pressure_asymmetry=(0.0,) * 6,
+        temperature_delta_c=(0.0,) * 4,
     )
 
 
+def _active_channel_count(values: tuple[float, ...]) -> int:
+    return sum(value >= BASELINE_ACTIVE_PRESSURE_FLOOR for value in values)
+
+
+def _is_baseline_candidate(metric: PairMetric) -> bool:
+    return (
+        metric.left_total >= BASELINE_MIN_FOOT_PRESSURE
+        and metric.right_total >= BASELINE_MIN_FOOT_PRESSURE
+        and _active_channel_count(metric.left_pressure)
+        >= BASELINE_MIN_ACTIVE_CHANNELS
+        and _active_channel_count(metric.right_pressure)
+        >= BASELINE_MIN_ACTIVE_CHANNELS
+        and abs(metric.load_bias) <= BASELINE_BALANCED_BIAS_MAX
+        and max(abs(value) for value in metric.temperature_delta_c)
+        <= BASELINE_MAX_TEMPERATURE_DELTA_C
+    )
+
+
+def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
+    # Lock the first stable bilateral-bearing window. Using the newest window
+    # would slowly redefine a sustained abnormal posture as the new normal.
+    candidates = [
+        metric for metric in metrics if _is_baseline_candidate(metric)
+    ][:BASELINE_CALIBRATION_WINDOW_SAMPLES]
+    if len(candidates) < BASELINE_MIN_SAMPLES:
+        return _empty_baseline()
+
+    center_load_bias = median(metric.load_bias for metric in candidates)
+    center_left_distribution = _median_channels(
+        candidates, "left_distribution", 6
+    )
+    center_right_distribution = _median_channels(
+        candidates, "right_distribution", 6
+    )
+    center_temperature_delta = _median_channels(
+        candidates, "temperature_delta_c", 4
+    )
+    inliers = [
+        metric
+        for metric in candidates
+        if abs(metric.load_bias - center_load_bias)
+        <= BASELINE_LOAD_BIAS_INLIER_TOLERANCE
+        and max(
+            abs(value - center_left_distribution[index])
+            for index, value in enumerate(metric.left_distribution)
+        )
+        <= BASELINE_DISTRIBUTION_INLIER_TOLERANCE
+        and max(
+            abs(value - center_right_distribution[index])
+            for index, value in enumerate(metric.right_distribution)
+        )
+        <= BASELINE_DISTRIBUTION_INLIER_TOLERANCE
+        and max(
+            abs(value - center_temperature_delta[index])
+            for index, value in enumerate(metric.temperature_delta_c)
+        )
+        <= BASELINE_TEMPERATURE_INLIER_TOLERANCE_C
+    ]
+    if len(inliers) < BASELINE_MIN_SAMPLES:
+        return _empty_baseline()
+
+    return BaselineProfile(
+        ready=True,
+        load_bias=median(metric.load_bias for metric in inliers),
+        left_distribution=_median_channels(inliers, "left_distribution", 6),
+        right_distribution=_median_channels(inliers, "right_distribution", 6),
+        pressure_asymmetry=tuple(
+            median(_channel_asymmetry(metric, index) for metric in inliers)
+            for index in range(6)
+        ),
+        temperature_delta_c=_median_channels(
+            inliers, "temperature_delta_c", 4
+        ),
+    )
 def _signal(
     metric: PairMetric, baseline: BaselineProfile
 ) -> tuple[str, str] | None:
@@ -300,6 +357,19 @@ def _clamp_score(value: float) -> float:
 def _regional_analysis(
     metric: PairMetric, baseline: BaselineProfile
 ) -> RegionalAnalysis:
+    if not baseline.ready:
+        return RegionalAnalysis(
+            baseline_ready=False,
+            baseline_source="layout_default",
+            left_pressure_scores=[0.0] * 6,
+            right_pressure_scores=[0.0] * 6,
+            temperature_delta_c=[
+                round(value, 2) for value in metric.temperature_delta_c
+            ],
+            left_temperature_scores=[0.0] * 4,
+            right_temperature_scores=[0.0] * 4,
+        )
+
     left_scores: list[float] = []
     right_scores: list[float] = []
     for index in range(6):
