@@ -224,9 +224,11 @@ def _is_baseline_candidate(metric: PairMetric) -> bool:
 
 
 def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
+    # Lock the first stable bilateral-bearing window. Using the newest window
+    # would slowly redefine a sustained abnormal posture as the new normal.
     candidates = [
         metric for metric in metrics if _is_baseline_candidate(metric)
-    ][-BASELINE_CALIBRATION_WINDOW_SAMPLES:]
+    ][:BASELINE_CALIBRATION_WINDOW_SAMPLES]
     if len(candidates) < BASELINE_MIN_SAMPLES:
         return _empty_baseline()
 
@@ -280,9 +282,6 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
 def _signal(
     metric: PairMetric, baseline: BaselineProfile
 ) -> tuple[str, str] | None:
-    if not baseline.ready:
-        return None
-
     corrected_temperature = [
         value - baseline.temperature_delta_c[index]
         for index, value in enumerate(metric.temperature_delta_c)
