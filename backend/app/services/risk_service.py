@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 from statistics import median
 from time import time
 
@@ -22,7 +23,14 @@ from ..config import (
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
     FOREFOOT_RATIO_DELTA_THRESHOLD,
+    GRAVITY_M_S2,
+    IMU_INVALID_MASK,
     LOAD_BIAS_ENTER_THRESHOLD,
+    MOTION_ACCEL_DELTA_THRESHOLD_M_S2,
+    MOTION_GYRO_THRESHOLD_DPS,
+    MOVING_PRESSURE_ATTENTION_AFTER_MS,
+    MOVING_PRESSURE_PERSISTENT_AFTER_MS,
+    MOVING_PRESSURE_WARNING_AFTER_MS,
     PAIRING_BLOCK_FLAGS,
     PAIRING_WINDOW_MS,
     PERSISTENT_AFTER_MS,
@@ -57,6 +65,8 @@ class PairMetric:
     left_distribution: tuple[float, ...]
     right_distribution: tuple[float, ...]
     temperature_delta_c: tuple[float, ...]
+    activity_state: str = "unknown"
+    motion_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,45 @@ def _valid_pair(left: SensorFrame, right: SensorFrame) -> bool:
     )
 
 
+def _frame_motion_score(frame: SensorFrame) -> float | None:
+    """Return an orientation-independent motion score, or None without IMU."""
+
+    if frame.quality_flags & IMU_INVALID_MASK:
+        return None
+    acceleration_magnitude = sqrt(
+        frame.ax * frame.ax + frame.ay * frame.ay + frame.az * frame.az
+    )
+    angular_rate_magnitude = sqrt(
+        frame.gx * frame.gx + frame.gy * frame.gy + frame.gz * frame.gz
+    )
+    acceleration_score = (
+        abs(acceleration_magnitude - GRAVITY_M_S2)
+        / MOTION_ACCEL_DELTA_THRESHOLD_M_S2
+    )
+    angular_rate_score = angular_rate_magnitude / MOTION_GYRO_THRESHOLD_DPS
+    return max(acceleration_score, angular_rate_score)
+
+
+def _activity_state(
+    left: SensorFrame, right: SensorFrame
+) -> tuple[str, float]:
+    scores = [
+        score
+        for score in (
+            _frame_motion_score(left),
+            _frame_motion_score(right),
+        )
+        if score is not None
+    ]
+    if not scores:
+        return "unknown", 0.0
+    motion_score = max(scores)
+    return (
+        "moving" if motion_score >= 1.0 else "stationary",
+        round(motion_score, 4),
+    )
+
+
 def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
     left_values = [left.p1, left.p2, left.p3, left.p4, left.p5, left.p6]
     right_values = [right.p1, right.p2, right.p3, right.p4, right.p5, right.p6]
@@ -88,6 +137,7 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
     right_total = sum(right_values)
     total = max(left_total + right_total, 1e-9)
     bias = (left_total - right_total) / total
+    activity_state, motion_score = _activity_state(left, right)
     return PairMetric(
         sync_id=left.sync_id,
         packet_seq=left.packet_seq,
@@ -108,6 +158,8 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
                 left_temperature, right_temperature, strict=True
             )
         ),
+        activity_state=activity_state,
+        motion_score=motion_score,
     )
 
 
@@ -211,7 +263,10 @@ def _active_channel_count(values: tuple[float, ...]) -> int:
 
 def _is_baseline_candidate(metric: PairMetric) -> bool:
     return (
-        metric.left_total >= BASELINE_MIN_FOOT_PRESSURE
+        # Do not learn periodic walking load as a standing baseline. Unknown
+        # keeps the pressure/temperature-only fallback usable without an MPU.
+        metric.activity_state != "moving"
+        and metric.left_total >= BASELINE_MIN_FOOT_PRESSURE
         and metric.right_total >= BASELINE_MIN_FOOT_PRESSURE
         and _active_channel_count(metric.left_pressure)
         >= BASELINE_MIN_ACTIVE_CHANNELS
@@ -330,13 +385,27 @@ def _current_risk(
         start = metric.timestamp_ms
         next_metric = metric
     duration = latest.timestamp_ms - start
-    if duration < ATTENTION_AFTER_MS:
+    pressure_signal = current_signal[0] in {
+        "left_load_bias",
+        "right_load_bias",
+        "forefoot_high",
+    }
+    if pressure_signal and latest.activity_state == "moving":
+        attention_after_ms = MOVING_PRESSURE_ATTENTION_AFTER_MS
+        warning_after_ms = MOVING_PRESSURE_WARNING_AFTER_MS
+        persistent_after_ms = MOVING_PRESSURE_PERSISTENT_AFTER_MS
+    else:
+        attention_after_ms = ATTENTION_AFTER_MS
+        warning_after_ms = WARNING_AFTER_MS
+        persistent_after_ms = PERSISTENT_AFTER_MS
+
+    if duration < attention_after_ms:
         level = 0
         risk_type, risk_side, duration = "normal", "none", 0
-    elif duration < WARNING_AFTER_MS:
+    elif duration < warning_after_ms:
         level = 1
         risk_type, risk_side = current_signal
-    elif duration < PERSISTENT_AFTER_MS:
+    elif duration < persistent_after_ms:
         level = 2
         risk_type, risk_side = current_signal
     else:
@@ -600,7 +669,12 @@ def evaluate_risk(
             right=to_schema(right_latest) if right_latest else None,
             paired_timestamp_ms=None,
             sync_error_ms=None,
-            load_bias=None, load_diff=None, risk=risk, regional_analysis=None
+            load_bias=None,
+            load_diff=None,
+            activity_state="unknown",
+            motion_score=0.0,
+            risk=risk,
+            regional_analysis=None,
         )
     left_model, right_model = latest_pair
     left = to_schema(left_model)
@@ -622,6 +696,8 @@ def evaluate_risk(
         sync_error_ms=abs(left.timestamp_ms - right.timestamp_ms),
         load_bias=metric.load_bias,
         load_diff=metric.load_diff,
+        activity_state=metric.activity_state,
+        motion_score=metric.motion_score,
         risk=risk,
         regional_analysis=_regional_analysis(metric, baseline),
     )
