@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import pytest
+
+from backend.app.config import BASELINE_MIN_SAMPLES
+from backend.app.services.risk_service import (
+    PairMetric,
+    _baseline_profile,
+    _regional_analysis,
+    _signal,
+)
+
+
+LEFT_DISTRIBUTION = (0.05, 0.12, 0.22, 0.04, 0.13, 0.44)
+RIGHT_DISTRIBUTION = (0.09, 0.07, 0.21, 0.06, 0.15, 0.42)
+
+
+def _metric(
+    packet_seq: int,
+    *,
+    left_total: float = 0.24,
+    right_total: float = 0.26,
+    left_distribution: tuple[float, ...] = LEFT_DISTRIBUTION,
+    right_distribution: tuple[float, ...] = RIGHT_DISTRIBUTION,
+    temperature_delta_c: tuple[float, ...] = (1.2, 2.4, -1.8, 0.8),
+) -> PairMetric:
+    total = max(left_total + right_total, 1e-9)
+    load_bias = (left_total - right_total) / total
+    left_pressure = tuple(left_total * value for value in left_distribution)
+    right_pressure = tuple(right_total * value for value in right_distribution)
+    return PairMetric(
+        sync_id=7,
+        packet_seq=packet_seq,
+        timestamp_ms=packet_seq * 200,
+        left_total=left_total,
+        right_total=right_total,
+        load_bias=load_bias,
+        load_diff=abs(load_bias),
+        left_forefoot_ratio=sum(left_distribution[:4]),
+        right_forefoot_ratio=sum(right_distribution[:4]),
+        left_pressure=left_pressure,
+        right_pressure=right_pressure,
+        left_distribution=left_distribution,
+        right_distribution=right_distribution,
+        temperature_delta_c=temperature_delta_c,
+    )
+
+
+def test_learns_heel_heavy_personal_distribution() -> None:
+    metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES + 3)]
+
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is True
+    assert baseline.left_distribution[5] == pytest.approx(0.44)
+    assert baseline.right_distribution[5] == pytest.approx(0.42)
+    assert baseline.temperature_delta_c == pytest.approx((1.2, 2.4, -1.8, 0.8))
+    assert _signal(metrics[-1], baseline) is None
+
+    regional = _regional_analysis(metrics[-1], baseline)
+    assert regional.baseline_ready is True
+    assert regional.left_pressure_scores == pytest.approx([0.0] * 6)
+    assert regional.right_pressure_scores == pytest.approx([0.0] * 6)
+    assert regional.temperature_delta_c == pytest.approx([0.0] * 4)
+
+
+def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
+    single_point = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    metrics = [
+        *[
+            _metric(index, left_total=0.0, right_total=0.0)
+            for index in range(BASELINE_MIN_SAMPLES)
+        ],
+        *[
+            _metric(
+                BASELINE_MIN_SAMPLES + index,
+                left_total=0.30,
+                right_total=0.02,
+            )
+            for index in range(BASELINE_MIN_SAMPLES)
+        ],
+        *[
+            _metric(
+                BASELINE_MIN_SAMPLES * 2 + index,
+                left_distribution=single_point,
+                right_distribution=single_point,
+            )
+            for index in range(BASELINE_MIN_SAMPLES)
+        ],
+    ]
+
+    assert _baseline_profile(metrics).ready is False
+
+
+def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
+    metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES + 5)]
+    metrics.append(
+        _metric(
+            BASELINE_MIN_SAMPLES + 5,
+            left_distribution=(0.55, 0.05, 0.05, 0.05, 0.10, 0.20),
+            right_distribution=(0.05, 0.55, 0.05, 0.05, 0.10, 0.20),
+        )
+    )
+
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is True
+    assert baseline.left_distribution == pytest.approx(LEFT_DISTRIBUTION)
+    assert baseline.right_distribution == pytest.approx(RIGHT_DISTRIBUTION)
+
+
+def test_suppresses_risk_and_heatmap_until_personal_baseline_is_ready() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES - 1)]
+    )
+    forefoot = _metric(
+        BASELINE_MIN_SAMPLES,
+        left_distribution=(0.30, 0.25, 0.20, 0.15, 0.05, 0.05),
+    )
+
+    assert baseline.ready is False
+    assert _signal(forefoot, baseline) is None
+
+    regional = _regional_analysis(forefoot, baseline)
+    assert regional.baseline_ready is False
+    assert regional.left_pressure_scores == [0.0] * 6
+    assert regional.right_pressure_scores == [0.0] * 6
+    assert regional.left_temperature_scores == [0.0] * 4
+    assert regional.right_temperature_scores == [0.0] * 4
