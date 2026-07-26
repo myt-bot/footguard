@@ -109,7 +109,7 @@ def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
     assert baseline.right_distribution == pytest.approx(RIGHT_DISTRIBUTION)
 
 
-def test_suppresses_risk_and_heatmap_until_personal_baseline_is_ready() -> None:
+def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES - 1)]
     )
@@ -119,7 +119,9 @@ def test_suppresses_risk_and_heatmap_until_personal_baseline_is_ready() -> None:
     )
 
     assert baseline.ready is False
-    assert _signal(forefoot, baseline) is None
+    # High-confidence fallback rules remain available during cold start, while
+    # the regional heatmap waits for the personal baseline.
+    assert _signal(forefoot, baseline) == ("forefoot_high", "left")
 
     regional = _regional_analysis(forefoot, baseline)
     assert regional.baseline_ready is False
