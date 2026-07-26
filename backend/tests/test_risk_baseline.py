@@ -116,6 +116,7 @@ def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     forefoot = _metric(
         BASELINE_MIN_SAMPLES,
         left_distribution=(0.30, 0.25, 0.20, 0.15, 0.05, 0.05),
+        temperature_delta_c=(0.0, 0.0, 0.0, 0.0),
     )
 
     assert baseline.ready is False
