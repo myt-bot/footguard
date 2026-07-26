@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import '../config/app_config.dart';
 import '../models/foot_frame.dart';
 import 'foot_data_source.dart';
 
@@ -22,7 +23,7 @@ class MockFootDataSource implements FootDataSource {
   @override
   Stream<String?> get errorState => _errors.stream;
   @override
-  String get label => 'Mock · $scenario';
+  String get label => '模拟 · ${mockScenarioLabel(scenario)}';
   @override
   bool get shouldUploadToBackend => true;
 
@@ -41,10 +42,18 @@ class MockFootDataSource implements FootDataSource {
     final elapsed = _sequence / 5.0;
     final loads = _loads(elapsed);
     final timestamp = DateTime.now().millisecondsSinceEpoch;
-    _frames.add(_frame('left', loads.$1, timestamp));
+    if (!(scenario == 'left_disconnect' && _sequence >= 40)) {
+      _frames.add(_frame('left', loads.$1, timestamp));
+    }
     if (!(scenario == 'right_disconnect' && _sequence >= 40)) {
       _frames.add(_frame('right', loads.$2, timestamp + 20));
-    } else {
+    }
+    if (scenario == 'left_disconnect' && _sequence >= 40) {
+      _connections.add(const FootConnectionSnapshot(
+        left: FootConnectionStatus.disconnected,
+        right: FootConnectionStatus.connected,
+      ));
+    } else if (scenario == 'right_disconnect' && _sequence >= 40) {
       _connections.add(const FootConnectionSnapshot(
         left: FootConnectionStatus.connected,
         right: FootConnectionStatus.disconnected,
@@ -61,8 +70,10 @@ class MockFootDataSource implements FootDataSource {
       case 'left_load_bias':
         return (2.8, 1.1);
       case 'left_forefoot_high':
+      case 'right_forefoot_high':
         return (1.8, 1.75);
       case 'left_temperature_rise':
+      case 'right_temperature_rise':
         return (1.8, 1.75);
       case 'right_load_bias':
         return (1.1, 2.8);
@@ -72,10 +83,15 @@ class MockFootDataSource implements FootDataSource {
   }
 
   FootFrame _frame(String side, double total, int timestamp) {
-    final weights = scenario == 'left_forefoot_high' && side == 'left'
+    final forefootHigh = (scenario == 'left_forefoot_high' && side == 'left') ||
+        (scenario == 'right_forefoot_high' && side == 'right');
+    final temperatureRise =
+        (scenario == 'left_temperature_rise' && side == 'left') ||
+            (scenario == 'right_temperature_rise' && side == 'right');
+    final weights = forefootHigh
         ? const [0.23, 0.22, 0.24, 0.20, 0.06, 0.05]
         : const [0.16, 0.17, 0.18, 0.14, 0.18, 0.17];
-    final temperature = scenario == 'left_temperature_rise' && side == 'left'
+    final temperature = temperatureRise
         ? const [30.7, 33.6, 30.4, 30.6]
         : const [30.7, 30.8, 30.4, 30.6];
     return FootFrame(

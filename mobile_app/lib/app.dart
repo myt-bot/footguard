@@ -99,7 +99,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
                 onStartMonitoring: () => setState(() => selectedIndex = 1)),
             RealtimeScreen(
               key: ValueKey(
-                  '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.replaySpeed}'),
+                  '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.csvAsset}-${settings.replaySpeed}'),
               settings: settings,
               connectionService: _bleConnectionService,
             ),
@@ -144,9 +144,9 @@ class _FootGuardAppState extends State<FootGuardApp> {
   }
 
   static String _modeLabel(FootDataMode mode) => switch (mode) {
-        FootDataMode.mock => 'Mock',
+        FootDataMode.mock => '模拟',
         FootDataMode.csvReplay => 'CSV',
-        FootDataMode.backend => 'API',
+        FootDataMode.backend => '后端',
         FootDataMode.ble => 'BLE',
       };
 }

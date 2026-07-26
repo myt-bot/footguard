@@ -26,18 +26,22 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
     final savedMode = preferences.getString(_dataModeKey);
     final savedScenario = preferences.getString(_mockScenarioKey);
     final savedCsvAsset = preferences.getString(_csvAssetKey)?.trim();
+    final knownCsvAssets =
+        csvReplayOptions.map((option) => option.assetPath).toSet();
     final savedReplaySpeed = preferences.getDouble(_replaySpeedKey);
 
     return AppSettings(
-      backendUrl: savedBackendUrl == null || savedBackendUrl.isEmpty
+      backendUrl: savedBackendUrl == null || !isValidBackendUrl(savedBackendUrl)
           ? defaults.backendUrl
-          : savedBackendUrl,
+          : normalizeBackendUrl(savedBackendUrl),
       dataMode: _parseDataMode(savedMode) ?? defaults.dataMode,
       mockScenario:
           savedScenario != null && mockScenarios.contains(savedScenario)
               ? savedScenario
               : defaults.mockScenario,
-      csvAsset: savedCsvAsset == null || savedCsvAsset.isEmpty
+      csvAsset: savedCsvAsset == null ||
+              savedCsvAsset.isEmpty ||
+              !knownCsvAssets.contains(savedCsvAsset)
           ? defaults.csvAsset
           : savedCsvAsset,
       replaySpeed: savedReplaySpeed == null

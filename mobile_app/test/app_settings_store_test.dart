@@ -43,10 +43,10 @@ void main() {
 
   test('rejects invalid saved enum, scenario, and replay speed', () async {
     SharedPreferences.setMockInitialValues({
-      'settings.backend_url': '',
+      'settings.backend_url': '192.168.1.10:8000',
       'settings.data_mode': 'invalid',
       'settings.mock_scenario': 'invalid',
-      'settings.csv_asset': '',
+      'settings.csv_asset': 'assets/sample_data/not_found.csv',
       'settings.replay_speed': 99.0,
     });
     const store = SharedPreferencesAppSettingsStore();

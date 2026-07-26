@@ -27,6 +27,42 @@ void main() {
     await source.dispose();
   });
 
+  test('mock scenario IDs have Chinese display metadata', () {
+    expect(mockScenarioLabel('normal_stand'), '正常站立');
+    expect(mockScenarioLabel('left_load_bias'), '左脚持续偏载');
+    expect(mockScenarioLabel('right_temperature_rise'), '右脚局部升温');
+    expect(mockScenarioOptions.map((option) => option.id).toSet(),
+        mockScenarios.toSet());
+  });
+
+  test('right forefoot mock raises only right forefoot share', () async {
+    final source = MockFootDataSource(scenario: 'right_forefoot_high');
+    final framesFuture = source.frames.take(2).toList();
+    await source.start();
+    final frames = await framesFuture.timeout(const Duration(seconds: 1));
+    final left = frames.singleWhere((frame) => frame.side == 'left');
+    final right = frames.singleWhere((frame) => frame.side == 'right');
+    final leftForefoot = left.pressure.take(4).reduce((a, b) => a + b) /
+        left.pressure.reduce((a, b) => a + b);
+    final rightForefoot = right.pressure.take(4).reduce((a, b) => a + b) /
+        right.pressure.reduce((a, b) => a + b);
+
+    expect(rightForefoot, greaterThan(leftForefoot));
+    await source.dispose();
+  });
+
+  test('right temperature mock raises only right T2', () async {
+    final source = MockFootDataSource(scenario: 'right_temperature_rise');
+    final framesFuture = source.frames.take(2).toList();
+    await source.start();
+    final frames = await framesFuture.timeout(const Duration(seconds: 1));
+    final left = frames.singleWhere((frame) => frame.side == 'left');
+    final right = frames.singleWhere((frame) => frame.side == 'right');
+
+    expect(right.temperature[1], greaterThan(left.temperature[1]));
+    await source.dispose();
+  });
+
   test('CSV parser preserves chronological order', () {
     const csv =
         'protocol_version,sensor_layout_version,device_id,side,sync_id,packet_seq,timestamp_ms,p1,p2,p3,p4,p5,p6,t1,t2,t3,t4,ax,ay,az,gx,gy,gz,battery,quality_flags,source\n'
