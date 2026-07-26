@@ -51,4 +51,48 @@ void main() {
     expect(result.target, 'left');
     api.close();
   });
+
+  test('calibration status can be read and reset', () async {
+    var resetRequested = false;
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/v1/calibration/reset') {
+        expect(request.method, 'POST');
+        resetRequested = true;
+        return http.Response(
+          jsonEncode({
+            'baseline_ready': false,
+            'sample_count': 0,
+            'required_samples': 15,
+            'reset_at_ms': 1785000000000,
+          }),
+          200,
+        );
+      }
+      expect(request.method, 'GET');
+      expect(request.url.path, '/api/v1/calibration/status');
+      return http.Response(
+        jsonEncode({
+          'baseline_ready': true,
+          'sample_count': 15,
+          'required_samples': 15,
+          'reset_at_ms': null,
+        }),
+        200,
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final status = await api.calibrationStatus();
+    expect(status.baselineReady, isTrue);
+    expect(status.progress, 1);
+
+    final reset = await api.resetCalibration();
+    expect(resetRequested, isTrue);
+    expect(reset.baselineReady, isFalse);
+    expect(reset.sampleCount, 0);
+    api.close();
+  });
 }

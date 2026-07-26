@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from statistics import median
 from time import time
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import (
@@ -35,9 +35,14 @@ from ..config import (
     WARNING_AFTER_MS,
 )
 from ..models import Command, InterventionFeedback, RiskEvent, SensorFrame
+from ..repositories.calibration_repository import (
+    calibration_frame_cutoff,
+    calibration_state,
+    reset_calibration,
+)
 from ..repositories.event_repository import active_event, feedback_for_event
 from ..repositories.sensor_repository import latest_frame, recent_frames, to_schema
-from ..schemas import RegionalAnalysis, RealtimeResponse, RiskState
+from ..schemas import CalibrationStatus, RegionalAnalysis, RealtimeResponse, RiskState
 from .command_service import ensure_motor_command
 
 
@@ -62,6 +67,7 @@ class PairMetric:
 @dataclass(frozen=True)
 class BaselineProfile:
     ready: bool
+    sample_count: int
     load_bias: float
     left_distribution: tuple[float, ...]
     right_distribution: tuple[float, ...]
@@ -113,7 +119,10 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
 
 def _pair_history(session: Session) -> list[PairMetric]:
     pairs: dict[tuple[int, int], dict[str, SensorFrame]] = {}
-    for frame in recent_frames(session):
+    for frame in recent_frames(
+        session,
+        after_id=calibration_frame_cutoff(session),
+    ):
         pairs.setdefault((frame.sync_id, frame.packet_seq), {})[frame.side] = frame
     metrics = []
     for pair in pairs.values():
@@ -194,9 +203,10 @@ def _median_channels(
     )
 
 
-def _empty_baseline() -> BaselineProfile:
+def _empty_baseline(sample_count: int = 0) -> BaselineProfile:
     return BaselineProfile(
         ready=False,
+        sample_count=sample_count,
         load_bias=0.0,
         left_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
         right_distribution=DEFAULT_PRESSURE_DISTRIBUTION,
@@ -230,7 +240,7 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         metric for metric in metrics if _is_baseline_candidate(metric)
     ][:BASELINE_CALIBRATION_WINDOW_SAMPLES]
     if len(candidates) < BASELINE_MIN_SAMPLES:
-        return _empty_baseline()
+        return _empty_baseline(len(candidates))
 
     center_load_bias = median(metric.load_bias for metric in candidates)
     center_left_distribution = _median_channels(
@@ -264,10 +274,11 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         <= BASELINE_TEMPERATURE_INLIER_TOLERANCE_C
     ]
     if len(inliers) < BASELINE_MIN_SAMPLES:
-        return _empty_baseline()
+        return _empty_baseline(len(inliers))
 
     return BaselineProfile(
         ready=True,
+        sample_count=len(inliers),
         load_bias=median(metric.load_bias for metric in inliers),
         left_distribution=_median_channels(inliers, "left_distribution", 6),
         right_distribution=_median_channels(inliers, "right_distribution", 6),
@@ -361,6 +372,8 @@ def _regional_analysis(
         return RegionalAnalysis(
             baseline_ready=False,
             baseline_source="layout_default",
+            baseline_sample_count=baseline.sample_count,
+            baseline_required_samples=BASELINE_MIN_SAMPLES,
             left_pressure_scores=[0.0] * 6,
             right_pressure_scores=[0.0] * 6,
             temperature_delta_c=[
@@ -407,6 +420,8 @@ def _regional_analysis(
     return RegionalAnalysis(
         baseline_ready=baseline.ready,
         baseline_source="personal" if baseline.ready else "layout_default",
+        baseline_sample_count=baseline.sample_count,
+        baseline_required_samples=BASELINE_MIN_SAMPLES,
         left_pressure_scores=left_scores,
         right_pressure_scores=right_scores,
         temperature_delta_c=corrected_temperature,
@@ -418,6 +433,39 @@ def _regional_analysis(
             _clamp_score(-value / TEMPERATURE_DELTA_C_THRESHOLD)
             for value in corrected_temperature
         ],
+    )
+
+
+def calibration_status(session: Session) -> CalibrationStatus:
+    baseline = _baseline_profile(_pair_history(session))
+    state = calibration_state(session)
+    return CalibrationStatus(
+        baseline_ready=baseline.ready,
+        sample_count=baseline.sample_count,
+        required_samples=BASELINE_MIN_SAMPLES,
+        reset_at_ms=state.reset_at_ms if state is not None else None,
+    )
+
+
+def restart_calibration(session: Session) -> CalibrationStatus:
+    now_ms = int(time() * 1000)
+    reset_calibration(session, now_ms)
+    session.execute(
+        update(RiskEvent)
+        .where(RiskEvent.status == "active")
+        .values(status="interrupted", ended_at_ms=now_ms)
+    )
+    session.execute(
+        update(Command)
+        .where(Command.status == "pending")
+        .values(status="expired", error_code="command_expired")
+    )
+    session.commit()
+    return CalibrationStatus(
+        baseline_ready=False,
+        sample_count=0,
+        required_samples=BASELINE_MIN_SAMPLES,
+        reset_at_ms=now_ms,
     )
 
 
@@ -438,7 +486,13 @@ def _close_event(
     event.after_load_diff = after_diff
     event.status = status
     command = session.scalar(
-        select(Command).where(Command.event_id == event.event_id).limit(1)
+        select(Command)
+        .where(
+            Command.event_id == event.event_id,
+            Command.status == "executed",
+        )
+        .order_by(Command.executed_at_ms.desc())
+        .limit(1)
     )
     if (
         status == "resolved"
@@ -607,7 +661,8 @@ def evaluate_risk(
     right = to_schema(right_model)
     metrics = _pair_history(session)
     baseline = _baseline_profile(metrics)
-    risk, metric = _current_risk(metrics, baseline)
+    risk_metrics = metrics or [_metric(left_model, right_model)]
+    risk, metric = _current_risk(risk_metrics, baseline)
     if record:
         _record_risk(
             session,

@@ -106,6 +106,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.leftTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
+                    baselineSampleCount:
+                        analysis?.baselineSampleCount ?? 0,
+                    baselineRequiredSamples:
+                        analysis?.baselineRequiredSamples ?? 15,
                   ),
                 ),
                 const SizedBox(width: 12, height: 12),
@@ -118,6 +122,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.rightTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
+                    baselineSampleCount:
+                        analysis?.baselineSampleCount ?? 0,
+                    baselineRequiredSamples:
+                        analysis?.baselineRequiredSamples ?? 15,
                   ),
                 ),
               ];
@@ -135,6 +143,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                           temperatureScores: analysis?.leftTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
+                          baselineSampleCount:
+                              analysis?.baselineSampleCount ?? 0,
+                          baselineRequiredSamples:
+                              analysis?.baselineRequiredSamples ?? 15,
                         ),
                         const SizedBox(height: 12),
                         FootPressureView(
@@ -145,6 +157,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                           temperatureScores: analysis?.rightTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
+                          baselineSampleCount:
+                              analysis?.baselineSampleCount ?? 0,
+                          baselineRequiredSamples:
+                              analysis?.baselineRequiredSamples ?? 15,
                         ),
                       ],
                     );

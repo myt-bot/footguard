@@ -57,6 +57,12 @@ class RiskEventRecord {
     required this.startedAtMs,
     required this.durationMs,
     required this.status,
+    this.endedAtMs,
+    this.beforeLoadDiff,
+    this.afterLoadDiff,
+    this.interventionAction,
+    this.effectLabel,
+    this.recoveryTimeMs,
   });
 
   final String eventId;
@@ -64,8 +70,26 @@ class RiskEventRecord {
   final String riskSide;
   final int riskLevel;
   final int startedAtMs;
+  final int? endedAtMs;
   final int durationMs;
+  final double? beforeLoadDiff;
+  final double? afterLoadDiff;
+  final String? interventionAction;
+  final String? effectLabel;
+  final int? recoveryTimeMs;
   final String status;
+
+  bool get hasLoadDiffComparison =>
+      beforeLoadDiff != null && afterLoadDiff != null;
+
+  double? get loadDiffImprovementRatio {
+    final before = beforeLoadDiff;
+    final after = afterLoadDiff;
+    if (before == null || after == null || before <= 0) {
+      return null;
+    }
+    return (before - after) / before;
+  }
 
   factory RiskEventRecord.fromJson(Map<String, dynamic> json) =>
       RiskEventRecord(
@@ -74,7 +98,13 @@ class RiskEventRecord {
         riskSide: json['risk_side'] as String,
         riskLevel: json['risk_level'] as int,
         startedAtMs: json['started_at_ms'] as int,
+        endedAtMs: json['ended_at_ms'] as int?,
         durationMs: json['duration_ms'] as int,
+        beforeLoadDiff: (json['before_load_diff'] as num?)?.toDouble(),
+        afterLoadDiff: (json['after_load_diff'] as num?)?.toDouble(),
+        interventionAction: json['intervention_action'] as String?,
+        effectLabel: json['effect_label'] as String?,
+        recoveryTimeMs: json['recovery_time_ms'] as int?,
         status: json['status'] as String,
       );
 }
@@ -84,6 +114,33 @@ class ApiException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class CalibrationStatus {
+  const CalibrationStatus({
+    required this.baselineReady,
+    required this.sampleCount,
+    required this.requiredSamples,
+    this.resetAtMs,
+  });
+
+  final bool baselineReady;
+  final int sampleCount;
+  final int requiredSamples;
+  final int? resetAtMs;
+
+  double get progress =>
+      requiredSamples <= 0
+          ? 0.0
+          : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
+
+  factory CalibrationStatus.fromJson(Map<String, dynamic> json) =>
+      CalibrationStatus(
+        baselineReady: json['baseline_ready'] as bool,
+        sampleCount: json['sample_count'] as int,
+        requiredSamples: json['required_samples'] as int,
+        resetAtMs: json['reset_at_ms'] as int?,
+      );
 }
 
 class FootGuardApiClient {
@@ -140,6 +197,24 @@ class FootGuardApiClient {
     return body
         .map((event) => RiskEventRecord.fromJson(event as Map<String, dynamic>))
         .toList(growable: false);
+  }
+
+  Future<CalibrationStatus> calibrationStatus() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/calibration/status'))
+        .timeout(const Duration(seconds: 5));
+    return CalibrationStatus.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<CalibrationStatus> resetCalibration() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/calibration/reset'))
+        .timeout(const Duration(seconds: 5));
+    return CalibrationStatus.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
   }
 
   Future<DeviceCommand?> pendingCommand({String? target}) async {

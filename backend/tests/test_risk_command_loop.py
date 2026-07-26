@@ -107,8 +107,8 @@ def test_sustained_risk_creates_one_event_and_motor_vibration_command(
         assert event.risk_side == side
         assert command.event_id == event.event_id
         assert command.target == side
-        assert command.pattern == "double"
-        assert command.duration_ms == 800
+        assert command.pattern == "long"
+        assert command.duration_ms == 1_500
         assert command.reason_code == risk_type
 
 
@@ -148,6 +148,42 @@ def test_replaying_same_risk_does_not_duplicate_event_or_command(client: TestCli
     with app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(RiskEvent)) == 1
         assert session.scalar(select(func.count()).select_from(Command)) == 1
+
+
+def test_warning_escalation_uses_distinct_double_then_long_patterns(
+    client: TestClient,
+    app,
+) -> None:
+    from backend.app.services.command_service import ensure_motor_command
+
+    with app.state.session_factory() as session:
+        event = RiskEvent(
+            event_id="evt_motor_escalation",
+            risk_type="left_load_bias",
+            risk_side="left",
+            risk_level=2,
+            started_at_ms=1,
+            duration_ms=6_000,
+            status="active",
+        )
+        session.add(event)
+        session.commit()
+
+        warning = ensure_motor_command(session, event, 2)
+        repeated_warning = ensure_motor_command(session, event, 2)
+        persistent = ensure_motor_command(session, event, 3)
+        repeated_persistent = ensure_motor_command(session, event, 3)
+
+        assert warning is not None
+        assert warning.pattern == "double"
+        assert warning.duration_ms == 800
+        assert repeated_warning.command_id == warning.command_id
+        assert persistent is not None
+        assert persistent.pattern == "long"
+        assert persistent.duration_ms == 1_500
+        assert persistent.command_id != warning.command_id
+        assert repeated_persistent.command_id == persistent.command_id
+        assert session.scalar(select(func.count()).select_from(Command)) == 2
 
 
 def test_new_sync_window_creates_a_new_motor_reminder(
@@ -226,7 +262,7 @@ def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> 
     split = 130  # first 13 seconds contain the sustained-bias phase
     upload(client, frames[:split])
     pending = client.get("/api/v1/command/pending?target=left").json()["command"]
-    assert pending["pattern"] == "double"
+    assert pending["pattern"] == "long"
     now_ms = int(time() * 1000)
     ack = {
         "protocol_version": 1,

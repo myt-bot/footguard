@@ -105,3 +105,11 @@ class InterventionFeedback(Base):
     after_load_diff: Mapped[float] = mapped_column(Float)
     recovery_time_ms: Mapped[int] = mapped_column(Integer)
     created_at_ms: Mapped[int] = mapped_column(Integer)
+
+
+class CalibrationState(Base):
+    __tablename__ = "calibration_state"
+
+    state_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    reset_after_frame_id: Mapped[int] = mapped_column(Integer, default=0)
+    reset_at_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

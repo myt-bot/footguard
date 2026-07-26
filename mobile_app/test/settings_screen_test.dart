@@ -1,7 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/config/app_config.dart';
+import 'package:footguard/data/api_client.dart';
 import 'package:footguard/screens/settings_screen.dart';
+
+Future<void> _scrollUntilVisible(
+  WidgetTester tester,
+  Finder finder, {
+  double delta = 300,
+}) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  await tester.pump();
+  await tester.scrollUntilVisible(
+    finder,
+    delta,
+    scrollable: find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is Scrollable &&
+              widget.axisDirection == AxisDirection.down,
+        )
+        .first,
+  );
+  await tester.pumpAndSettle();
+}
 
 void main() {
   testWidgets('settings display mock scenarios in Chinese', (tester) async {
@@ -26,8 +48,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('左脚持续偏载').last);
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('应用设置'));
-    await tester.pumpAndSettle();
+    await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
 
@@ -57,8 +78,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('正常行走').last);
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('应用设置'));
-    await tester.pumpAndSettle();
+    await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
 
@@ -102,15 +122,64 @@ void main() {
       find.byType(TextField),
       '192.168.1.10:8000',
     );
-    await tester.ensureVisible(find.text('应用设置'));
-    await tester.pumpAndSettle();
+    await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
 
     expect(applied, isNull);
+    await _scrollUntilVisible(
+      tester,
+      find.byKey(const ValueKey('backend-status')),
+      delta: -300,
+    );
     expect(
       find.text('请输入以 http:// 或 https:// 开头的完整地址'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('baseline status is visible and reset requires confirmation',
+      (tester) async {
+    var resetCalls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: const AppSettings(),
+            onChanged: (_) {},
+            calibrationStatusLoader: (_) async => const CalibrationStatus(
+              baselineReady: true,
+              sampleCount: 15,
+              requiredSamples: 15,
+            ),
+            calibrationResetter: (_) async {
+              resetCalls += 1;
+              return const CalibrationStatus(
+                baselineReady: false,
+                sampleCount: 0,
+                requiredSamples: 15,
+                resetAtMs: 1785000000000,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await _scrollUntilVisible(tester, find.byTooltip('刷新基线状态'));
+    await tester.tap(find.byTooltip('刷新基线状态'));
+    await tester.pumpAndSettle();
+    expect(find.text('已完成个人基线学习'), findsOneWidget);
+
+    await _scrollUntilVisible(tester, find.text('重新校准个人基线'));
+    await tester.tap(find.text('重新校准个人基线'));
+    await tester.pumpAndSettle();
+    expect(find.text('重新学习个人基线？'), findsOneWidget);
+    expect(resetCalls, 0);
+
+    await tester.tap(find.text('确认重新校准'));
+    await tester.pumpAndSettle();
+    expect(resetCalls, 1);
+    expect(find.textContaining('学习中：0/15'), findsOneWidget);
   });
 }

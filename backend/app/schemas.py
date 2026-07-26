@@ -116,6 +116,8 @@ class RealtimeResponse(StrictModel):
 class RegionalAnalysis(StrictModel):
     baseline_ready: bool
     baseline_source: Literal["personal", "layout_default"]
+    baseline_sample_count: int = Field(ge=0)
+    baseline_required_samples: int = Field(gt=0)
     left_pressure_scores: list[float] = Field(min_length=6, max_length=6)
     right_pressure_scores: list[float] = Field(min_length=6, max_length=6)
     temperature_delta_c: list[float] = Field(min_length=4, max_length=4)
@@ -188,6 +190,13 @@ class RecordedResponse(StrictModel):
     recorded: bool
 
 
+class CalibrationStatus(StrictModel):
+    baseline_ready: bool
+    sample_count: int = Field(ge=0)
+    required_samples: int = Field(gt=0)
+    reset_at_ms: int | None = Field(default=None, ge=0)
+
+
 class RiskEventOut(StrictModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
     event_id: str
@@ -199,6 +208,9 @@ class RiskEventOut(StrictModel):
     duration_ms: int
     before_load_diff: float | None
     after_load_diff: float | None
+    intervention_action: str | None = None
+    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
 
 

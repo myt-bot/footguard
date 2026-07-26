@@ -75,10 +75,16 @@ def latest_frame(session: Session, side: str) -> SensorFrame | None:
     )
 
 
-def recent_frames(session: Session, limit: int = 2_000) -> list[SensorFrame]:
+def recent_frames(
+    session: Session,
+    limit: int = 2_000,
+    *,
+    after_id: int = 0,
+) -> list[SensorFrame]:
     descending = list(
         session.scalars(
             select(SensorFrame)
+            .where(SensorFrame.id > after_id)
             .order_by(SensorFrame.timestamp_ms.desc(), SensorFrame.id.desc())
             .limit(limit)
         )
