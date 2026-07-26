@@ -610,7 +610,10 @@ def evaluate_risk(
     risk, metric = _current_risk(metrics, baseline)
     if record:
         _record_risk(
-            session, risk, metric, allow_motor_command=allow_motor_command
+            session,
+            risk,
+            metric,
+            allow_motor_command=allow_motor_command and baseline.ready,
         )
     return RealtimeResponse(
         left=left,
