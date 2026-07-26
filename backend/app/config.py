@@ -13,6 +13,9 @@ PAIRING_WINDOW_MS = 50
 CONTINUITY_GAP_MS = 1_000
 PRESSURE_INVALID_MASK = 0x0000003F
 TEMPERATURE_INVALID_MASK = 0x000003C0
+# MPU invalid is intentionally not a pairing blocker: pressure/temperature
+# monitoring must keep working when the optional motion sensor is unavailable.
+IMU_INVALID_MASK = 0x00000400
 TIME_UNSYNCED_MASK = 0x00000800
 CALIBRATION_INVALID_MASK = 0x00002000
 SENSOR_STUCK_MASK = 0x00004000
@@ -46,9 +49,20 @@ FOREFOOT_RATIO_DELTA_THRESHOLD = 0.12
 REGIONAL_SHARE_DELTA_FOR_SEVERE = 0.50
 REGIONAL_ASYMMETRY_FOR_SEVERE = 0.35
 TEMPERATURE_DELTA_C_THRESHOLD = 2.0
+# Orientation-independent MPU motion gate. The firmware reports acceleration
+# in m/s^2 and angular rate in degrees/s. These are competition-prototype
+# engineering thresholds, not clinical gait thresholds.
+GRAVITY_M_S2 = 9.80665
+MOTION_ACCEL_DELTA_THRESHOLD_M_S2 = 1.5
+MOTION_GYRO_THRESHOLD_DPS = 20.0
 ATTENTION_AFTER_MS = 3_000
 WARNING_AFTER_MS = 6_000
 PERSISTENT_AFTER_MS = 10_000
+# Walking naturally produces short pressure peaks. Require a longer continuous
+# pressure anomaly while moving, but never discard a sustained walking risk.
+MOVING_PRESSURE_ATTENTION_AFTER_MS = 5_000
+MOVING_PRESSURE_WARNING_AFTER_MS = 8_000
+MOVING_PRESSURE_PERSISTENT_AFTER_MS = 12_000
 MOTOR_COMMAND_LEVEL = 2
 MOTOR_PATTERN = "double"
 MOTOR_DURATION_MS = 800
