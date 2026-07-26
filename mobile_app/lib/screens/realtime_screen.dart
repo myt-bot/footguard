@@ -206,6 +206,14 @@ class _MetricsCard extends StatelessWidget {
                       ? '--'
                       : '${controller.syncErrorMs} ms'),
               _Metric(
+                label: '活动状态',
+                value: switch (controller.activityState) {
+                  'stationary' => '静止',
+                  'moving' => '运动',
+                  _ => '未知（MPU未就绪）',
+                },
+              ),
+              _Metric(
                   label: '后端', value: controller.backendOnline ? '在线' : '离线'),
               _Metric(label: '数据源', value: controller.source.label),
             ],
