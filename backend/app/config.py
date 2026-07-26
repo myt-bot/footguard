@@ -51,3 +51,28 @@ RECOVERY_OBSERVATION_MS = 15_000
 
 def database_url() -> str:
     return os.getenv("FOOTGUARD_DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def ai_provider() -> str:
+    return os.getenv("FOOTGUARD_AI_PROVIDER", "mock").strip().lower()
+
+
+def ai_base_url() -> str:
+    return os.getenv("FOOTGUARD_AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+
+def ai_api_key() -> str:
+    return os.getenv("FOOTGUARD_AI_API_KEY", "").strip()
+
+
+def ai_model() -> str:
+    return os.getenv("FOOTGUARD_AI_MODEL", "").strip()
+
+
+def ai_timeout_seconds() -> float:
+    raw_value = os.getenv("FOOTGUARD_AI_TIMEOUT_SECONDS", "15")
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return 15.0
+    return min(max(value, 1.0), 60.0)

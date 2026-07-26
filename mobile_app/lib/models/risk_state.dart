@@ -24,6 +24,13 @@ class RiskState {
         durationMs: json['duration_ms'] as int,
       );
 
+  Map<String, dynamic> toJson() => {
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'risk_level': riskLevel,
+        'duration_ms': durationMs,
+      };
+
   bool get isNormal => riskType == 'normal';
   bool get isIncomplete => riskType == 'data_incomplete';
 }

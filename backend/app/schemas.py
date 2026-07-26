@@ -84,6 +84,24 @@ class RiskState(StrictModel):
     duration_ms: int = Field(ge=0)
 
 
+class AiAdviceRequest(StrictModel):
+    protocol_version: Literal[1]
+    risk: RiskState
+    load_diff: float | None = Field(default=None, ge=0)
+    temperature_delta_max_c: float | None = Field(default=None, ge=0)
+    baseline_ready: bool = False
+
+
+class AiAdviceResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    risk_level: int = Field(ge=0, le=3)
+    explanation: str = Field(min_length=1, max_length=500)
+    advice: str = Field(min_length=1, max_length=500)
+    target: Literal["left", "right", "both", "none"]
+    candidate_pattern: Literal["off", "short", "double", "long"]
+
+
 class RealtimeResponse(StrictModel):
     left: FootFrame | None
     right: FootFrame | None

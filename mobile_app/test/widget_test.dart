@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:footguard/models/ai_advice.dart';
 import 'package:footguard/models/foot_frame.dart';
 import 'package:footguard/models/risk_state.dart';
 import 'package:footguard/screens/home_screen.dart';
+import 'package:footguard/widgets/ai_advice_card.dart';
 import 'package:footguard/widgets/foot_pressure_view.dart';
 import 'package:footguard/widgets/risk_banner.dart';
 
@@ -34,6 +36,33 @@ void main() {
       ),
     ));
     expect(find.text('检测到持续左偏'), findsOneWidget);
+  });
+
+  testWidgets('AI advice card identifies DeepSeek as an auxiliary explanation',
+      (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: AiAdviceCard(
+            advice: AiAdvice(
+              provider: 'openai-compatible:deepseek-v4-flash',
+              riskLevel: 2,
+              explanation: '左脚负荷持续偏高。',
+              advice: '请短暂减轻左脚负荷并检查足部皮肤。',
+              target: 'left',
+              candidatePattern: 'double',
+            ),
+            status: '辅助解释已更新',
+            loading: false,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('AI 风险解释（辅助）'), findsOneWidget);
+    expect(find.text('DeepSeek 云端解释'), findsOneWidget);
+    expect(find.text('左脚负荷持续偏高。'), findsOneWidget);
+    expect(find.textContaining('不构成医疗诊断'), findsOneWidget);
   });
 
   testWidgets('pressure view names the abnormal anatomical regions',

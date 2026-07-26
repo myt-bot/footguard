@@ -110,6 +110,63 @@ def _pair_history(session: Session) -> list[PairMetric]:
     return sorted(metrics, key=lambda item: item.timestamp_ms)
 
 
+def _latest_complete_pair(
+    session: Session,
+    left_latest: SensorFrame | None,
+    right_latest: SensorFrame | None,
+) -> tuple[SensorFrame, SensorFrame] | None:
+    """Return the newest valid pair while tolerating one brief side skew.
+
+    Left and right frames are uploaded together, but concurrent realtime reads
+    can briefly observe one side from the next packet. Keep the newest complete
+    pair only while it is within the normal continuity window; a real one-sided
+    disconnect still becomes data_incomplete after that window.
+    """
+    if (
+        left_latest is not None
+        and right_latest is not None
+        and left_latest.packet_seq == right_latest.packet_seq
+        and _valid_pair(left_latest, right_latest)
+    ):
+        return left_latest, right_latest
+    if left_latest is None or right_latest is None:
+        return None
+
+    newest_timestamp_ms = max(
+        left_latest.timestamp_ms,
+        right_latest.timestamp_ms,
+    )
+    candidates: dict[tuple[int, int], dict[str, SensorFrame]] = {}
+    for frame in recent_frames(session, limit=200):
+        if frame.side in {"left", "right"}:
+            candidates.setdefault(
+                (frame.sync_id, frame.packet_seq),
+                {},
+            )[frame.side] = frame
+
+    newest_pair: tuple[SensorFrame, SensorFrame] | None = None
+    newest_pair_timestamp_ms = -1
+    for candidate in candidates.values():
+        if set(candidate) != {"left", "right"}:
+            continue
+        left = candidate["left"]
+        right = candidate["right"]
+        if not _valid_pair(left, right):
+            continue
+        pair_timestamp_ms = max(left.timestamp_ms, right.timestamp_ms)
+        if pair_timestamp_ms > newest_pair_timestamp_ms:
+            newest_pair = left, right
+            newest_pair_timestamp_ms = pair_timestamp_ms
+
+    if (
+        newest_pair is not None
+        and newest_timestamp_ms - newest_pair_timestamp_ms
+        <= CONTINUITY_GAP_MS
+    ):
+        return newest_pair
+    return None
+
+
 def _channel_asymmetry(metric: PairMetric, index: int) -> float:
     left = metric.left_pressure[index]
     right = metric.right_pressure[index]
@@ -457,17 +514,10 @@ def evaluate_risk(
     record: bool = False,
     allow_motor_command: bool = True,
 ) -> RealtimeResponse:
-    left_model = latest_frame(session, "left")
-    right_model = latest_frame(session, "right")
-    left = to_schema(left_model) if left_model else None
-    right = to_schema(right_model) if right_model else None
-    latest_pair_valid = (
-        left_model is not None
-        and right_model is not None
-        and left_model.packet_seq == right_model.packet_seq
-        and _valid_pair(left_model, right_model)
-    )
-    if not latest_pair_valid:
+    left_latest = latest_frame(session, "left")
+    right_latest = latest_frame(session, "right")
+    latest_pair = _latest_complete_pair(session, left_latest, right_latest)
+    if latest_pair is None:
         risk = RiskState(
             risk_type="data_incomplete", risk_side="none", risk_level=0, duration_ms=0
         )
@@ -476,9 +526,15 @@ def evaluate_risk(
                 session, risk, None, allow_motor_command=allow_motor_command
             )
         return RealtimeResponse(
-            left=left, right=right, paired_timestamp_ms=None, sync_error_ms=None,
+            left=to_schema(left_latest) if left_latest else None,
+            right=to_schema(right_latest) if right_latest else None,
+            paired_timestamp_ms=None,
+            sync_error_ms=None,
             load_bias=None, load_diff=None, risk=risk, regional_analysis=None
         )
+    left_model, right_model = latest_pair
+    left = to_schema(left_model)
+    right = to_schema(right_model)
     metrics = _pair_history(session)
     baseline = _baseline_profile(metrics)
     risk, metric = _current_risk(metrics, baseline)
