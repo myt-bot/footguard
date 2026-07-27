@@ -123,12 +123,11 @@ class AiAdviceCard extends StatelessWidget {
                   ActionChip(
                     avatar: Icon(question.icon, size: 18),
                     label: Text(question.label),
-                    onPressed:
-                        questionLoading || onQuestionSelected == null
-                            ? null
-                            : () {
-                                onQuestionSelected!(question.key);
-                              },
+                    onPressed: questionLoading || onQuestionSelected == null
+                        ? null
+                        : () {
+                            onQuestionSelected!(question.key);
+                          },
                   ),
               ],
             ),

@@ -37,7 +37,7 @@ class BleCommandBridge {
         _active != null) {
       return;
     }
-    if (command.expired) {
+    if (command.isExpiredAt(api.serverNowMs)) {
       _completedCommandIds.add(command.commandId);
       _setStatus('命令已过期，未写入BLE设备');
       return;
@@ -72,8 +72,7 @@ class BleCommandBridge {
     try {
       await gateway.sendCommand(command);
       _setStatus('命令已写入BLE，等待设备AckEvent（尚未确认马达执行）');
-      final remaining =
-          command.expireAtMs - DateTime.now().millisecondsSinceEpoch + 1000;
+      final remaining = command.expireAtMs - api.serverNowMs + 1000;
       _expiryTimer?.cancel();
       _expiryTimer = Timer(
         Duration(milliseconds: remaining > 1 ? remaining : 1),

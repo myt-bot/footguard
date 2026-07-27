@@ -34,5 +34,7 @@ class DeviceCommand {
         'reason_code': reasonCode,
       };
 
-  bool get expired => DateTime.now().millisecondsSinceEpoch >= expireAtMs;
+  bool isExpiredAt(int unixTimeMs) => unixTimeMs >= expireAtMs;
+
+  bool get expired => isExpiredAt(DateTime.now().millisecondsSinceEpoch);
 }

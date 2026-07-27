@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'config/app_config.dart';
+import 'data/api_client.dart';
 import 'screens/device_screen.dart';
 import 'screens/history_screen.dart';
 import 'screens/home_screen.dart';
@@ -29,7 +30,9 @@ class _FootGuardAppState extends State<FootGuardApp> {
   @override
   void initState() {
     super.initState();
-    _bleConnectionService = BleConnectionService();
+    _bleConnectionService = BleConnectionService(
+      unixTimeProvider: _backendUnixTimeMs,
+    );
     _settingsStore =
         widget.settingsStore ?? const SharedPreferencesAppSettingsStore();
     unawaited(_restoreSettings());
@@ -40,6 +43,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
       final restored = await _settingsStore.load();
       if (mounted) {
         setState(() => settings = restored);
+        unawaited(_synchronizeConnectedDeviceClocks());
       }
     } catch (_) {
       // Keep safe defaults when local storage is temporarily unavailable.
@@ -49,6 +53,24 @@ class _FootGuardAppState extends State<FootGuardApp> {
   void _applySettings(AppSettings next) {
     setState(() => settings = next);
     unawaited(_saveSettings(next));
+    unawaited(_synchronizeConnectedDeviceClocks());
+  }
+
+  Future<int> _backendUnixTimeMs() async {
+    final api = FootGuardApiClient(baseUrl: settings.backendUrl);
+    try {
+      return await api.serverTimeMs(refresh: true);
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<void> _synchronizeConnectedDeviceClocks() async {
+    try {
+      await _bleConnectionService.synchronizeConnectedClocks();
+    } catch (_) {
+      // A later connection or command retries time sync when the backend returns.
+    }
   }
 
   Future<void> _saveSettings(AppSettings next) async {

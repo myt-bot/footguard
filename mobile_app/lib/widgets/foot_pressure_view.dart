@@ -61,8 +61,15 @@ class FootPressureView extends StatelessWidget {
       frame!.pressureChannelsValid &&
       frame!.temperatureChannelsValid;
 
+  bool get _pressureContactPresent {
+    if (!_sensorFrameValid || frame!.pressure.length != 6) {
+      return false;
+    }
+    return frame!.pressure.reduce(math.max) >= _minimumFallbackPressure;
+  }
+
   List<double> get _fallbackPressureScores {
-    if (!_sensorFrameValid) {
+    if (!_pressureContactPresent) {
       return List.filled(6, 0.0);
     }
     final current = frame?.pressure;
@@ -72,10 +79,6 @@ class FootPressureView extends StatelessWidget {
     final peer = oppositeFrame?.pressureChannelsValid == true
         ? oppositeFrame?.pressure
         : null;
-    final peak = current.reduce(math.max);
-    if (peak < _minimumFallbackPressure) {
-      return List.filled(6, 0.0);
-    }
     final total = current.fold<double>(0, (sum, value) => sum + value);
     return List.generate(6, (index) {
       final distribution = current[index] / total;
@@ -100,7 +103,11 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedPressureScores {
-    if (!_sensorFrameValid) {
+    // BLE frames update more frequently than backend regional analysis. During
+    // unloading the current pressure can already be zero while a previous
+    // backend response still contains high scores. Never combine those two
+    // moments into a misleading "0% share / 100% abnormal" display.
+    if (!_pressureContactPresent) {
       return List.filled(6, 0.0);
     }
     final values = pressureScores;

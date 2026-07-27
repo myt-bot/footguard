@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from .config import DATA_DIR, database_url
 from .database import create_database
+from .repositories.command_repository import expire_pending_commands
 from .routers import (
     ai_advice,
     calibration,
@@ -21,6 +22,8 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
     if url.startswith("sqlite:///") and ":memory:" not in url:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
     engine, session_factory = create_database(url)
+    with session_factory() as session:
+        expire_pending_commands(session)
     application = FastAPI(
         title="FootGuard Backend API",
         version="0.1.0",

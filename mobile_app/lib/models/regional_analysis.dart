@@ -37,8 +37,7 @@ class RegionalAnalysis {
       baselineReady: json['baseline_ready'] as bool,
       baselineSource: json['baseline_source'] as String,
       baselineSampleCount: json['baseline_sample_count'] as int? ?? 0,
-      baselineRequiredSamples:
-          json['baseline_required_samples'] as int? ?? 15,
+      baselineRequiredSamples: json['baseline_required_samples'] as int? ?? 15,
       leftPressureScores:
           _values(json['left_pressure_scores'], 6, 'left_pressure_scores'),
       rightPressureScores:

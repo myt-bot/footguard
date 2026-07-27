@@ -106,8 +106,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.leftTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount:
-                        analysis?.baselineSampleCount ?? 0,
+                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
                         analysis?.baselineRequiredSamples ?? 15,
                   ),
@@ -122,8 +121,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.rightTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount:
-                        analysis?.baselineSampleCount ?? 0,
+                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
                         analysis?.baselineRequiredSamples ?? 15,
                   ),

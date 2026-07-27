@@ -34,6 +34,9 @@ LOAD_BIAS_EXIT_THRESHOLD = 0.15
 BASELINE_MIN_SAMPLES = 15
 BASELINE_CALIBRATION_WINDOW_SAMPLES = 50
 BASELINE_MIN_FOOT_PRESSURE = 0.08
+# Do not classify pressure or temperature risk while the footwear is not
+# meaningfully loaded. This remains low enough for near-single-foot loading.
+RISK_MIN_TOTAL_PRESSURE = 0.08
 BASELINE_ACTIVE_PRESSURE_FLOOR = 0.005
 BASELINE_MIN_ACTIVE_CHANNELS = 3
 BASELINE_BALANCED_BIAS_MAX = 0.50

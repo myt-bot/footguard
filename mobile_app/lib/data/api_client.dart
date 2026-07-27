@@ -130,10 +130,9 @@ class CalibrationStatus {
   final int requiredSamples;
   final int? resetAtMs;
 
-  double get progress =>
-      requiredSamples <= 0
-          ? 0.0
-          : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
+  double get progress => requiredSamples <= 0
+      ? 0.0
+      : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
 
   factory CalibrationStatus.fromJson(Map<String, dynamic> json) =>
       CalibrationStatus(
@@ -151,6 +150,14 @@ class FootGuardApiClient {
 
   final String baseUrl;
   final http.Client _client;
+  int _serverClockOffsetMs = 0;
+  bool _hasServerClockOffset = false;
+
+  int get serverNowMs =>
+      DateTime.now().millisecondsSinceEpoch +
+      (_hasServerClockOffset ? _serverClockOffsetMs : 0);
+
+  bool get hasServerClockOffset => _hasServerClockOffset;
 
   Future<dynamic> _decode(http.Response response) async {
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -160,11 +167,27 @@ class FootGuardApiClient {
   }
 
   Future<bool> health() async {
+    final requestedAtMs = DateTime.now().millisecondsSinceEpoch;
     final response = await _client
         .get(Uri.parse('$baseUrl/health'))
         .timeout(const Duration(seconds: 5));
+    final receivedAtMs = DateTime.now().millisecondsSinceEpoch;
     final body = await _decode(response) as Map<String, dynamic>;
+    final serverTimeMs = body['server_time_ms'];
+    if (serverTimeMs is int) {
+      final localMidpointMs =
+          requestedAtMs + ((receivedAtMs - requestedAtMs) ~/ 2);
+      _serverClockOffsetMs = serverTimeMs - localMidpointMs;
+      _hasServerClockOffset = true;
+    }
     return body['status'] == 'ok';
+  }
+
+  Future<int> serverTimeMs({bool refresh = false}) async {
+    if (refresh || !_hasServerClockOffset) {
+      await health();
+    }
+    return serverNowMs;
   }
 
   Future<void> uploadFrames(List<FootFrame> frames) async {
@@ -174,7 +197,7 @@ class FootGuardApiClient {
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'protocol_version': 1,
-            'app_received_at_ms': DateTime.now().millisecondsSinceEpoch,
+            'app_received_at_ms': serverNowMs,
             'frames': frames.map((frame) => frame.toJson()).toList(),
           }),
         )
@@ -230,7 +253,7 @@ class FootGuardApiClient {
   }
 
   Future<void> acknowledgeMotor(DeviceCommand command, String deviceId) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = serverNowMs;
     final response = await _client
         .post(
           Uri.parse('$baseUrl/api/v1/ack'),

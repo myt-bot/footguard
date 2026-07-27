@@ -25,7 +25,7 @@ class MonitoringController extends ChangeNotifier {
   final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  final List<FootFrame> _uploadQueue = [];
+  List<FootFrame>? _pendingUploadPair;
   Timer? _refreshTimer;
   bool _uploading = false;
   bool _refreshing = false;
@@ -128,9 +128,12 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _enqueuePair(List<FootFrame> pair) {
-    _uploadQueue.addAll(pair);
+    // Sensor frames drive a live safety view, so stale backlog is less useful
+    // than the newest complete bilateral pair. Replacing the pending pair keeps
+    // backend risk evaluation close to real time when a request is slow.
+    _pendingUploadPair = List<FootFrame>.of(pair, growable: false);
     if (!_uploading) {
-      _drainUploadQueue();
+      unawaited(_drainUploadQueue());
     }
   }
 
@@ -140,10 +143,9 @@ class MonitoringController extends ChangeNotifier {
     }
     _uploading = true;
     try {
-      while (_uploadQueue.isNotEmpty) {
-        final takeCount = _uploadQueue.length > 20 ? 20 : _uploadQueue.length;
-        final batch = List<FootFrame>.of(_uploadQueue.take(takeCount));
-        _uploadQueue.removeRange(0, takeCount);
+      while (_pendingUploadPair != null) {
+        final batch = _pendingUploadPair!;
+        _pendingUploadPair = null;
         try {
           await api.uploadFrames(batch);
           backendOnline = true;
@@ -209,7 +211,7 @@ class MonitoringController extends ChangeNotifier {
   Future<void> executeMotorCommand() async {
     final command = motorCommand;
     if (command == null) return;
-    if (command.expired) {
+    if (command.isExpiredAt(api.serverNowMs)) {
       motorStatus = '命令已过期，未执行马达';
       motorCommand = null;
       notifyListeners();
@@ -317,8 +319,7 @@ class MonitoringController extends ChangeNotifier {
       );
       if (_currentRiskSignature == signature) {
         aiQuestionAnswer = answer;
-        aiQuestionStatus =
-            answer.usedFallback ? '云端暂不可用，已使用本地安全回答' : '回答已更新';
+        aiQuestionStatus = answer.usedFallback ? '云端暂不可用，已使用本地安全回答' : '回答已更新';
       }
     } catch (error) {
       if (_currentRiskSignature == signature) {

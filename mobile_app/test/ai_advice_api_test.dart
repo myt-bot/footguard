@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/data/api_client.dart';
+import 'package:footguard/models/device_command.dart';
 import 'package:footguard/models/risk_state.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -137,6 +138,43 @@ void main() {
     expect(resetRequested, isTrue);
     expect(reset.baselineReady, isFalse);
     expect(reset.sampleCount, 0);
+    api.close();
+  });
+
+  test('health synchronizes command expiry checks to backend time', () async {
+    final localBeforeMs = DateTime.now().millisecondsSinceEpoch;
+    final backendTimeMs = localBeforeMs - 167000;
+    final client = MockClient((request) async {
+      expect(request.method, 'GET');
+      expect(request.url.path, '/health');
+      return http.Response(
+        jsonEncode({
+          'status': 'ok',
+          'version': '0.1.0',
+          'protocol_version': 1,
+          'server_time_ms': backendTimeMs,
+        }),
+        200,
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final resolvedTimeMs = await api.serverTimeMs(refresh: true);
+    final command = DeviceCommand(
+      commandId: 'cmd_clock_test',
+      target: 'left',
+      pattern: 'short',
+      durationMs: 300,
+      expireAtMs: backendTimeMs + 30000,
+      reasonCode: 'manual_test',
+    );
+
+    expect(api.hasServerClockOffset, isTrue);
+    expect((resolvedTimeMs - backendTimeMs).abs(), lessThan(1000));
+    expect(command.isExpiredAt(resolvedTimeMs), isFalse);
     api.close();
   });
 }

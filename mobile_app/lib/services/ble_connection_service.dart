@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../models/ble_connection_state.dart';
+import '../models/ble_device_status.dart';
 import '../models/ble_scan_device.dart';
 import '../models/device_ack.dart';
 import '../models/device_command.dart';
@@ -13,6 +14,8 @@ import 'ble_gatt.dart';
 import 'ble_gatt_profile_validator.dart';
 import 'ble_known_device_store.dart';
 import 'ble_reconnect_policy.dart';
+
+typedef UnixTimeProvider = Future<int> Function();
 
 class BleConnectionException implements Exception {
   const BleConnectionException(this.code, this.message);
@@ -30,11 +33,13 @@ class BleConnectionService implements BleCommandGateway {
     BleFrameParser? frameParser,
     BleKnownDeviceStore? knownDeviceStore,
     BleReconnectPolicy reconnectPolicy = const BleReconnectPolicy(),
+    UnixTimeProvider? unixTimeProvider,
   })  : _codec = codec ?? const BleControlCodec(),
         _frameParser = frameParser ?? const BleFrameParser(),
         _knownDeviceStore =
             knownDeviceStore ?? const SharedPreferencesBleKnownDeviceStore(),
-        _reconnectPolicy = reconnectPolicy {
+        _reconnectPolicy = reconnectPolicy,
+        _unixTimeProvider = unixTimeProvider ?? _systemUnixTimeMs {
     unawaited(_restoreKnownDevices());
   }
 
@@ -42,6 +47,7 @@ class BleConnectionService implements BleCommandGateway {
   final BleFrameParser _frameParser;
   final BleKnownDeviceStore _knownDeviceStore;
   final BleReconnectPolicy _reconnectPolicy;
+  final UnixTimeProvider _unixTimeProvider;
   final _snapshots = StreamController<BleConnectionsSnapshot>.broadcast();
   final _acknowledgements = StreamController<DeviceAck>.broadcast();
   final _devices = <FootSide, BluetoothDevice>{};
@@ -163,36 +169,19 @@ class BleConnectionService implements BleCommandGateway {
 
       final statusCharacteristic =
           characteristics[FootGuardGatt.deviceStatusUuid]!;
-      final statusBytes = await statusCharacteristic.read();
       final expectedSide = side == FootSide.left ? 'left' : 'right';
-      var status = _codec.decodeDeviceStatus(
-        statusBytes,
+      final status = await _synchronizeClock(
+        side: side,
+        characteristics: characteristics,
+        statusCharacteristic: statusCharacteristic,
         expectedSide: expectedSide,
+        allowSystemClockFallback: true,
       );
-
       if (!status.timeSynced) {
-        final unixTimeMs = DateTime.now().millisecondsSinceEpoch;
-        final syncId = _sharedSessionSyncId();
-        final payload = _codec.encodeTimeSync(
-          syncId: syncId,
-          unixTimeMs: unixTimeMs,
+        throw const BleConnectionException(
+          'time_sync_failed',
+          'TimeSync写入后设备未确认时间同步',
         );
-        await characteristics[FootGuardGatt.timeSyncUuid]!.write(
-          payload,
-          withoutResponse: false,
-        );
-
-        final refreshedStatusBytes = await statusCharacteristic.read();
-        status = _codec.decodeDeviceStatus(
-          refreshedStatusBytes,
-          expectedSide: expectedSide,
-        );
-        if (!status.timeSynced || status.syncId != syncId) {
-          throw const BleConnectionException(
-            'time_sync_failed',
-            'TimeSync写入后设备未确认时间同步',
-          );
-        }
       }
       if (!_autoReconnectSides.contains(side)) {
         await _clearTransport(side);
@@ -259,6 +248,76 @@ class BleConnectionService implements BleCommandGateway {
     }
   }
 
+  Future<BleDeviceStatus> _synchronizeClock({
+    required FootSide side,
+    required Map<String, BluetoothCharacteristic> characteristics,
+    required BluetoothCharacteristic statusCharacteristic,
+    required String expectedSide,
+    int? unixTimeMs,
+    bool allowSystemClockFallback = false,
+  }) async {
+    var resolvedUnixTimeMs = unixTimeMs;
+    if (resolvedUnixTimeMs == null) {
+      try {
+        resolvedUnixTimeMs = await _unixTimeProvider();
+      } catch (_) {
+        if (!allowSystemClockFallback) {
+          rethrow;
+        }
+        resolvedUnixTimeMs = DateTime.now().millisecondsSinceEpoch;
+      }
+    }
+
+    final syncId = _sharedSessionSyncId();
+    final payload = _codec.encodeTimeSync(
+      syncId: syncId,
+      unixTimeMs: resolvedUnixTimeMs,
+    );
+    await characteristics[FootGuardGatt.timeSyncUuid]!.write(
+      payload,
+      withoutResponse: false,
+    );
+
+    final refreshedStatusBytes = await statusCharacteristic.read();
+    final status = _codec.decodeDeviceStatus(
+      refreshedStatusBytes,
+      expectedSide: expectedSide,
+    );
+    if (!status.timeSynced || status.syncId != syncId) {
+      throw BleConnectionException(
+        'time_sync_failed',
+        '${_sideLabel(side)}TimeSync写入后设备未确认时间同步',
+      );
+    }
+    return status;
+  }
+
+  Future<void> synchronizeConnectedClocks() async {
+    _ensureActive();
+    final unixTimeMs = await _unixTimeProvider();
+    for (final side in FootSide.values) {
+      final connection = _current.forSide(side);
+      final characteristics = _characteristics[side];
+      if (!connection.isReady ||
+          connection.deviceStatus == null ||
+          characteristics == null) {
+        continue;
+      }
+      final expectedSide = side == FootSide.left ? 'left' : 'right';
+      final status = await _synchronizeClock(
+        side: side,
+        characteristics: characteristics,
+        statusCharacteristic: characteristics[FootGuardGatt.deviceStatusUuid]!,
+        expectedSide: expectedSide,
+        unixTimeMs: unixTimeMs,
+      );
+      _emit(connection.copyWith(deviceStatus: status));
+    }
+  }
+
+  static Future<int> _systemUnixTimeMs() async =>
+      DateTime.now().millisecondsSinceEpoch;
+
   BluetoothCharacteristic? characteristic(
     FootSide side,
     String uuid,
@@ -268,7 +327,8 @@ class BleConnectionService implements BleCommandGateway {
   @override
   Future<void> sendCommand(DeviceCommand command) async {
     _ensureActive();
-    if (command.expired) {
+    final unixTimeMs = await _unixTimeProvider();
+    if (command.isExpiredAt(unixTimeMs)) {
       throw const BleConnectionException(
         'command_expired',
         '命令已经过期，未写入设备',
@@ -287,22 +347,26 @@ class BleConnectionService implements BleCommandGateway {
     final writes = <Future<void>>[];
     for (final side in sides) {
       final connection = _current.forSide(side);
-      final characteristic =
-          _characteristics[side]?[FootGuardGatt.deviceCommandUuid];
+      final characteristics = _characteristics[side];
+      final characteristic = characteristics?[FootGuardGatt.deviceCommandUuid];
       if (!connection.isReady ||
           connection.deviceStatus == null ||
+          characteristics == null ||
           characteristic == null) {
         throw BleConnectionException(
           'device_not_ready',
           '${_sideLabel(side)}设备尚未完成BLE连接',
         );
       }
-      if (!connection.deviceStatus!.timeSynced) {
-        throw BleConnectionException(
-          'time_unsynced',
-          '${_sideLabel(side)}设备尚未完成时间同步',
-        );
-      }
+      final expectedSide = side == FootSide.left ? 'left' : 'right';
+      final status = await _synchronizeClock(
+        side: side,
+        characteristics: characteristics,
+        statusCharacteristic: characteristics[FootGuardGatt.deviceStatusUuid]!,
+        expectedSide: expectedSide,
+        unixTimeMs: unixTimeMs,
+      );
+      _emit(connection.copyWith(deviceStatus: status));
       final mtu = connection.mtu ?? FootGuardGatt.preferredMtu;
       if (payload.length > mtu - 3) {
         throw BleConnectionException(
