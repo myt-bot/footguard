@@ -153,6 +153,24 @@ def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
     )
 
 
+def test_unloaded_raw_delta_of_2_97_c_triggers_right_alert() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    heated_off_ground = _metric(
+        BASELINE_MIN_SAMPLES + 2,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(0.61, 0.36, -2.97, -0.99),
+    )
+
+    assert baseline.ready is True
+    assert _signal(heated_off_ground, baseline) == (
+        "temperature_asymmetry",
+        "right",
+    )
+
+
 def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
     metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES + 5)]
     metrics.append(
