@@ -44,6 +44,8 @@ from ..config import (
     RISK_MIN_TOTAL_PRESSURE,
     TEMPERATURE_DELTA_C_THRESHOLD,
     TEMPERATURE_DELTA_C_EXIT_THRESHOLD,
+    TEMPERATURE_RAW_DELTA_C_THRESHOLD,
+    TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD,
     WARNING_AFTER_MS,
 )
 from ..models import Command, InterventionFeedback, RiskEvent, SensorFrame
@@ -421,24 +423,62 @@ def _temperature_delta_from_baseline(
     )
 
 
+def _temperature_signal_side(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    *,
+    use_exit_threshold: bool = False,
+) -> str | None:
+    """Return the side supported by raw or baseline-corrected temperature."""
+    corrected = _temperature_delta_from_baseline(metric, baseline)
+    raw_threshold = (
+        TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD
+        if use_exit_threshold
+        else TEMPERATURE_RAW_DELTA_C_THRESHOLD
+    )
+    corrected_threshold = (
+        TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+        if use_exit_threshold
+        else TEMPERATURE_DELTA_C_THRESHOLD
+    )
+    candidates: list[tuple[float, float]] = []
+    for raw_delta, corrected_delta in zip(
+        metric.temperature_delta_c,
+        corrected,
+        strict=True,
+    ):
+        raw_score = abs(raw_delta) / raw_threshold
+        corrected_score = (
+            abs(corrected_delta) / corrected_threshold
+            if baseline.ready
+            else 0.0
+        )
+        score = max(raw_score, corrected_score)
+        if score < 1.0:
+            continue
+        evidence_delta = (
+            raw_delta
+            if raw_score >= corrected_score
+            else corrected_delta
+        )
+        candidates.append((score, evidence_delta))
+
+    if not candidates:
+        return None
+    _, strongest_delta = max(candidates, key=lambda candidate: candidate[0])
+    return "left" if strongest_delta > 0 else "right"
+
+
 def _signal(
     metric: PairMetric,
     baseline: BaselineProfile,
 ) -> tuple[str, str] | None:
-    # Temperature remains meaningful while footwear is unloaded. Evaluate it
-    # first so a hand-heated NTC can demonstrate the diabetic-foot thermal cue
-    # without a simultaneously lifted foot being misclassified as load bias.
-    corrected_temperature = _temperature_delta_from_baseline(metric, baseline)
-    hottest_index = max(
-        range(len(corrected_temperature)),
-        key=lambda index: abs(corrected_temperature[index]),
-    )
-    hottest_delta = corrected_temperature[hottest_index]
-    if abs(hottest_delta) >= TEMPERATURE_DELTA_C_THRESHOLD:
-        return (
-            "temperature_asymmetry",
-            "left" if hottest_delta > 0 else "right",
-        )
+    # Temperature remains meaningful while footwear is unloaded. Raw evidence
+    # keeps the alarm consistent with the App's displayed same-region delta;
+    # corrected evidence preserves sensitivity after personal calibration.
+    temperature_side = _temperature_signal_side(metric, baseline)
+    if temperature_side is not None:
+        return "temperature_asymmetry", temperature_side
 
     # Pressure risks still require meaningful footwear loading.
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
@@ -470,10 +510,14 @@ def _signal_is_active(
     """Apply lower exit thresholds so one noisy sample cannot reset a risk."""
     risk_type, risk_side = signal
     if risk_type == "temperature_asymmetry":
-        corrected = _temperature_delta_from_baseline(metric, baseline)
-        if risk_side == "left":
-            return max(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
-        return min(corrected) <= -TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+        return (
+            _temperature_signal_side(
+                metric,
+                baseline,
+                use_exit_threshold=True,
+            )
+            == risk_side
+        )
 
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
         return False
