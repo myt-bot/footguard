@@ -439,9 +439,9 @@ def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
                 left_total=0.0,
                 right_total=0.0,
                 temperature_delta_c=(
-                    (0.8, 0.2, 0.1, 0.0)
+                    (1.2, 2.4, -1.8, 0.8)
                     if 18 <= index <= 21
-                    else (3.4, 0.2, 0.1, 0.0)
+                    else (3.4, 2.4, -1.8, 0.8)
                 ),
             ),
             timestamp_ms=30_000 + index * 200,
@@ -468,9 +468,9 @@ def test_temperature_risk_clears_after_dropout_grace() -> None:
                 left_total=0.0,
                 right_total=0.0,
                 temperature_delta_c=(
-                    (3.4, 0.2, 0.1, 0.0)
+                    (3.4, 2.4, -1.8, 0.8)
                     if index < 20
-                    else (0.8, 0.2, 0.1, 0.0)
+                    else (1.2, 2.4, -1.8, 0.8)
                 ),
             ),
             timestamp_ms=40_000 + index * 200,
