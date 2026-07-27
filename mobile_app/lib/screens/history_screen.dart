@@ -59,9 +59,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
           final highRiskCount =
               data.where((event) => event.riskLevel >= 2).length;
           final improvedCount = data.where((event) {
-            if (event.effectLabel != null) {
-              return event.effectLabel == 'effective' ||
-                  event.effectLabel == 'partial';
+            if (!_isLoadBiasRisk(event.riskType)) {
+              return false;
             }
             final ratio = event.loadDiffImprovementRatio;
             return ratio != null && ratio >= 0.2;
@@ -286,8 +285,7 @@ class _StatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color =
-        active ? const Color(0xFFD54A4A) : const Color(0xFF147D73);
+    final color = active ? const Color(0xFFD54A4A) : const Color(0xFF147D73);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
@@ -333,6 +331,9 @@ class _RecoveryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!_isLoadBiasRisk(event.riskType)) {
+      return _NonLoadBiasRecoveryPanel(event: event);
+    }
     if (!event.hasLoadDiffComparison) {
       return Container(
         width: double.infinity,
@@ -354,14 +355,10 @@ class _RecoveryPanel extends StatelessWidget {
     final after = event.afterLoadDiff!;
     final ratio = event.loadDiffImprovementRatio;
     final improved = ratio != null && ratio >= 0.2;
-    final result = _recoveryResult(event.effectLabel, ratio);
-    final recordedImprovement = event.effectLabel == 'effective' ||
-        event.effectLabel == 'partial';
-    final panelImproved =
-        event.effectLabel == null ? improved : recordedImprovement;
-    final color = panelImproved
-        ? const Color(0xFF147D73)
-        : const Color(0xFFE07A36);
+    final result = _recoveryResult(ratio);
+    final panelImproved = improved;
+    final color =
+        panelImproved ? const Color(0xFF147D73) : const Color(0xFFE07A36);
     final changeDescription = ratio == null
         ? ''
         : ratio >= 0
@@ -411,11 +408,56 @@ class _RecoveryPanel extends StatelessWidget {
               style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
             ),
           ],
-          if (event.riskType == 'temperature_asymmetry') ...[
+        ],
+      ),
+    );
+  }
+}
+
+class _NonLoadBiasRecoveryPanel extends StatelessWidget {
+  const _NonLoadBiasRecoveryPanel({required this.event});
+
+  final RiskEventRecord event;
+
+  @override
+  Widget build(BuildContext context) {
+    final isActive = event.status == 'active';
+    final description = switch (event.riskType) {
+      'temperature_asymmetry' => '温差事件不能用左右负载差判定干预效果；本页仅记录事件是否解除和恢复用时。',
+      'forefoot_high' => '当前版本尚未保存提醒前后的前掌区域变化量，因此不宣称干预后改善。',
+      _ => '本次事件没有可用于评估干预效果的同类指标。',
+    };
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF2F5F5),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            isActive ? '事件仍在持续' : '事件已解除',
+            style: const TextStyle(
+              color: Color(0xFF147D73),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            description,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF60706F)),
+          ),
+          if (event.recoveryTimeMs != null) ...[
             const SizedBox(height: 5),
-            const Text(
-              '温差风险中，该数值仅作为姿势与负载恢复的辅助参考。',
-              style: TextStyle(fontSize: 12, color: Color(0xFF71807F)),
+            Text('恢复用时 ${_formatDuration(event.recoveryTimeMs!)}'),
+          ],
+          if (event.interventionAction != null) ...[
+            const SizedBox(height: 5),
+            Text(
+              '干预记录：${_actionLabel(event.interventionAction!)}',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
             ),
           ],
         ],
@@ -457,15 +499,7 @@ IconData _riskIcon(String riskType) => switch (riskType) {
       _ => Icons.balance_rounded,
     };
 
-String _recoveryResult(String? effectLabel, double? ratio) {
-  if (effectLabel != null) {
-    return switch (effectLabel) {
-      'effective' => '明显改善',
-      'partial' => '部分改善',
-      'ineffective' => '未见明显改善',
-      _ => '证据不足',
-    };
-  }
+String _recoveryResult(double? ratio) {
   if (ratio != null && ratio >= 0.5) {
     return '明显改善';
   }
@@ -474,6 +508,9 @@ String _recoveryResult(String? effectLabel, double? ratio) {
   }
   return '未见明显改善';
 }
+
+bool _isLoadBiasRisk(String riskType) =>
+    riskType == 'left_load_bias' || riskType == 'right_load_bias';
 
 String _actionLabel(String action) => switch (action) {
       'motor_vibration' => '马达提醒后调整姿势',

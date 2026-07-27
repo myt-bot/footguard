@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../data/api_client.dart';
 import '../data/foot_data_source.dart';
 import '../models/ai_advice.dart';
+import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/foot_frame.dart';
 import '../models/risk_state.dart';
@@ -24,13 +25,15 @@ class MonitoringController extends ChangeNotifier {
   final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  final List<FootFrame> _uploadQueue = [];
+  List<FootFrame>? _pendingUploadPair;
   Timer? _refreshTimer;
   bool _uploading = false;
   bool _refreshing = false;
   bool _disposed = false;
   bool _aiAdviceLoading = false;
+  bool _aiQuestionLoading = false;
   String? _lastAdviceSignature;
+  String? _aiQuestionSignature;
   DateTime? _lastAdviceAttemptAt;
 
   FootFrame? left;
@@ -50,9 +53,12 @@ class MonitoringController extends ChangeNotifier {
   int? syncErrorMs;
   RegionalAnalysis? regionalAnalysis;
   AiAdvice? aiAdvice;
+  AiQuestionAnswer? aiQuestionAnswer;
   String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
+  String aiQuestionStatus = '请选择一个常见问题';
 
   bool get aiAdviceLoading => _aiAdviceLoading;
+  bool get aiQuestionLoading => _aiQuestionLoading;
 
   Future<void> start() async {
     _subscriptions.add(source.frames.listen(_onFrame));
@@ -100,6 +106,7 @@ class MonitoringController extends ChangeNotifier {
     loadDiff = null;
     syncErrorMs = null;
     regionalAnalysis = null;
+    _clearAiQuestion();
     if (commandBridge == null) {
       motorCommand = null;
       motorStatus = '双足数据不完整，暂停马达提醒';
@@ -121,9 +128,12 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _enqueuePair(List<FootFrame> pair) {
-    _uploadQueue.addAll(pair);
+    // Sensor frames drive a live safety view, so stale backlog is less useful
+    // than the newest complete bilateral pair. Replacing the pending pair keeps
+    // backend risk evaluation close to real time when a request is slow.
+    _pendingUploadPair = List<FootFrame>.of(pair, growable: false);
     if (!_uploading) {
-      _drainUploadQueue();
+      unawaited(_drainUploadQueue());
     }
   }
 
@@ -133,10 +143,9 @@ class MonitoringController extends ChangeNotifier {
     }
     _uploading = true;
     try {
-      while (_uploadQueue.isNotEmpty) {
-        final takeCount = _uploadQueue.length > 20 ? 20 : _uploadQueue.length;
-        final batch = List<FootFrame>.of(_uploadQueue.take(takeCount));
-        _uploadQueue.removeRange(0, takeCount);
+      while (_pendingUploadPair != null) {
+        final batch = _pendingUploadPair!;
+        _pendingUploadPair = null;
         try {
           await api.uploadFrames(batch);
           backendOnline = true;
@@ -202,7 +211,7 @@ class MonitoringController extends ChangeNotifier {
   Future<void> executeMotorCommand() async {
     final command = motorCommand;
     if (command == null) return;
-    if (command.expired) {
+    if (command.isExpiredAt(api.serverNowMs)) {
       motorStatus = '命令已过期，未执行马达';
       motorCommand = null;
       notifyListeners();
@@ -222,6 +231,10 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _updateAiAdviceIfNeeded() {
+    if (_aiQuestionSignature != null &&
+        _aiQuestionSignature != _currentRiskSignature) {
+      _clearAiQuestion();
+    }
     if (risk.isIncomplete) {
       aiAdvice = null;
       aiAdviceStatus = '双足有效数据不完整，暂不生成 AI 解释';
@@ -283,6 +296,47 @@ class MonitoringController extends ChangeNotifier {
         notifyListeners();
       }
     }
+  }
+
+  Future<void> askAiQuestion(String questionKey) async {
+    if (_aiQuestionLoading) {
+      return;
+    }
+    final signature = _currentRiskSignature;
+    _aiQuestionSignature = signature;
+    _aiQuestionLoading = true;
+    aiQuestionAnswer = null;
+    aiQuestionStatus = '正在生成回答…';
+    notifyListeners();
+    try {
+      final answer = await api.aiQuestion(
+        questionKey: questionKey,
+        risk: risk,
+        loadDiff: loadDiff,
+        temperatureDeltaMaxC:
+            _maximumTemperatureDelta(regionalAnalysis?.temperatureDeltaC),
+        baselineReady: regionalAnalysis?.baselineReady ?? false,
+      );
+      if (_currentRiskSignature == signature) {
+        aiQuestionAnswer = answer;
+        aiQuestionStatus = answer.usedFallback ? '云端暂不可用，已使用本地安全回答' : '回答已更新';
+      }
+    } catch (error) {
+      if (_currentRiskSignature == signature) {
+        aiQuestionStatus = '常见问题暂时无法回答：$error';
+      }
+    } finally {
+      _aiQuestionLoading = false;
+      if (!_disposed) {
+        notifyListeners();
+      }
+    }
+  }
+
+  void _clearAiQuestion() {
+    aiQuestionAnswer = null;
+    aiQuestionStatus = '请选择一个常见问题';
+    _aiQuestionSignature = null;
   }
 
   String get _currentRiskSignature =>

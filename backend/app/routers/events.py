@@ -20,6 +20,8 @@ def events(
         if feedback is not None:
             item = item.model_copy(
                 update={
+                    "before_load_diff": feedback.before_load_diff,
+                    "after_load_diff": feedback.after_load_diff,
                     "intervention_action": feedback.user_action,
                     "effect_label": feedback.effect_label,
                     "recovery_time_ms": feedback.recovery_time_ms,

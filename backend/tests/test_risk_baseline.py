@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from backend.app.config import BASELINE_MIN_SAMPLES
 from backend.app.services.risk_service import (
     PairMetric,
     _baseline_profile,
+    _current_risk,
     _regional_analysis,
     _signal,
 )
@@ -92,6 +95,28 @@ def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
     assert _baseline_profile(metrics).ready is False
 
 
+def test_suppresses_risk_when_footwear_is_not_loaded() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    off_ground = _metric(
+        BASELINE_MIN_SAMPLES,
+        left_total=0.01,
+        right_total=0.03,
+        temperature_delta_c=(8.0, -7.0, 6.0, -5.0),
+    )
+    single_foot_load = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        left_total=0.20,
+        right_total=0.0,
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    assert baseline.ready is True
+    assert _signal(off_ground, baseline) is None
+    assert _signal(single_foot_load, baseline) == ("left_load_bias", "left")
+
+
 def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
     metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES + 5)]
     metrics.append(
@@ -130,3 +155,28 @@ def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     assert regional.right_pressure_scores == [0.0] * 6
     assert regional.left_temperature_scores == [0.0] * 4
     assert regional.right_temperature_scores == [0.0] * 4
+
+
+def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    risk_metrics = [
+        replace(
+            _metric(
+                100 + index * 4,
+                left_total=0.45,
+                right_total=0.15,
+                temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+            ),
+            timestamp_ms=10_000 + index * 800,
+        )
+        for index in range(12)
+    ]
+
+    risk, _ = _current_risk(risk_metrics, baseline)
+
+    assert risk.risk_type == "left_load_bias"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 2
+    assert risk.duration_ms == 8_800

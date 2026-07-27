@@ -47,6 +47,7 @@ def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert abs(response.json()["server_time_ms"] - int(time() * 1000)) < 1_000
 
 
 def test_batch_accepts_and_persists_two_frames(client: TestClient, app) -> None:
@@ -127,7 +128,7 @@ def test_calibration_status_and_reset_start_a_new_learning_window(
 
     learned = client.get("/api/v1/calibration/status").json()
     assert learned["baseline_ready"] is True
-    assert learned["sample_count"] >= learned["required_samples"]
+    assert learned["sample_count"] == learned["required_samples"]
 
     now_ms = int(time() * 1000)
     with client.app.state.session_factory() as session:
@@ -314,6 +315,37 @@ def test_pending_command_is_returned(client: TestClient, app) -> None:
     assert result["command"]["command_id"] == "cmd_test_1"
 
 
+def test_backend_restart_expires_pending_commands(tmp_path: Path) -> None:
+    database_path = tmp_path / "restart-command.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    first_app = create_app(database_url)
+    now_ms = int(time() * 1000)
+    with first_app.state.session_factory() as session:
+        create_command(
+            session,
+            DeviceCommand(
+                command_id="cmd_before_restart",
+                target="left",
+                pattern="double",
+                duration_ms=800,
+                expire_at_ms=now_ms + 30_000,
+                reason_code="manual_test",
+            ),
+            now_ms,
+        )
+    first_app.state.engine.dispose()
+
+    restarted_app = create_app(database_url)
+    try:
+        with restarted_app.state.session_factory() as session:
+            command = session.get(Command, "cmd_before_restart")
+            assert command is not None
+            assert command.status == "expired"
+            assert command.error_code == "command_expired"
+    finally:
+        restarted_app.state.engine.dispose()
+
+
 def test_expired_command_is_not_returned(client: TestClient, app) -> None:
     add_command(app, expire_offset_ms=-1)
     assert client.get("/api/v1/command/pending?target=left").json() == {"command": None}
@@ -381,7 +413,7 @@ def test_feedback_is_persisted(client: TestClient, app) -> None:
             "user_action": "followed_vibration",
             "effect_label": "effective",
             "before_load_diff": 1.2,
-            "after_load_diff": 0.3,
+            "after_load_diff": 0.1,
             "recovery_time_ms": 2500,
         },
     )
@@ -393,4 +425,6 @@ def test_feedback_is_persisted(client: TestClient, app) -> None:
     event = client.get("/api/v1/events").json()[0]
     assert event["intervention_action"] == "followed_vibration"
     assert event["effect_label"] == "effective"
+    assert event["before_load_diff"] == 1.2
+    assert event["after_load_diff"] == 0.1
     assert event["recovery_time_ms"] == 2_500

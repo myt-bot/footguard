@@ -42,28 +42,34 @@ class _FakeFootDataSource implements FootDataSource {
   }
 }
 
-FootFrame _frame(String side, int timestampMs) => FootFrame(
-      protocolVersion: 1,
-      sensorLayoutVersion: 'layout_6p4t_v1',
-      deviceId: side == 'left' ? 'foot_left_001' : 'foot_right_001',
-      side: side,
-      syncId: 9,
-      packetSeq: 3,
-      timestampMs: timestampMs,
-      pressure: const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-      temperature: const [30.1, 30.2, 30.3, 30.4],
-      imu: const ImuData(
-        ax: 0,
-        ay: 0,
-        az: 9.8,
-        gx: 0,
-        gy: 0,
-        gz: 0,
-      ),
-      battery: 95,
-      qualityFlags: 0,
-      source: 'ble',
-    );
+FootFrame _frame(
+  String side,
+  int timestampMs, {
+  int packetSeq = 3,
+}) {
+  return FootFrame(
+    protocolVersion: 1,
+    sensorLayoutVersion: 'layout_6p4t_v1',
+    deviceId: side == 'left' ? 'foot_left_001' : 'foot_right_001',
+    side: side,
+    syncId: 9,
+    packetSeq: packetSeq,
+    timestampMs: timestampMs,
+    pressure: const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+    temperature: const [30.1, 30.2, 30.3, 30.4],
+    imu: const ImuData(
+      ax: 0,
+      ay: 0,
+      az: 9.8,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+    ),
+    battery: 95,
+    qualityFlags: 0,
+    source: 'ble',
+  );
+}
 
 void main() {
   test('disconnect clears live frames and stale bilateral backend results',
@@ -143,6 +149,97 @@ void main() {
     expect(controller.risk.isIncomplete, isTrue);
     expect(controller.errorMessage, '左脚实时数据超过3秒未更新');
 
+    controller.dispose();
+  });
+
+  test('slow backend upload keeps only the newest pending bilateral pair',
+      () async {
+    final firstUploadStarted = Completer<void>();
+    final releaseFirstUpload = Completer<void>();
+    final uploadedPacketSeqs = <int>[];
+    var uploadCount = 0;
+
+    final client = MockClient((request) async {
+      if (request.url.path == '/health') {
+        return http.Response(
+          jsonEncode({'status': 'ok', 'server_time_ms': 1000}),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/realtime') {
+        return http.Response(
+          jsonEncode({
+            'left': null,
+            'right': null,
+            'paired_timestamp_ms': null,
+            'load_bias': null,
+            'load_diff': null,
+            'sync_error_ms': null,
+            'risk': {
+              'risk_type': 'data_incomplete',
+              'risk_side': 'none',
+              'risk_level': 0,
+              'duration_ms': 0,
+            },
+            'regional_analysis': null,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/command/pending') {
+        return http.Response(jsonEncode({'command': null}), 200);
+      }
+      if (request.url.path == '/api/v1/sensor/batch') {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final frames = body['frames'] as List<dynamic>;
+        uploadedPacketSeqs.add(
+          (frames.first as Map<String, dynamic>)['packet_seq'] as int,
+        );
+        uploadCount += 1;
+        if (uploadCount == 1) {
+          firstUploadStarted.complete();
+          await releaseFirstUpload.future;
+        }
+        return http.Response(
+          jsonEncode({'accepted': 2, 'rejected': 0}),
+          200,
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final source = _FakeFootDataSource();
+    final controller = MonitoringController(
+      source: source,
+      api: FootGuardApiClient(baseUrl: 'http://footguard.test', client: client),
+    );
+    await controller.start();
+    source.emitConnections(const FootConnectionSnapshot(
+      left: FootConnectionStatus.connected,
+      right: FootConnectionStatus.connected,
+    ));
+
+    source.emitFrame(_frame('left', 1000, packetSeq: 1));
+    source.emitFrame(_frame('right', 1001, packetSeq: 1));
+    await firstUploadStarted.future;
+
+    for (var packetSeq = 2; packetSeq <= 5; packetSeq += 1) {
+      source.emitFrame(
+        _frame('left', 1000 + packetSeq * 200, packetSeq: packetSeq),
+      );
+      source.emitFrame(
+        _frame('right', 1001 + packetSeq * 200, packetSeq: packetSeq),
+      );
+    }
+    await Future<void>.delayed(Duration.zero);
+    releaseFirstUpload.complete();
+
+    for (var attempt = 0;
+        attempt < 20 && uploadedPacketSeqs.length < 2;
+        attempt += 1) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+
+    expect(uploadedPacketSeqs, [1, 5]);
     controller.dispose();
   });
 }

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/data/api_client.dart';
+import 'package:footguard/models/device_command.dart';
 import 'package:footguard/models/risk_state.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -52,6 +53,50 @@ void main() {
     api.close();
   });
 
+  test('fixed AI question posts an allow-listed key and parses the answer',
+      () async {
+    final client = MockClient((request) async {
+      expect(request.method, 'POST');
+      expect(request.url.path, '/api/v1/ai/question');
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['question_key'], 'improvement_check');
+      expect(body.containsKey('question'), isFalse);
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'protocol_version': 1,
+          'provider': 'openai-compatible:deepseek-v4-flash',
+          'question_key': 'improvement_check',
+          'question': '怎样判断已经改善？',
+          'answer': '观察负载差是否持续下降。',
+        })),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final result = await api.aiQuestion(
+      questionKey: 'improvement_check',
+      risk: const RiskState(
+        riskType: 'left_load_bias',
+        riskSide: 'left',
+        riskLevel: 2,
+        durationMs: 6200,
+      ),
+      loadDiff: 0.31,
+      temperatureDeltaMaxC: 1.2,
+      baselineReady: true,
+    );
+
+    expect(result.sourceLabel, 'DeepSeek 云端回答');
+    expect(result.question, '怎样判断已经改善？');
+    expect(result.answer, '观察负载差是否持续下降。');
+    api.close();
+  });
+
   test('calibration status can be read and reset', () async {
     var resetRequested = false;
     final client = MockClient((request) async {
@@ -93,6 +138,43 @@ void main() {
     expect(resetRequested, isTrue);
     expect(reset.baselineReady, isFalse);
     expect(reset.sampleCount, 0);
+    api.close();
+  });
+
+  test('health synchronizes command expiry checks to backend time', () async {
+    final localBeforeMs = DateTime.now().millisecondsSinceEpoch;
+    final backendTimeMs = localBeforeMs - 167000;
+    final client = MockClient((request) async {
+      expect(request.method, 'GET');
+      expect(request.url.path, '/health');
+      return http.Response(
+        jsonEncode({
+          'status': 'ok',
+          'version': '0.1.0',
+          'protocol_version': 1,
+          'server_time_ms': backendTimeMs,
+        }),
+        200,
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final resolvedTimeMs = await api.serverTimeMs(refresh: true);
+    final command = DeviceCommand(
+      commandId: 'cmd_clock_test',
+      target: 'left',
+      pattern: 'short',
+      durationMs: 300,
+      expireAtMs: backendTimeMs + 30000,
+      reasonCode: 'manual_test',
+    );
+
+    expect(api.hasServerClockOffset, isTrue);
+    expect((resolvedTimeMs - backendTimeMs).abs(), lessThan(1000));
+    expect(command.isExpiredAt(resolvedTimeMs), isFalse);
     api.close();
   });
 }

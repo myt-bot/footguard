@@ -106,8 +106,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.leftTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount:
-                        analysis?.baselineSampleCount ?? 0,
+                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
                         analysis?.baselineRequiredSamples ?? 15,
                   ),
@@ -122,8 +121,7 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                     temperatureScores: analysis?.rightTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount:
-                        analysis?.baselineSampleCount ?? 0,
+                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
                         analysis?.baselineRequiredSamples ?? 15,
                   ),
@@ -172,6 +170,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
               advice: controller.aiAdvice,
               status: controller.aiAdviceStatus,
               loading: controller.aiAdviceLoading,
+              questionAnswer: controller.aiQuestionAnswer,
+              questionStatus: controller.aiQuestionStatus,
+              questionLoading: controller.aiQuestionLoading,
+              onQuestionSelected: controller.askAiQuestion,
             ),
             const SizedBox(height: 12),
             Card(

@@ -31,6 +31,7 @@ from ..config import (
     RECOVERY_PARTIAL_RATIO,
     REGIONAL_ASYMMETRY_FOR_SEVERE,
     REGIONAL_SHARE_DELTA_FOR_SEVERE,
+    RISK_MIN_TOTAL_PRESSURE,
     TEMPERATURE_DELTA_C_THRESHOLD,
     WARNING_AFTER_MS,
 )
@@ -293,6 +294,9 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
 def _signal(
     metric: PairMetric, baseline: BaselineProfile
 ) -> tuple[str, str] | None:
+    if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
+        return None
+
     corrected_temperature = [
         value - baseline.temperature_delta_c[index]
         for index, value in enumerate(metric.temperature_delta_c)
@@ -334,7 +338,6 @@ def _current_risk(
         if (
             _signal(metric, baseline) != current_signal
             or metric.sync_id != latest.sync_id
-            or next_metric.packet_seq != metric.packet_seq + 1
             or next_metric.timestamp_ms - metric.timestamp_ms > CONTINUITY_GAP_MS
         ):
             break
@@ -368,11 +371,14 @@ def _clamp_score(value: float) -> float:
 def _regional_analysis(
     metric: PairMetric, baseline: BaselineProfile
 ) -> RegionalAnalysis:
+    displayed_sample_count = min(
+        baseline.sample_count, BASELINE_MIN_SAMPLES
+    )
     if not baseline.ready:
         return RegionalAnalysis(
             baseline_ready=False,
             baseline_source="layout_default",
-            baseline_sample_count=baseline.sample_count,
+            baseline_sample_count=displayed_sample_count,
             baseline_required_samples=BASELINE_MIN_SAMPLES,
             left_pressure_scores=[0.0] * 6,
             right_pressure_scores=[0.0] * 6,
@@ -420,7 +426,7 @@ def _regional_analysis(
     return RegionalAnalysis(
         baseline_ready=baseline.ready,
         baseline_source="personal" if baseline.ready else "layout_default",
-        baseline_sample_count=baseline.sample_count,
+        baseline_sample_count=displayed_sample_count,
         baseline_required_samples=BASELINE_MIN_SAMPLES,
         left_pressure_scores=left_scores,
         right_pressure_scores=right_scores,
@@ -441,7 +447,7 @@ def calibration_status(session: Session) -> CalibrationStatus:
     state = calibration_state(session)
     return CalibrationStatus(
         baseline_ready=baseline.ready,
-        sample_count=baseline.sample_count,
+        sample_count=min(baseline.sample_count, BASELINE_MIN_SAMPLES),
         required_samples=BASELINE_MIN_SAMPLES,
         reset_at_ms=state.reset_at_ms if state is not None else None,
     )
@@ -558,6 +564,10 @@ def _refresh_recovery_feedback(session: Session, metric: PairMetric) -> None:
         feedback.effect_label = label
         feedback.after_load_diff = metric.load_diff
         feedback.recovery_time_ms = max(0, metric.timestamp_ms - event.started_at_ms)
+    # Keep the event values and the feedback label on the same observation.
+    # The history API otherwise combines a stale event.after_load_diff with a
+    # freshly updated feedback.effect_label and can display contradictions.
+    event.after_load_diff = metric.load_diff
     session.commit()
 
 

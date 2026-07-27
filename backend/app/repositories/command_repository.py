@@ -15,6 +15,19 @@ class CommandConflictError(Exception):
     pass
 
 
+def expire_pending_commands(
+    session: Session, *, error_code: str = "command_expired"
+) -> int:
+    """Prevent commands from a previous backend process being replayed."""
+    result = session.execute(
+        update(Command)
+        .where(Command.status == "pending")
+        .values(status="expired", error_code=error_code)
+    )
+    session.commit()
+    return int(result.rowcount or 0)
+
+
 def to_schema(command: Command) -> DeviceCommand:
     return DeviceCommand(
         protocol_version=command.protocol_version,

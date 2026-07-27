@@ -15,7 +15,12 @@ from ..config import (
     ai_provider,
     ai_timeout_seconds,
 )
-from ..schemas import AiAdviceRequest, AiAdviceResponse
+from ..schemas import (
+    AiAdviceRequest,
+    AiAdviceResponse,
+    AiQuestionRequest,
+    AiQuestionResponse,
+)
 from ..schemas import StrictModel
 from .command_service import motor_profile_for_level
 
@@ -24,6 +29,12 @@ MOCK_PROVIDER = "mock-risk-advisor-v1"
 FALLBACK_PROVIDER = "mock-risk-advisor-v1:fallback"
 MEDICAL_BOUNDARY = "本建议仅用于原型辅助提示，不能替代医疗诊断。"
 SUPPORTED_PATTERNS = {"off", "short", "double", "long"}
+QUESTIONS = {
+    "risk_reason": "为什么会出现当前风险？",
+    "immediate_action": "现在应该怎么做？",
+    "improvement_check": "怎样判断已经改善？",
+    "when_to_seek_help": "什么情况需要进一步检查？",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +45,10 @@ class CloudAdviceError(RuntimeError):
 class _CloudNarrative(StrictModel):
     explanation: str = Field(min_length=1, max_length=500)
     advice: str = Field(min_length=1, max_length=430)
+
+
+class _CloudQuestionAnswer(StrictModel):
+    answer: str = Field(min_length=1, max_length=430)
 
 
 @dataclass(frozen=True)
@@ -151,6 +166,48 @@ def generate_mock_advice(payload: AiAdviceRequest) -> AiAdviceResponse:
     )
 
 
+def _mock_question_answer(payload: AiQuestionRequest) -> str:
+    if payload.question_key == "risk_reason":
+        return _explanation(payload)
+    if payload.question_key == "immediate_action":
+        return _advice(payload)
+    if payload.question_key == "improvement_check":
+        if payload.risk.risk_type == "temperature_asymmetry":
+            return (
+                "继续观察左右脚同一区域温差是否稳定回落，同时检查局部皮肤、袜鞋和受压情况。"
+                f"{MEDICAL_BOUNDARY}"
+            )
+        if payload.risk.risk_type == "data_incomplete":
+            return "先恢复双足有效数据；数据不完整时不能可靠判断是否改善。"
+        return (
+            "观察异常区域压力是否回到个人基线附近、左右负载差是否下降，"
+            f"并确认风险等级能够持续回落。{MEDICAL_BOUNDARY}"
+        )
+    if payload.question_key == "when_to_seek_help":
+        return (
+            "若出现持续红肿发热、破损、水疱、渗液、颜色改变，或异常在休息和调整后仍持续，"
+            "建议尽快请专业人员评估；糖尿病患者即使疼痛不明显也不应忽视皮肤变化。"
+            f"{MEDICAL_BOUNDARY}"
+        )
+    raise ValueError(f"unsupported question key: {payload.question_key}")
+
+
+def generate_mock_question_answer(
+    payload: AiQuestionRequest,
+    *,
+    provider: str = MOCK_PROVIDER,
+) -> AiQuestionResponse:
+    answer = _mock_question_answer(payload).rstrip()
+    if MEDICAL_BOUNDARY not in answer:
+        answer = f"{answer}{MEDICAL_BOUNDARY}"
+    return AiQuestionResponse(
+        provider=provider,
+        question_key=payload.question_key,
+        question=QUESTIONS[payload.question_key],
+        answer=answer,
+    )
+
+
 def _cloud_prompt(payload: AiAdviceRequest) -> list[dict[str, str]]:
     system_prompt = (
         "你是糖尿病足辅助监测原型的风险解释助手。"
@@ -162,6 +219,31 @@ def _cloud_prompt(payload: AiAdviceRequest) -> list[dict[str, str]]:
     )
     user_payload = json.dumps(
         payload.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_payload},
+    ]
+
+
+def _cloud_question_prompt(payload: AiQuestionRequest) -> list[dict[str, str]]:
+    system_prompt = (
+        "你是糖尿病足辅助监测原型的科普问答助手。"
+        "用户只能选择系统预设问题，你只能依据给定结构化数据回答该问题。"
+        '用简洁中文输出 JSON 对象，且只能包含 "answer" 一个字符串字段。'
+        "不得诊断疾病，不得虚构数值，不得决定马达行为；"
+        f"回答末尾必须说明：{MEDICAL_BOUNDARY}"
+    )
+    user_payload = json.dumps(
+        {
+            "question": QUESTIONS[payload.question_key],
+            "monitoring_context": payload.model_dump(
+                mode="json",
+                exclude={"question_key"},
+            ),
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -197,6 +279,45 @@ def _request_cloud_narrative(
         if not isinstance(content, str):
             raise CloudAdviceError("cloud response content is not text")
         return _CloudNarrative.model_validate_json(content)
+    except (
+        httpx.HTTPError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise CloudAdviceError("cloud provider returned an invalid response") from error
+    finally:
+        if owns_client:
+            active_client.close()
+
+
+def _request_cloud_question_answer(
+    payload: AiQuestionRequest,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> _CloudQuestionAnswer:
+    owns_client = client is None
+    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    try:
+        response = active_client.post(
+            f"{settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.model,
+                "messages": _cloud_question_prompt(payload),
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise CloudAdviceError("cloud response content is not text")
+        return _CloudQuestionAnswer.model_validate_json(content)
     except (
         httpx.HTTPError,
         KeyError,
@@ -248,3 +369,33 @@ def generate_advice(
         logger.warning("Cloud AI unavailable; falling back to mock advice: %s", error)
         fallback = generate_mock_advice(payload)
         return fallback.model_copy(update={"provider": FALLBACK_PROVIDER})
+
+
+def generate_question_answer(
+    payload: AiQuestionRequest,
+    client: httpx.Client | None = None,
+) -> AiQuestionResponse:
+    """Answer one allow-listed question, with a deterministic safe fallback."""
+    settings = _cloud_settings()
+    if settings is None:
+        return generate_mock_question_answer(payload)
+    try:
+        narrative = _request_cloud_question_answer(payload, settings, client)
+        answer = narrative.answer.rstrip()
+        if MEDICAL_BOUNDARY not in answer:
+            answer = f"{answer}{MEDICAL_BOUNDARY}"
+        return AiQuestionResponse(
+            provider=_cloud_provider_name(settings.model),
+            question_key=payload.question_key,
+            question=QUESTIONS[payload.question_key],
+            answer=answer,
+        )
+    except CloudAdviceError as error:
+        logger.warning(
+            "Cloud AI question unavailable; falling back to mock answer: %s",
+            error,
+        )
+        return generate_mock_question_answer(
+            payload,
+            provider=FALLBACK_PROVIDER,
+        )

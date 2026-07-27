@@ -1,3 +1,5 @@
+from time import time
+
 from fastapi import APIRouter
 
 router = APIRouter(tags=["system"])
@@ -5,4 +7,9 @@ router = APIRouter(tags=["system"])
 
 @router.get("/health")
 def health() -> dict[str, str | int]:
-    return {"status": "ok", "version": "0.1.0", "protocol_version": 1}
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "protocol_version": 1,
+        "server_time_ms": int(time() * 1000),
+    }
