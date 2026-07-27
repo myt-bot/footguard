@@ -425,12 +425,25 @@ def _signal(
     metric: PairMetric,
     baseline: BaselineProfile,
 ) -> tuple[str, str] | None:
+    # Temperature remains meaningful while footwear is unloaded. Evaluate it
+    # first so a hand-heated NTC can demonstrate the diabetic-foot thermal cue
+    # without a simultaneously lifted foot being misclassified as load bias.
+    corrected_temperature = _temperature_delta_from_baseline(metric, baseline)
+    hottest_index = max(
+        range(len(corrected_temperature)),
+        key=lambda index: abs(corrected_temperature[index]),
+    )
+    hottest_delta = corrected_temperature[hottest_index]
+    if abs(hottest_delta) >= TEMPERATURE_DELTA_C_THRESHOLD:
+        return (
+            "temperature_asymmetry",
+            "left" if hottest_delta > 0 else "right",
+        )
+
+    # Pressure risks still require meaningful footwear loading.
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
         return None
 
-    # The top-level risk can expose only one condition. Strong left/right
-    # imbalance is the most actionable vibration cue, so keep it ahead of
-    # regional and temperature observations.
     adjusted_bias = _adjusted_load_bias(metric, baseline)
     if adjusted_bias >= LOAD_BIAS_ENTER_THRESHOLD:
         return "left_load_bias", "left"
@@ -446,18 +459,6 @@ def _signal(
     ):
         return "forefoot_high", "right"
 
-    corrected_temperature = _temperature_delta_from_baseline(metric, baseline)
-    hottest_index = max(
-        range(len(corrected_temperature)),
-        key=lambda index: abs(corrected_temperature[index]),
-    )
-    hottest_delta = corrected_temperature[hottest_index]
-    if abs(hottest_delta) >= TEMPERATURE_DELTA_C_THRESHOLD:
-        return (
-            "temperature_asymmetry",
-            "left" if hottest_delta > 0 else "right",
-        )
-
     return None
 
 
@@ -467,10 +468,16 @@ def _signal_is_active(
     signal: tuple[str, str],
 ) -> bool:
     """Apply lower exit thresholds so one noisy sample cannot reset a risk."""
+    risk_type, risk_side = signal
+    if risk_type == "temperature_asymmetry":
+        corrected = _temperature_delta_from_baseline(metric, baseline)
+        if risk_side == "left":
+            return max(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+        return min(corrected) <= -TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
         return False
 
-    risk_type, risk_side = signal
     if risk_type == "left_load_bias":
         return _adjusted_load_bias(metric, baseline) >= LOAD_BIAS_EXIT_THRESHOLD
     if risk_type == "right_load_bias":
@@ -479,11 +486,6 @@ def _signal_is_active(
         return _forefoot_delta(metric, baseline, risk_side) >= (
             FOREFOOT_RATIO_EXIT_THRESHOLD
         )
-    if risk_type == "temperature_asymmetry":
-        corrected = _temperature_delta_from_baseline(metric, baseline)
-        if risk_side == "left":
-            return max(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
-        return min(corrected) <= -TEMPERATURE_DELTA_C_EXIT_THRESHOLD
     return False
 
 
