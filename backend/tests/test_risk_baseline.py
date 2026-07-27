@@ -26,6 +26,7 @@ def _metric(
     left_distribution: tuple[float, ...] = LEFT_DISTRIBUTION,
     right_distribution: tuple[float, ...] = RIGHT_DISTRIBUTION,
     temperature_delta_c: tuple[float, ...] = (1.2, 2.4, -1.8, 0.8),
+    motion_state: str = "unavailable",
 ) -> PairMetric:
     total = max(left_total + right_total, 1e-9)
     load_bias = (left_total - right_total) / total
@@ -46,6 +47,7 @@ def _metric(
         left_distribution=left_distribution,
         right_distribution=right_distribution,
         temperature_delta_c=temperature_delta_c,
+        motion_state=motion_state,
     )
 
 
@@ -155,6 +157,26 @@ def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     assert regional.right_pressure_scores == [0.0] * 6
     assert regional.left_temperature_scores == [0.0] * 4
     assert regional.right_temperature_scores == [0.0] * 4
+
+
+def test_moving_samples_do_not_train_personal_baseline() -> None:
+    moving = [
+        _metric(index, motion_state="moving")
+        for index in range(BASELINE_MIN_SAMPLES + 3)
+    ]
+    stationary = [
+        _metric(index, motion_state="stationary")
+        for index in range(BASELINE_MIN_SAMPLES + 3)
+    ]
+    unavailable = [
+        _metric(index, motion_state="unavailable")
+        for index in range(BASELINE_MIN_SAMPLES + 3)
+    ]
+
+    assert _baseline_profile(moving).ready is False
+    assert _baseline_profile(stationary).ready is True
+    # Systems without a valid MPU keep the existing pressure-only behavior.
+    assert _baseline_profile(unavailable).ready is True
 
 
 def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:

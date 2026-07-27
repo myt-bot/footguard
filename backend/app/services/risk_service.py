@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 from statistics import median
 from time import time
 
@@ -22,6 +23,10 @@ from ..config import (
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
     FOREFOOT_RATIO_DELTA_THRESHOLD,
+    IMU_ACCEL_STATIONARY_TOLERANCE_MS2,
+    IMU_GRAVITY_MS2,
+    IMU_GYRO_STATIONARY_THRESHOLD_DPS,
+    IMU_INVALID_MASK,
     LOAD_BIAS_ENTER_THRESHOLD,
     PAIRING_BLOCK_FLAGS,
     PAIRING_WINDOW_MS,
@@ -63,6 +68,7 @@ class PairMetric:
     left_distribution: tuple[float, ...]
     right_distribution: tuple[float, ...]
     temperature_delta_c: tuple[float, ...]
+    motion_state: str = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,33 @@ def _valid_pair(left: SensorFrame, right: SensorFrame) -> bool:
         and abs(left.timestamp_ms - right.timestamp_ms) <= PAIRING_WINDOW_MS
         and not ((left.quality_flags | right.quality_flags) & PAIRING_BLOCK_FLAGS)
     )
+
+
+def _frame_is_stationary(frame: SensorFrame) -> bool | None:
+    if frame.quality_flags & IMU_INVALID_MASK:
+        return None
+    acceleration = sqrt(frame.ax**2 + frame.ay**2 + frame.az**2)
+    angular_speed = sqrt(frame.gx**2 + frame.gy**2 + frame.gz**2)
+    # Zero vectors are used by mock/legacy frames and must not be mistaken for
+    # a physically stationary MPU under gravity.
+    if acceleration < 0.5 and angular_speed < 0.5:
+        return None
+    return (
+        abs(acceleration - IMU_GRAVITY_MS2)
+        <= IMU_ACCEL_STATIONARY_TOLERANCE_MS2
+        and angular_speed <= IMU_GYRO_STATIONARY_THRESHOLD_DPS
+    )
+
+
+def _motion_state(left: SensorFrame, right: SensorFrame) -> str:
+    votes = [
+        state
+        for state in (_frame_is_stationary(left), _frame_is_stationary(right))
+        if state is not None
+    ]
+    if not votes:
+        return "unavailable"
+    return "stationary" if all(votes) else "moving"
 
 
 def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
@@ -115,6 +148,7 @@ def _metric(left: SensorFrame, right: SensorFrame) -> PairMetric:
                 left_temperature, right_temperature, strict=True
             )
         ),
+        motion_state=_motion_state(left, right),
     )
 
 
@@ -222,7 +256,10 @@ def _active_channel_count(values: tuple[float, ...]) -> int:
 
 def _is_baseline_candidate(metric: PairMetric) -> bool:
     return (
-        metric.left_total >= BASELINE_MIN_FOOT_PRESSURE
+        # Do not learn a walking/transient frame as the user's standing
+        # reference. Missing MPU data deliberately fails open.
+        metric.motion_state != "moving"
+        and metric.left_total >= BASELINE_MIN_FOOT_PRESSURE
         and metric.right_total >= BASELINE_MIN_FOOT_PRESSURE
         and _active_channel_count(metric.left_pressure)
         >= BASELINE_MIN_ACTIVE_CHANNELS
@@ -664,7 +701,11 @@ def evaluate_risk(
             right=to_schema(right_latest) if right_latest else None,
             paired_timestamp_ms=None,
             sync_error_ms=None,
-            load_bias=None, load_diff=None, risk=risk, regional_analysis=None
+            load_bias=None,
+            load_diff=None,
+            motion_state="unavailable",
+            risk=risk,
+            regional_analysis=None,
         )
     left_model, right_model = latest_pair
     left = to_schema(left_model)
@@ -687,6 +728,7 @@ def evaluate_risk(
         sync_error_ms=abs(left.timestamp_ms - right.timestamp_ms),
         load_bias=metric.load_bias,
         load_diff=metric.load_diff,
+        motion_state=metric.motion_state,
         risk=risk,
         regional_analysis=_regional_analysis(metric, baseline),
     )

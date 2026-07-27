@@ -51,6 +51,7 @@ class MonitoringController extends ChangeNotifier {
   double? loadBias;
   double? loadDiff;
   int? syncErrorMs;
+  String motionState = 'unavailable';
   RegionalAnalysis? regionalAnalysis;
   AiAdvice? aiAdvice;
   AiQuestionAnswer? aiQuestionAnswer;
@@ -59,6 +60,12 @@ class MonitoringController extends ChangeNotifier {
 
   bool get aiAdviceLoading => _aiAdviceLoading;
   bool get aiQuestionLoading => _aiQuestionLoading;
+
+  String get motionStatusLabel => switch (motionState) {
+        'stationary' => '静止/稳定',
+        'moving' => '运动中',
+        _ => '不可用',
+      };
 
   Future<void> start() async {
     _subscriptions.add(source.frames.listen(_onFrame));
@@ -105,6 +112,7 @@ class MonitoringController extends ChangeNotifier {
     loadBias = null;
     loadDiff = null;
     syncErrorMs = null;
+    motionState = 'unavailable';
     regionalAnalysis = null;
     _clearAiQuestion();
     if (commandBridge == null) {
@@ -176,6 +184,7 @@ class MonitoringController extends ChangeNotifier {
         loadBias = snapshot.loadBias;
         loadDiff = snapshot.loadDiff;
         syncErrorMs = snapshot.syncErrorMs;
+        motionState = snapshot.motionState;
         risk = snapshot.risk;
         regionalAnalysis = snapshot.regionalAnalysis;
         _updateAiAdviceIfNeeded();
