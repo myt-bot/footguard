@@ -24,8 +24,15 @@ PAIRING_BLOCK_FLAGS = (
     | CALIBRATION_INVALID_MASK
     | SENSOR_STUCK_MASK
 )
-LOAD_BIAS_ENTER_THRESHOLD = 0.25
+LOAD_BIAS_ENTER_THRESHOLD = 0.23
 LOAD_BIAS_EXIT_THRESHOLD = 0.15
+# Five 5-Hz frames provide about one second of robust pressure smoothing.
+PRESSURE_SMOOTHING_WINDOW_SAMPLES = 5
+# Ignore a regional left/right comparison when the two matching channels
+# contain too little physical pressure evidence. This prevents tiny ADC
+# residuals from becoming a visually severe 100% asymmetry.
+REGIONAL_MIN_CHANNEL_EVIDENCE = 0.010
+REGIONAL_MIN_VISIBLE_SCORE = 0.12
 # Pressure decisions use dimensionless ratios and change from a personal
 # baseline. Raw sensor values are never compared directly with body-weight
 # dependent alarm thresholds.
@@ -51,7 +58,7 @@ BASELINE_LOAD_BIAS_INLIER_TOLERANCE = 0.20
 BASELINE_DISTRIBUTION_INLIER_TOLERANCE = 0.25
 BASELINE_TEMPERATURE_INLIER_TOLERANCE_C = 1.5
 DEFAULT_PRESSURE_DISTRIBUTION = (0.16, 0.17, 0.18, 0.14, 0.18, 0.17)
-FOREFOOT_RATIO_DELTA_THRESHOLD = 0.12
+FOREFOOT_RATIO_DELTA_THRESHOLD = 0.10
 REGIONAL_SHARE_DELTA_FOR_SEVERE = 0.50
 REGIONAL_ASYMMETRY_FOR_SEVERE = 0.35
 TEMPERATURE_DELTA_C_THRESHOLD = 2.0
