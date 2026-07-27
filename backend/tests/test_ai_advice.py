@@ -12,8 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app.main import create_app
-from backend.app.schemas import AiAdviceRequest
-from backend.app.services.ai_advisor_service import generate_advice
+from backend.app.schemas import AiAdviceRequest, AiQuestionRequest
+from backend.app.services.ai_advisor_service import (
+    generate_advice,
+    generate_question_answer,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -162,6 +165,39 @@ def test_unknown_request_field_returns_422(client: TestClient) -> None:
     assert client.post("/api/v1/ai/advice", json=payload).status_code == 422
 
 
+def test_fixed_question_returns_contextual_safe_answer(client: TestClient) -> None:
+    payload = advice_payload(
+        risk_type="temperature_asymmetry",
+        risk_side="left",
+        risk_level=2,
+    )
+    payload["temperature_delta_max_c"] = 2.7
+    payload["question_key"] = "improvement_check"
+
+    response = client.post("/api/v1/ai/question", json=payload)
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["question_key"] == "improvement_check"
+    assert result["question"] == "怎样判断已经改善？"
+    assert "同一区域温差" in result["answer"]
+    assert "不能替代医疗诊断" in result["answer"]
+
+
+def test_question_endpoint_rejects_arbitrary_user_prompt(
+    client: TestClient,
+) -> None:
+    payload = advice_payload(
+        risk_type="normal",
+        risk_side="none",
+        risk_level=0,
+        duration_ms=0,
+    )
+    payload["question_key"] = "write_any_diagnosis"
+
+    assert client.post("/api/v1/ai/question", json=payload).status_code == 422
+
+
 def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -274,3 +310,47 @@ def test_cloud_text_cannot_override_local_motor_safety(
 
     assert result.target == "none"
     assert result.candidate_pattern == "off"
+
+
+def test_configured_cloud_provider_answers_only_selected_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOOTGUARD_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("FOOTGUARD_AI_BASE_URL", "https://model.example/v1")
+    monkeypatch.setenv("FOOTGUARD_AI_API_KEY", "test-secret")
+    monkeypatch.setenv("FOOTGUARD_AI_MODEL", "competition-model")
+    payload = advice_payload(
+        risk_type="forefoot_high",
+        risk_side="right",
+        risk_level=2,
+    )
+    payload["question_key"] = "immediate_action"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body = __import__("json").loads(request.content)
+        prompt = request_body["messages"][1]["content"]
+        assert "现在应该怎么做？" in prompt
+        assert "question_key" not in prompt
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"answer":"请先减轻前掌负荷并观察。"}'
+                        }
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as cloud_client:
+        result = generate_question_answer(
+            AiQuestionRequest.model_validate(payload),
+            client=cloud_client,
+        )
+
+    assert result.provider == "openai-compatible:competition-model"
+    assert result.question == "现在应该怎么做？"
+    assert result.answer.startswith("请先减轻前掌负荷")
+    assert "不能替代医疗诊断" in result.answer

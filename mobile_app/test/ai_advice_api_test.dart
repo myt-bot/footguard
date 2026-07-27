@@ -52,6 +52,50 @@ void main() {
     api.close();
   });
 
+  test('fixed AI question posts an allow-listed key and parses the answer',
+      () async {
+    final client = MockClient((request) async {
+      expect(request.method, 'POST');
+      expect(request.url.path, '/api/v1/ai/question');
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['question_key'], 'improvement_check');
+      expect(body.containsKey('question'), isFalse);
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'protocol_version': 1,
+          'provider': 'openai-compatible:deepseek-v4-flash',
+          'question_key': 'improvement_check',
+          'question': '怎样判断已经改善？',
+          'answer': '观察负载差是否持续下降。',
+        })),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final result = await api.aiQuestion(
+      questionKey: 'improvement_check',
+      risk: const RiskState(
+        riskType: 'left_load_bias',
+        riskSide: 'left',
+        riskLevel: 2,
+        durationMs: 6200,
+      ),
+      loadDiff: 0.31,
+      temperatureDeltaMaxC: 1.2,
+      baselineReady: true,
+    );
+
+    expect(result.sourceLabel, 'DeepSeek 云端回答');
+    expect(result.question, '怎样判断已经改善？');
+    expect(result.answer, '观察负载差是否持续下降。');
+    api.close();
+  });
+
   test('calibration status can be read and reset', () async {
     var resetRequested = false;
     final client = MockClient((request) async {

@@ -102,6 +102,28 @@ class AiAdviceResponse(StrictModel):
     candidate_pattern: Literal["off", "short", "double", "long"]
 
 
+class AiQuestionRequest(AiAdviceRequest):
+    question_key: Literal[
+        "risk_reason",
+        "immediate_action",
+        "improvement_check",
+        "when_to_seek_help",
+    ]
+
+
+class AiQuestionResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    question_key: Literal[
+        "risk_reason",
+        "immediate_action",
+        "improvement_check",
+        "when_to_seek_help",
+    ]
+    question: str = Field(min_length=1, max_length=80)
+    answer: str = Field(min_length=1, max_length=500)
+
+
 class RealtimeResponse(StrictModel):
     left: FootFrame | None
     right: FootFrame | None

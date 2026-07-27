@@ -172,6 +172,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
               advice: controller.aiAdvice,
               status: controller.aiAdviceStatus,
               loading: controller.aiAdviceLoading,
+              questionAnswer: controller.aiQuestionAnswer,
+              questionStatus: controller.aiQuestionStatus,
+              questionLoading: controller.aiQuestionLoading,
+              onQuestionSelected: controller.askAiQuestion,
             ),
             const SizedBox(height: 12),
             Card(

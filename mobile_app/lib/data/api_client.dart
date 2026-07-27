@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/ai_advice.dart';
+import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/device_ack.dart';
 import '../models/foot_frame.dart';
@@ -279,6 +280,32 @@ class FootGuardApiClient {
         )
         .timeout(const Duration(seconds: 35));
     return AiAdvice.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AiQuestionAnswer> aiQuestion({
+    required String questionKey,
+    required RiskState risk,
+    required double? loadDiff,
+    required double? temperatureDeltaMaxC,
+    required bool baselineReady,
+  }) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/ai/question'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'protocol_version': 1,
+            'question_key': questionKey,
+            'risk': risk.toJson(),
+            'load_diff': loadDiff,
+            'temperature_delta_max_c': temperatureDeltaMaxC,
+            'baseline_ready': baselineReady,
+          }),
+        )
+        .timeout(const Duration(seconds: 35));
+    return AiQuestionAnswer.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
   }
