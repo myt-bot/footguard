@@ -44,6 +44,7 @@ from ..config import (
     RISK_MIN_TOTAL_PRESSURE,
     TEMPERATURE_DELTA_C_THRESHOLD,
     TEMPERATURE_DELTA_C_EXIT_THRESHOLD,
+    TEMPERATURE_DROPOUT_GRACE_MS,
     TEMPERATURE_RAW_DELTA_C_THRESHOLD,
     TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD,
     WARNING_AFTER_MS,
@@ -535,11 +536,34 @@ def _signal_is_active(
     return False
 
 
+def _recent_temperature_side(
+    metrics: list[PairMetric],
+    baseline: BaselineProfile,
+) -> str | None:
+    """Keep a real temperature episode through a brief ADC/contact dropout."""
+    latest_timestamp_ms = metrics[-1].timestamp_ms
+    for metric in reversed(metrics):
+        if (
+            latest_timestamp_ms - metric.timestamp_ms
+            > TEMPERATURE_DROPOUT_GRACE_MS
+        ):
+            break
+        side = _temperature_signal_side(metric, baseline)
+        if side is not None:
+            return side
+    return None
+
+
 def _current_risk(
     metrics: list[PairMetric], baseline: BaselineProfile
 ) -> tuple[RiskState, PairMetric]:
     latest = _pressure_metric_from_window(metrics)
-    current_signal = _signal(latest, baseline)
+    recent_temperature_side = _recent_temperature_side(metrics, baseline)
+    current_signal = (
+        ("temperature_asymmetry", recent_temperature_side)
+        if recent_temperature_side is not None
+        else _signal(latest, baseline)
+    )
 
     # If the newest smoothed sample has moved below an enter threshold but is
     # still above the lower exit threshold, continue the most recent signal.
@@ -586,21 +610,53 @@ def _current_risk(
         )
 
     start = latest.timestamp_ms
-    next_metric = latest
-    for index in range(len(metrics) - 2, -1, -1):
-        metric = _pressure_metric_from_window(metrics, index)
-        if (
-            not _signal_is_active(metric, baseline, current_signal)
-            or (
-                current_signal[0] != "temperature_asymmetry"
-                and metric.sync_id != latest.sync_id
-            )
-            or next_metric.timestamp_ms - metric.timestamp_ms
-            > CONTINUITY_GAP_MS
-        ):
-            break
-        start = metric.timestamp_ms
-        next_metric = metric
+    if current_signal[0] == "temperature_asymmetry":
+        # Temperature is slow-varying, but a loose NTC/contact can produce one
+        # or two low frames. Measure continuity between valid same-side
+        # temperature observations and tolerate only a bounded gap.
+        newer_evidence_timestamp_ms: int | None = None
+        next_metric = latest
+        for index in range(len(metrics) - 1, -1, -1):
+            metric = _pressure_metric_from_window(metrics, index)
+            if (
+                next_metric.timestamp_ms - metric.timestamp_ms
+                > CONTINUITY_GAP_MS
+            ):
+                break
+            if _signal_is_active(metric, baseline, current_signal):
+                if (
+                    newer_evidence_timestamp_ms is not None
+                    and newer_evidence_timestamp_ms - metric.timestamp_ms
+                    > TEMPERATURE_DROPOUT_GRACE_MS
+                ):
+                    break
+                newer_evidence_timestamp_ms = metric.timestamp_ms
+                start = metric.timestamp_ms
+            else:
+                reference_timestamp_ms = (
+                    newer_evidence_timestamp_ms
+                    if newer_evidence_timestamp_ms is not None
+                    else latest.timestamp_ms
+                )
+                if (
+                    reference_timestamp_ms - metric.timestamp_ms
+                    > TEMPERATURE_DROPOUT_GRACE_MS
+                ):
+                    break
+            next_metric = metric
+    else:
+        next_metric = latest
+        for index in range(len(metrics) - 2, -1, -1):
+            metric = _pressure_metric_from_window(metrics, index)
+            if (
+                not _signal_is_active(metric, baseline, current_signal)
+                or metric.sync_id != latest.sync_id
+                or next_metric.timestamp_ms - metric.timestamp_ms
+                > CONTINUITY_GAP_MS
+            ):
+                break
+            start = metric.timestamp_ms
+            next_metric = metric
     duration = latest.timestamp_ms - start
     if duration < ATTENTION_AFTER_MS:
         level = 0
