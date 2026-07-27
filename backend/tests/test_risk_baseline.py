@@ -98,25 +98,35 @@ def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
     assert _baseline_profile(metrics).ready is False
 
 
-def test_suppresses_risk_when_footwear_is_not_loaded() -> None:
+def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     )
-    off_ground = _metric(
+    heated_off_ground = _metric(
         BASELINE_MIN_SAMPLES,
         left_total=0.01,
         right_total=0.03,
         temperature_delta_c=(8.0, -7.0, 6.0, -5.0),
     )
-    single_foot_load = _metric(
+    normal_off_ground = _metric(
         BASELINE_MIN_SAMPLES + 1,
+        left_total=0.01,
+        right_total=0.03,
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+    single_foot_load = _metric(
+        BASELINE_MIN_SAMPLES + 2,
         left_total=0.20,
         right_total=0.0,
         temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
     )
 
     assert baseline.ready is True
-    assert _signal(off_ground, baseline) is None
+    assert _signal(heated_off_ground, baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+    assert _signal(normal_off_ground, baseline) is None
     assert _signal(single_foot_load, baseline) == ("left_load_bias", "left")
 
 
