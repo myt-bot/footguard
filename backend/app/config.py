@@ -68,6 +68,10 @@ TEMPERATURE_RAW_DELTA_C_THRESHOLD = 2.5
 TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD = 2.0
 TEMPERATURE_DELTA_C_THRESHOLD = 2.0
 TEMPERATURE_DELTA_C_EXIT_THRESHOLD = 1.5
+# Real NTC/contact readings can briefly dip for one or two 5-Hz frames. Keep
+# an established temperature episode alive across that short dropout, while a
+# genuine recovery still clears promptly.
+TEMPERATURE_DROPOUT_GRACE_MS = 1_200
 ATTENTION_AFTER_MS = 3_000
 WARNING_AFTER_MS = 6_000
 PERSISTENT_AFTER_MS = 10_000
