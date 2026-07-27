@@ -106,7 +106,7 @@ def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
         BASELINE_MIN_SAMPLES,
         left_total=0.01,
         right_total=0.03,
-        temperature_delta_c=(8.0, -7.0, 6.0, -5.0),
+        temperature_delta_c=(8.0, 2.4, -1.8, 0.8),
     )
     normal_off_ground = _metric(
         BASELINE_MIN_SAMPLES + 1,
@@ -314,7 +314,7 @@ def test_risk_continuity_uses_exit_hysteresis() -> None:
     assert risk.duration_ms >= 6_000
 
 
-def test_strong_load_bias_has_priority_over_competing_regions() -> None:
+def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() -> None:
     baseline_metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     baseline = _baseline_profile(baseline_metrics)
     history = [
@@ -333,6 +333,6 @@ def test_strong_load_bias_has_priority_over_competing_regions() -> None:
         baseline,
     )
 
-    assert (risk.risk_type, risk.risk_side) == ("left_load_bias", "left")
+    assert (risk.risk_type, risk.risk_side) == ("temperature_asymmetry", "left")
     assert risk.risk_level >= 2
     assert risk.duration_ms >= 6_000
