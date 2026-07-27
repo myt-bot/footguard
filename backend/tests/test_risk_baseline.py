@@ -276,3 +276,53 @@ def test_regional_analysis_ignores_low_evidence_channel() -> None:
     assert regional.left_pressure_scores[0] == 0.0
     assert regional.right_pressure_scores[0] == 0.0
 
+
+
+
+def test_risk_continuity_uses_exit_hysteresis() -> None:
+    baseline_metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _baseline_profile(baseline_metrics)
+    high_forefoot = (0.10, 0.15, 0.25, 0.05, 0.12, 0.33)
+    near_exit = (0.08, 0.13, 0.23, 0.05, 0.13, 0.38)
+    history = [
+        _metric(
+            100 + index,
+            left_distribution=(
+                near_exit if 18 <= index < 24 else high_forefoot
+            ),
+        )
+        for index in range(48)
+    ]
+
+    risk, _ = _current_risk(
+        history,
+        baseline,
+    )
+
+    assert (risk.risk_type, risk.risk_side) == ("forefoot_high", "left")
+    assert risk.risk_level >= 2
+    assert risk.duration_ms >= 6_000
+
+
+def test_strong_load_bias_has_priority_over_competing_regions() -> None:
+    baseline_metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _baseline_profile(baseline_metrics)
+    history = [
+        _metric(
+            200 + index,
+            left_total=0.42,
+            right_total=0.10,
+            left_distribution=(0.12, 0.18, 0.25, 0.08, 0.12, 0.25),
+            temperature_delta_c=(4.2, 2.4, -1.8, 0.8),
+        )
+        for index in range(40)
+    ]
+
+    risk, _ = _current_risk(
+        history,
+        baseline,
+    )
+
+    assert (risk.risk_type, risk.risk_side) == ("left_load_bias", "left")
+    assert risk.risk_level >= 2
+    assert risk.duration_ms >= 6_000

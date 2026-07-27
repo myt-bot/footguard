@@ -23,11 +23,13 @@ from ..config import (
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
     FOREFOOT_RATIO_DELTA_THRESHOLD,
+    FOREFOOT_RATIO_EXIT_THRESHOLD,
     IMU_ACCEL_STATIONARY_TOLERANCE_MS2,
     IMU_GRAVITY_MS2,
     IMU_GYRO_STATIONARY_THRESHOLD_DPS,
     IMU_INVALID_MASK,
     LOAD_BIAS_ENTER_THRESHOLD,
+    LOAD_BIAS_EXIT_THRESHOLD,
     PAIRING_BLOCK_FLAGS,
     PAIRING_WINDOW_MS,
     PERSISTENT_AFTER_MS,
@@ -41,6 +43,7 @@ from ..config import (
     REGIONAL_SHARE_DELTA_FOR_SEVERE,
     RISK_MIN_TOTAL_PRESSURE,
     TEMPERATURE_DELTA_C_THRESHOLD,
+    TEMPERATURE_DELTA_C_EXIT_THRESHOLD,
     WARNING_AFTER_MS,
 )
 from ..models import Command, InterventionFeedback, RiskEvent, SensorFrame
@@ -385,38 +388,103 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
             inliers, "temperature_delta_c", 4
         ),
     )
+def _adjusted_load_bias(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+) -> float:
+    return metric.load_bias - baseline.load_bias
+
+
+def _forefoot_delta(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    side: str,
+) -> float:
+    distribution = (
+        metric.left_distribution if side == "left" else metric.right_distribution
+    )
+    baseline_distribution = (
+        baseline.left_distribution
+        if side == "left"
+        else baseline.right_distribution
+    )
+    return sum(distribution[:4]) - sum(baseline_distribution[:4])
+
+
+def _temperature_delta_from_baseline(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+) -> tuple[float, float, float, float]:
+    return tuple(
+        value - baseline.temperature_delta_c[index]
+        for index, value in enumerate(metric.temperature_delta_c)
+    )
+
+
 def _signal(
-    metric: PairMetric, baseline: BaselineProfile
+    metric: PairMetric,
+    baseline: BaselineProfile,
 ) -> tuple[str, str] | None:
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
         return None
 
-    corrected_temperature = [
-        value - baseline.temperature_delta_c[index]
-        for index, value in enumerate(metric.temperature_delta_c)
-    ]
-    hottest = max(corrected_temperature, key=abs)
-    if abs(hottest) >= TEMPERATURE_DELTA_C_THRESHOLD:
-        return "temperature_asymmetry", "left" if hottest > 0 else "right"
-
-    left_forefoot_baseline = sum(baseline.left_distribution[:4])
-    right_forefoot_baseline = sum(baseline.right_distribution[:4])
-    if (
-        metric.left_forefoot_ratio - left_forefoot_baseline
-        >= FOREFOOT_RATIO_DELTA_THRESHOLD
-    ):
-        return "forefoot_high", "left"
-    if (
-        metric.right_forefoot_ratio - right_forefoot_baseline
-        >= FOREFOOT_RATIO_DELTA_THRESHOLD
-    ):
-        return "forefoot_high", "right"
-    adjusted_bias = metric.load_bias - baseline.load_bias
+    # The top-level risk can expose only one condition. Strong left/right
+    # imbalance is the most actionable vibration cue, so keep it ahead of
+    # regional and temperature observations.
+    adjusted_bias = _adjusted_load_bias(metric, baseline)
     if adjusted_bias >= LOAD_BIAS_ENTER_THRESHOLD:
         return "left_load_bias", "left"
     if adjusted_bias <= -LOAD_BIAS_ENTER_THRESHOLD:
         return "right_load_bias", "right"
+
+    if _forefoot_delta(metric, baseline, "left") >= (
+        FOREFOOT_RATIO_DELTA_THRESHOLD
+    ):
+        return "forefoot_high", "left"
+    if _forefoot_delta(metric, baseline, "right") >= (
+        FOREFOOT_RATIO_DELTA_THRESHOLD
+    ):
+        return "forefoot_high", "right"
+
+    corrected_temperature = _temperature_delta_from_baseline(metric, baseline)
+    hottest_index = max(
+        range(len(corrected_temperature)),
+        key=lambda index: abs(corrected_temperature[index]),
+    )
+    hottest_delta = corrected_temperature[hottest_index]
+    if abs(hottest_delta) >= TEMPERATURE_DELTA_C_THRESHOLD:
+        return (
+            "temperature_asymmetry",
+            "left" if hottest_delta > 0 else "right",
+        )
+
     return None
+
+
+def _signal_is_active(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    signal: tuple[str, str],
+) -> bool:
+    """Apply lower exit thresholds so one noisy sample cannot reset a risk."""
+    if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
+        return False
+
+    risk_type, risk_side = signal
+    if risk_type == "left_load_bias":
+        return _adjusted_load_bias(metric, baseline) >= LOAD_BIAS_EXIT_THRESHOLD
+    if risk_type == "right_load_bias":
+        return _adjusted_load_bias(metric, baseline) <= -LOAD_BIAS_EXIT_THRESHOLD
+    if risk_type == "forefoot_high":
+        return _forefoot_delta(metric, baseline, risk_side) >= (
+            FOREFOOT_RATIO_EXIT_THRESHOLD
+        )
+    if risk_type == "temperature_asymmetry":
+        corrected = _temperature_delta_from_baseline(metric, baseline)
+        if risk_side == "left":
+            return max(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+        return min(corrected) <= -TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+    return False
 
 
 def _current_risk(
@@ -424,16 +492,52 @@ def _current_risk(
 ) -> tuple[RiskState, PairMetric]:
     latest = _pressure_metric_from_window(metrics)
     current_signal = _signal(latest, baseline)
+
+    # If the newest smoothed sample has moved below an enter threshold but is
+    # still above the lower exit threshold, continue the most recent signal.
+    # This prevents a sustained posture from being reset by one borderline
+    # sample while still requiring every intervening sample to remain active.
     if current_signal is None:
-        return RiskState(risk_type="normal", risk_side="none", risk_level=0, duration_ms=0), latest
+        following = [latest]
+        next_metric = latest
+        for index in range(len(metrics) - 2, -1, -1):
+            metric = _pressure_metric_from_window(metrics, index)
+            if (
+                metric.sync_id != latest.sync_id
+                or next_metric.timestamp_ms - metric.timestamp_ms
+                > CONTINUITY_GAP_MS
+            ):
+                break
+            candidate = _signal(metric, baseline)
+            if candidate is not None and all(
+                _signal_is_active(item, baseline, candidate)
+                for item in following
+            ):
+                current_signal = candidate
+                break
+            following.append(metric)
+            next_metric = metric
+
+    if current_signal is None:
+        return (
+            RiskState(
+                risk_type="normal",
+                risk_side="none",
+                risk_level=0,
+                duration_ms=0,
+            ),
+            latest,
+        )
+
     start = latest.timestamp_ms
     next_metric = latest
     for index in range(len(metrics) - 2, -1, -1):
         metric = _pressure_metric_from_window(metrics, index)
         if (
-            _signal(metric, baseline) != current_signal
+            not _signal_is_active(metric, baseline, current_signal)
             or metric.sync_id != latest.sync_id
-            or next_metric.timestamp_ms - metric.timestamp_ms > CONTINUITY_GAP_MS
+            or next_metric.timestamp_ms - metric.timestamp_ms
+            > CONTINUITY_GAP_MS
         ):
             break
         start = metric.timestamp_ms

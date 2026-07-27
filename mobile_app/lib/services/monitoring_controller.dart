@@ -30,6 +30,7 @@ class MonitoringController extends ChangeNotifier {
   bool _uploading = false;
   bool _refreshing = false;
   bool _disposed = false;
+  final Map<String, List<double>> _displayPressureBySide = {};
   bool _aiAdviceLoading = false;
   bool _aiQuestionLoading = false;
   String? _lastAdviceSignature;
@@ -97,9 +98,11 @@ class MonitoringController extends ChangeNotifier {
     connections = value;
     if (value.left != FootConnectionStatus.connected) {
       left = null;
+      _displayPressureBySide.remove('left');
     }
     if (value.right != FootConnectionStatus.connected) {
       right = null;
+      _displayPressureBySide.remove('right');
     }
     if (!_bothFeetConnected) {
       _resetBilateralState();
@@ -122,17 +125,59 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _onFrame(FootFrame frame) {
+    final displayFrame = _frameForDisplay(frame);
     if (frame.side == 'left') {
-      left = frame;
+      left = displayFrame;
     } else {
-      right = frame;
+      right = displayFrame;
     }
     lastUpdated = DateTime.now();
+    // Upload the untouched measurement. Display smoothing must never alter
+    // calibration, risk decisions, event history or motor commands.
     final pair = _pairing.add(frame);
     if (pair != null && source.shouldUploadToBackend) {
       _enqueuePair(pair);
     }
     notifyListeners();
+  }
+
+  FootFrame _frameForDisplay(FootFrame frame) {
+    if (frame.pressure.length != 6) {
+      return frame;
+    }
+    final previous = _displayPressureBySide[frame.side];
+    final pressure = List<double>.generate(6, (index) {
+      final current = frame.pressure[index];
+      if (!frame.pressureChannelValid(index)) {
+        return current;
+      }
+      // Release immediately near zero so an unloaded shoe never leaves a red
+      // after-image. During contact, a light EMA removes one-frame ADC jitter
+      // while retaining a response within roughly 200–400 ms at 5 Hz.
+      if (current < 0.006) {
+        return 0.0;
+      }
+      if (previous == null || previous.length != 6) {
+        return current;
+      }
+      return previous[index] * 0.55 + current * 0.45;
+    }, growable: false);
+    _displayPressureBySide[frame.side] = pressure;
+    return FootFrame(
+      protocolVersion: frame.protocolVersion,
+      sensorLayoutVersion: frame.sensorLayoutVersion,
+      deviceId: frame.deviceId,
+      side: frame.side,
+      syncId: frame.syncId,
+      packetSeq: frame.packetSeq,
+      timestampMs: frame.timestampMs,
+      pressure: pressure,
+      temperature: frame.temperature,
+      imu: frame.imu,
+      battery: frame.battery,
+      qualityFlags: frame.qualityFlags,
+      source: frame.source,
+    );
   }
 
   void _enqueuePair(List<FootFrame> pair) {
