@@ -527,14 +527,31 @@ def _signal_is_active(
     """Apply lower exit thresholds so one noisy sample cannot reset a risk."""
     risk_type, risk_side = signal
     if risk_type == "temperature_asymmetry":
-        return (
-            _temperature_signal_side(
-                metric,
-                baseline,
-                use_exit_threshold=True,
-            )
-            == risk_side
+        # Use the raw *enter* threshold for App-visible evidence. A user's
+        # normal same-region offset can legitimately sit between the raw enter
+        # and exit thresholds (for example 2.4 C); using the raw exit threshold
+        # here would keep an old episode alive forever after the heated channel
+        # had recovered. Brief sub-threshold NTC/contact dips are handled by the
+        # bounded dropout grace in _current_risk instead.
+        raw_side = _raw_temperature_signal_side(metric)
+        if raw_side == risk_side:
+            return True
+        if not baseline.ready:
+            return False
+
+        corrected_candidates = [
+            (abs(delta) / TEMPERATURE_DELTA_C_EXIT_THRESHOLD, delta)
+            for delta in _temperature_delta_from_baseline(metric, baseline)
+            if abs(delta) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+        ]
+        if not corrected_candidates:
+            return False
+        _, strongest_delta = max(
+            corrected_candidates,
+            key=lambda candidate: candidate[0],
         )
+        corrected_side = "left" if strongest_delta > 0 else "right"
+        return corrected_side == risk_side
 
     if metric.left_total + metric.right_total < RISK_MIN_TOTAL_PRESSURE:
         return False
