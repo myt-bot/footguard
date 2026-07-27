@@ -424,6 +424,30 @@ def _temperature_delta_from_baseline(
     )
 
 
+def _raw_temperature_signal_side(
+    metric: PairMetric,
+    *,
+    use_exit_threshold: bool = False,
+) -> str | None:
+    raw_threshold = (
+        TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD
+        if use_exit_threshold
+        else TEMPERATURE_RAW_DELTA_C_THRESHOLD
+    )
+    raw_candidates = [
+        (abs(delta) / raw_threshold, delta)
+        for delta in metric.temperature_delta_c
+        if abs(delta) >= raw_threshold
+    ]
+    if not raw_candidates:
+        return None
+    _, strongest_delta = max(
+        raw_candidates,
+        key=lambda candidate: candidate[0],
+    )
+    return "left" if strongest_delta > 0 else "right"
+
+
 def _temperature_signal_side(
     metric: PairMetric,
     baseline: BaselineProfile,
@@ -431,25 +455,15 @@ def _temperature_signal_side(
     use_exit_threshold: bool = False,
 ) -> str | None:
     """Return the side supported by stable, App-visible temperature evidence."""
-    raw_threshold = (
-        TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD
-        if use_exit_threshold
-        else TEMPERATURE_RAW_DELTA_C_THRESHOLD
-    )
     # If an App-visible raw same-region delta crosses the threshold, it is the
     # authoritative evidence. Do not let a baseline-corrected channel on the
     # opposite side make the selected side alternate from frame to frame.
-    raw_candidates = [
-        (abs(delta) / raw_threshold, delta)
-        for delta in metric.temperature_delta_c
-        if abs(delta) >= raw_threshold
-    ]
-    if raw_candidates:
-        _, strongest_delta = max(
-            raw_candidates,
-            key=lambda candidate: candidate[0],
-        )
-        return "left" if strongest_delta > 0 else "right"
+    raw_side = _raw_temperature_signal_side(
+        metric,
+        use_exit_threshold=use_exit_threshold,
+    )
+    if raw_side is not None:
+        return raw_side
 
     if not baseline.ready:
         return None
@@ -542,12 +556,22 @@ def _recent_temperature_side(
 ) -> str | None:
     """Keep a real temperature episode through a brief ADC/contact dropout."""
     latest_timestamp_ms = metrics[-1].timestamp_ms
+    recent_metrics: list[PairMetric] = []
     for metric in reversed(metrics):
         if (
             latest_timestamp_ms - metric.timestamp_ms
             > TEMPERATURE_DROPOUT_GRACE_MS
         ):
             break
+        recent_metrics.append(metric)
+
+    # App-visible raw evidence is authoritative across the whole grace window.
+    # A one-frame corrected residual must not flip an established raw side.
+    for metric in recent_metrics:
+        side = _raw_temperature_signal_side(metric)
+        if side is not None:
+            return side
+    for metric in recent_metrics:
         side = _temperature_signal_side(metric, baseline)
         if side is not None:
             return side
