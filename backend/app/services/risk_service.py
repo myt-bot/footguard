@@ -31,10 +31,13 @@ from ..config import (
     PAIRING_BLOCK_FLAGS,
     PAIRING_WINDOW_MS,
     PERSISTENT_AFTER_MS,
+    PRESSURE_SMOOTHING_WINDOW_SAMPLES,
     RECOVERY_EFFECTIVE_RATIO,
     RECOVERY_OBSERVATION_MS,
     RECOVERY_PARTIAL_RATIO,
     REGIONAL_ASYMMETRY_FOR_SEVERE,
+    REGIONAL_MIN_CHANNEL_EVIDENCE,
+    REGIONAL_MIN_VISIBLE_SCORE,
     REGIONAL_SHARE_DELTA_FOR_SEVERE,
     RISK_MIN_TOTAL_PRESSURE,
     TEMPERATURE_DELTA_C_THRESHOLD,
@@ -229,6 +232,60 @@ def _channel_asymmetry(metric: PairMetric, index: int) -> float:
     return (left - right) / max(left + right, 1e-9)
 
 
+def _pressure_metric_from_window(
+    metrics: list[PairMetric], end_index: int | None = None
+) -> PairMetric:
+    """Return a robust pressure view while preserving current metadata/temperature."""
+    if not metrics:
+        raise ValueError("pressure smoothing requires at least one metric")
+    if end_index is None:
+        end_index = len(metrics) - 1
+    reference = metrics[end_index]
+    start_index = max(0, end_index - PRESSURE_SMOOTHING_WINDOW_SAMPLES + 1)
+    window = [
+        metric
+        for metric in metrics[start_index : end_index + 1]
+        if metric.sync_id == reference.sync_id
+        and reference.timestamp_ms - metric.timestamp_ms
+        <= CONTINUITY_GAP_MS * PRESSURE_SMOOTHING_WINDOW_SAMPLES
+    ]
+    left_pressure = tuple(
+        median(metric.left_pressure[index] for metric in window)
+        for index in range(6)
+    )
+    right_pressure = tuple(
+        median(metric.right_pressure[index] for metric in window)
+        for index in range(6)
+    )
+    left_total = sum(left_pressure)
+    right_total = sum(right_pressure)
+    total = max(left_total + right_total, 1e-9)
+    load_bias = (left_total - right_total) / total
+    return PairMetric(
+        sync_id=reference.sync_id,
+        packet_seq=reference.packet_seq,
+        timestamp_ms=reference.timestamp_ms,
+        left_total=left_total,
+        right_total=right_total,
+        load_bias=load_bias,
+        load_diff=abs(load_bias),
+        left_forefoot_ratio=sum(left_pressure[:4]) / max(left_total, 1e-9),
+        right_forefoot_ratio=sum(right_pressure[:4]) / max(right_total, 1e-9),
+        left_pressure=left_pressure,
+        right_pressure=right_pressure,
+        left_distribution=tuple(
+            value / max(left_total, 1e-9) for value in left_pressure
+        ),
+        right_distribution=tuple(
+            value / max(right_total, 1e-9) for value in right_pressure
+        ),
+        # Temperature is already slowly varying. Keeping the latest value also
+        # keeps the App's displayed left/right values consistent with this delta.
+        temperature_delta_c=reference.temperature_delta_c,
+        motion_state=reference.motion_state,
+    )
+
+
 def _median_channels(
     metrics: list[PairMetric], field: str, channel_count: int
 ) -> tuple[float, ...]:
@@ -365,13 +422,14 @@ def _signal(
 def _current_risk(
     metrics: list[PairMetric], baseline: BaselineProfile
 ) -> tuple[RiskState, PairMetric]:
-    latest = metrics[-1]
+    latest = _pressure_metric_from_window(metrics)
     current_signal = _signal(latest, baseline)
     if current_signal is None:
         return RiskState(risk_type="normal", risk_side="none", risk_level=0, duration_ms=0), latest
     start = latest.timestamp_ms
     next_metric = latest
-    for metric in reversed(metrics[:-1]):
+    for index in range(len(metrics) - 2, -1, -1):
+        metric = _pressure_metric_from_window(metrics, index)
         if (
             _signal(metric, baseline) != current_signal
             or metric.sync_id != latest.sync_id
@@ -405,6 +463,11 @@ def _clamp_score(value: float) -> float:
     return round(max(0.0, min(1.0, value)), 4)
 
 
+def _pressure_score(value: float) -> float:
+    score = _clamp_score(value)
+    return 0.0 if score < REGIONAL_MIN_VISIBLE_SCORE else score
+
+
 def _regional_analysis(
     metric: PairMetric, baseline: BaselineProfile
 ) -> RegionalAnalysis:
@@ -429,6 +492,13 @@ def _regional_analysis(
     left_scores: list[float] = []
     right_scores: list[float] = []
     for index in range(6):
+        channel_evidence = (
+            metric.left_pressure[index] + metric.right_pressure[index]
+        )
+        if channel_evidence < REGIONAL_MIN_CHANNEL_EVIDENCE:
+            left_scores.append(0.0)
+            right_scores.append(0.0)
+            continue
         current_asymmetry = _channel_asymmetry(metric, index)
         corrected_asymmetry = (
             current_asymmetry - baseline.pressure_asymmetry[index]
@@ -440,7 +510,7 @@ def _regional_analysis(
             metric.right_distribution[index] - baseline.right_distribution[index]
         ) / max(baseline.right_distribution[index], 0.05)
         left_scores.append(
-            _clamp_score(
+            _pressure_score(
                 max(
                     left_share_change / REGIONAL_SHARE_DELTA_FOR_SEVERE,
                     corrected_asymmetry / REGIONAL_ASYMMETRY_FOR_SEVERE,
@@ -448,7 +518,7 @@ def _regional_analysis(
             )
         )
         right_scores.append(
-            _clamp_score(
+            _pressure_score(
                 max(
                     right_share_change / REGIONAL_SHARE_DELTA_FOR_SEVERE,
                     -corrected_asymmetry / REGIONAL_ASYMMETRY_FOR_SEVERE,

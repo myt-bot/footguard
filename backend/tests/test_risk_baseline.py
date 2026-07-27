@@ -9,6 +9,7 @@ from backend.app.services.risk_service import (
     PairMetric,
     _baseline_profile,
     _current_risk,
+    _pressure_metric_from_window,
     _regional_analysis,
     _signal,
 )
@@ -202,3 +203,76 @@ def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:
     assert risk.risk_side == "left"
     assert risk.risk_level == 2
     assert risk.duration_ms == 8_800
+
+def test_pressure_median_rejects_one_frame_spike() -> None:
+    baseline_metrics = [
+        _metric(index) for index in range(BASELINE_MIN_SAMPLES)
+    ]
+    baseline = _baseline_profile(baseline_metrics)
+    normal = [
+        _metric(BASELINE_MIN_SAMPLES + index) for index in range(5)
+    ]
+    spike = _metric(
+        BASELINE_MIN_SAMPLES + 5,
+        left_total=0.48,
+        right_total=0.08,
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+    tail = [
+        _metric(BASELINE_MIN_SAMPLES + 6 + index) for index in range(4)
+    ]
+
+    metrics = [*baseline_metrics, *normal, spike, *tail]
+    smoothed = _pressure_metric_from_window(metrics)
+    risk, _ = _current_risk(metrics, baseline)
+
+    assert smoothed.load_bias == pytest.approx(-0.04)
+    assert risk.risk_type == "normal"
+
+
+def test_sustained_pressure_change_survives_brief_normal_frame() -> None:
+    baseline_metrics = [
+        _metric(index) for index in range(BASELINE_MIN_SAMPLES)
+    ]
+    baseline = _baseline_profile(baseline_metrics)
+    sustained = [
+        _metric(
+            100 + index,
+            left_total=0.45,
+            right_total=0.15,
+            temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+        )
+        for index in range(55)
+    ]
+    sustained[35] = _metric(
+        135,
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    risk, metric = _current_risk([*baseline_metrics, *sustained], baseline)
+
+    assert metric.load_bias == pytest.approx(0.5)
+    assert risk.risk_type == "left_load_bias"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 3
+
+
+def test_regional_analysis_ignores_low_evidence_channel() -> None:
+    metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _baseline_profile(metrics)
+    current = metrics[-1]
+    low_left = list(current.left_pressure)
+    low_right = list(current.right_pressure)
+    low_left[0] = 0.004
+    low_right[0] = 0.0
+    low_evidence = replace(
+        current,
+        left_pressure=tuple(low_left),
+        right_pressure=tuple(low_right),
+    )
+
+    regional = _regional_analysis(low_evidence, baseline)
+
+    assert regional.left_pressure_scores[0] == 0.0
+    assert regional.right_pressure_scores[0] == 0.0
+
