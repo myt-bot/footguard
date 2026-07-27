@@ -377,3 +377,53 @@ def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() ->
     assert (risk.risk_type, risk.risk_side) == ("temperature_asymmetry", "left")
     assert risk.risk_level >= 2
     assert risk.duration_ms >= 6_000
+
+
+def test_raw_temperature_side_wins_over_opposite_baseline_correction() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    shifted_baseline = replace(
+        baseline,
+        temperature_delta_c=(3.0, 5.0, 0.0, 0.0),
+    )
+    visible_left_heat = _metric(
+        300,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(3.2, -2.4, 0.0, 0.0),
+    )
+
+    # T1's App-visible +3.2 C is authoritative. The larger corrected T2
+    # residual must not flip the selected side to right.
+    assert _signal(visible_left_heat, shifted_baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+
+
+def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                400 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(3.4, 0.2, -0.1, 0.0),
+            ),
+            sync_id=1_000 + index,
+            timestamp_ms=20_000 + index * 200,
+        )
+        for index in range(21)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "temperature_asymmetry"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 1
+    assert risk.duration_ms == 4_000
+
