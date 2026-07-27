@@ -427,3 +427,60 @@ def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
     assert risk.risk_level == 1
     assert risk.duration_ms == 4_000
 
+
+def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                500 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(
+                    (0.8, 0.2, 0.1, 0.0)
+                    if 18 <= index <= 21
+                    else (3.4, 0.2, 0.1, 0.0)
+                ),
+            ),
+            timestamp_ms=30_000 + index * 200,
+        )
+        for index in range(40)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "temperature_asymmetry"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 2
+    assert risk.duration_ms == 7_800
+
+
+def test_temperature_risk_clears_after_dropout_grace() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                600 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(
+                    (3.4, 0.2, 0.1, 0.0)
+                    if index < 20
+                    else (0.8, 0.2, 0.1, 0.0)
+                ),
+            ),
+            timestamp_ms=40_000 + index * 200,
+        )
+        for index in range(28)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "normal"
+    assert risk.risk_side == "none"
+    assert risk.risk_level == 0
+    assert risk.duration_ms == 0
