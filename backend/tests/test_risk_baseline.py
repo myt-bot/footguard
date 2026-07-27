@@ -130,6 +130,29 @@ def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
     assert _signal(single_foot_load, baseline) == ("left_load_bias", "left")
 
 
+def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    shifted_baseline = replace(
+        baseline,
+        temperature_delta_c=(6.0, 2.4, -1.8, 0.8),
+    )
+    heated_off_ground = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(7.0, 2.4, -1.8, 0.8),
+    )
+
+    assert shifted_baseline.ready is True
+    # The corrected delta is only 1 C, but the App-visible raw delta is 7 C.
+    assert _signal(heated_off_ground, shifted_baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+
+
 def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
     metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES + 5)]
     metrics.append(
