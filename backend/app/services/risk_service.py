@@ -429,43 +429,45 @@ def _temperature_signal_side(
     *,
     use_exit_threshold: bool = False,
 ) -> str | None:
-    """Return the side supported by raw or baseline-corrected temperature."""
-    corrected = _temperature_delta_from_baseline(metric, baseline)
+    """Return the side supported by stable, App-visible temperature evidence."""
     raw_threshold = (
         TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD
         if use_exit_threshold
         else TEMPERATURE_RAW_DELTA_C_THRESHOLD
     )
+    # If an App-visible raw same-region delta crosses the threshold, it is the
+    # authoritative evidence. Do not let a baseline-corrected channel on the
+    # opposite side make the selected side alternate from frame to frame.
+    raw_candidates = [
+        (abs(delta) / raw_threshold, delta)
+        for delta in metric.temperature_delta_c
+        if abs(delta) >= raw_threshold
+    ]
+    if raw_candidates:
+        _, strongest_delta = max(
+            raw_candidates,
+            key=lambda candidate: candidate[0],
+        )
+        return "left" if strongest_delta > 0 else "right"
+
+    if not baseline.ready:
+        return None
     corrected_threshold = (
         TEMPERATURE_DELTA_C_EXIT_THRESHOLD
         if use_exit_threshold
         else TEMPERATURE_DELTA_C_THRESHOLD
     )
-    candidates: list[tuple[float, float]] = []
-    for raw_delta, corrected_delta in zip(
-        metric.temperature_delta_c,
-        corrected,
-        strict=True,
-    ):
-        raw_score = abs(raw_delta) / raw_threshold
-        corrected_score = (
-            abs(corrected_delta) / corrected_threshold
-            if baseline.ready
-            else 0.0
-        )
-        score = max(raw_score, corrected_score)
-        if score < 1.0:
-            continue
-        evidence_delta = (
-            raw_delta
-            if raw_score >= corrected_score
-            else corrected_delta
-        )
-        candidates.append((score, evidence_delta))
-
-    if not candidates:
+    corrected_candidates = [
+        (abs(delta) / corrected_threshold, delta)
+        for delta in _temperature_delta_from_baseline(metric, baseline)
+        if abs(delta) >= corrected_threshold
+    ]
+    if not corrected_candidates:
         return None
-    _, strongest_delta = max(candidates, key=lambda candidate: candidate[0])
+    _, strongest_delta = max(
+        corrected_candidates,
+        key=lambda candidate: candidate[0],
+    )
     return "left" if strongest_delta > 0 else "right"
 
 
@@ -549,15 +551,23 @@ def _current_risk(
         for index in range(len(metrics) - 2, -1, -1):
             metric = _pressure_metric_from_window(metrics, index)
             if (
-                metric.sync_id != latest.sync_id
-                or next_metric.timestamp_ms - metric.timestamp_ms
+                next_metric.timestamp_ms - metric.timestamp_ms
                 > CONTINUITY_GAP_MS
             ):
                 break
             candidate = _signal(metric, baseline)
-            if candidate is not None and all(
-                _signal_is_active(item, baseline, candidate)
-                for item in following
+            if (
+                candidate is not None
+                # Temperature evidence comes from already paired left/right
+                # frames and remains continuous across a BLE sync-id rotation.
+                and (
+                    candidate[0] == "temperature_asymmetry"
+                    or metric.sync_id == latest.sync_id
+                )
+                and all(
+                    _signal_is_active(item, baseline, candidate)
+                    for item in following
+                )
             ):
                 current_signal = candidate
                 break
@@ -581,7 +591,10 @@ def _current_risk(
         metric = _pressure_metric_from_window(metrics, index)
         if (
             not _signal_is_active(metric, baseline, current_signal)
-            or metric.sync_id != latest.sync_id
+            or (
+                current_signal[0] != "temperature_asymmetry"
+                and metric.sync_id != latest.sync_id
+            )
             or next_metric.timestamp_ms - metric.timestamp_ms
             > CONTINUITY_GAP_MS
         ):
