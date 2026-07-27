@@ -103,19 +103,17 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedPressureScores {
-    // BLE frames update more frequently than backend regional analysis. During
-    // unloading the current pressure can already be zero while a previous
-    // backend response still contains high scores. Never combine those two
-    // moments into a misleading "0% share / 100% abnormal" display.
     if (!_pressureContactPresent) {
       return List.filled(6, 0.0);
     }
-    final values = pressureScores;
-    return values != null && values.length == 6
-        ? values
-            .map((value) => value.clamp(0.0, 1.0).toDouble())
-            .toList(growable: false)
-        : _fallbackPressureScores;
+    // The BLE frame is the 5 Hz display source. Backend regional scores are
+    // intentionally slower because they are derived from a smoothed personal
+    // baseline. Rendering those cached scores made the heatmap freeze and jump
+    // even while the current BLE pressure was changing normally.
+    //
+    // Keep backend scores for risk decisions, event history and motor commands;
+    // use the current paired BLE frame for the live visual response.
+    return _fallbackPressureScores;
   }
 
   List<double> get _fallbackTemperatureScores {
@@ -155,19 +153,18 @@ class FootPressureView extends StatelessWidget {
         oppositeFrame?.temperatureChannelValid(index) != true) {
       return null;
     }
-    final values = temperatureDeltaC;
-    if (values != null && values.length == 4) {
-      return side == 'left' ? values[index] : -values[index];
-    }
     final current = frame?.temperature;
-    final peer = oppositeFrame?.temperature;
+    final opposite = oppositeFrame?.temperature;
     if (current == null ||
-        peer == null ||
+        opposite == null ||
         current.length != 4 ||
-        peer.length != 4) {
+        opposite.length != 4) {
       return null;
     }
-    return current[index] - peer[index];
+    // “较对侧”必须对应屏幕上同一时刻显示的两只脚原始温度。
+    // 后端的 temperatureDeltaC 是扣除个人基线后的风险特征，
+    // 可用于风险评分，但不能拿来冒充可见温度的直接相减结果。
+    return current[index] - opposite[index];
   }
 
   @override
@@ -205,7 +202,7 @@ class FootPressureView extends StatelessWidget {
           const SizedBox(height: 5),
           Text(
             baselineReady
-                ? '依据：个人动态基线 + 左右镜像同区对比'
+                ? '依据：实时BLE压力 + 个人基线风险判定 + 左右镜像同区对比'
                 : '依据：布局参考分布 + 左右镜像同区对比'
                     '（基线学习中 $baselineSampleCount/'
                     '$baselineRequiredSamples）',
