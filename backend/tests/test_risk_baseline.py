@@ -186,6 +186,31 @@ def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
     }
 
 
+def test_forefoot_risk_works_with_two_covered_forefoot_channels() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    partially_covered = replace(
+        baseline,
+        pressure_channel_trust=(False, True, True, False, True, True) + (True,) * 6,
+        pressure_channel_contact_trust=(
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+        ) + (True,) * 6,
+    )
+    forefoot_heavy = (0.0, 0.38, 0.34, 0.0, 0.10, 0.18)
+    metric = _metric(
+        100,
+        left_distribution=forefoot_heavy,
+    )
+
+    assert ("forefoot_high", "left") in _signals(metric, partially_covered)
+
+
 def test_residual_channel_is_raw_valid_but_excluded_from_analysis() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
@@ -279,6 +304,24 @@ def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
         "temperature_asymmetry",
         "left",
     )
+
+
+def test_baseline_temperature_shift_needs_visible_raw_support() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    shifted_baseline = replace(
+        baseline,
+        temperature_delta_c=(0.0, -3.0, 0.0, 0.0),
+    )
+    almost_equal_current_readings = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(0.2, 0.4, -0.3, 0.1),
+    )
+
+    assert _signal(almost_equal_current_readings, shifted_baseline) is None
 
 
 def test_unloaded_raw_delta_of_2_97_c_triggers_right_alert() -> None:

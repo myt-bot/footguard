@@ -26,12 +26,12 @@ PRESSURE_BLOCK_FLAGS = PRESSURE_INVALID_MASK | CALIBRATION_INVALID_MASK
 # Runtime pressure decisions may tolerate one or two explicitly invalid
 # channels. Personal-baseline learning remains stricter and requires all six.
 PRESSURE_MIN_VALID_CHANNELS_PER_FOOT = 4
-FOREFOOT_MIN_VALID_CHANNELS = 3
+FOREFOOT_MIN_VALID_CHANNELS = 2
 REARFOOT_MIN_VALID_CHANNELS = 1
-FOREFOOT_MIN_ACTIVE_CHANNELS = 3
+FOREFOOT_MIN_ACTIVE_CHANNELS = 2
 FOREFOOT_MIN_ACTIVE_REAR_CHANNELS = 1
 LOAD_BIAS_ENTER_THRESHOLD = 0.20
-LOAD_BIAS_EXIT_THRESHOLD = 0.12
+LOAD_BIAS_EXIT_THRESHOLD = 0.16
 # Five 5-Hz frames provide about one second of robust pressure smoothing.
 PRESSURE_SMOOTHING_WINDOW_SAMPLES = 5
 # Ignore a regional left/right comparison when the two matching channels
@@ -93,8 +93,11 @@ REGIONAL_ASYMMETRY_FOR_SEVERE = 0.35
 # in the App. The baseline-corrected threshold remains more sensitive.
 TEMPERATURE_RAW_DELTA_C_THRESHOLD = 2.5
 TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD = 2.0
-TEMPERATURE_DELTA_C_THRESHOLD = 2.0
-TEMPERATURE_DELTA_C_EXIT_THRESHOLD = 1.5
+TEMPERATURE_DELTA_C_THRESHOLD = 2.5
+TEMPERATURE_DELTA_C_EXIT_THRESHOLD = 2.0
+# Baseline correction can reveal sensor-to-sensor changes, but it must not
+# create a temperature alarm while both feet currently read almost the same.
+TEMPERATURE_CORRECTED_RAW_SUPPORT_C = 1.0
 # Real NTC/contact readings can briefly dip for one or two 5-Hz frames. Keep
 # an established temperature episode alive across that short dropout, while a
 # genuine recovery still clears promptly.

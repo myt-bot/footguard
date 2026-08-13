@@ -68,6 +68,7 @@ from ..config import (
     TEMPERATURE_DELTA_C_THRESHOLD,
     TEMPERATURE_DELTA_C_EXIT_THRESHOLD,
     TEMPERATURE_ATTENTION_AFTER_MS,
+    TEMPERATURE_CORRECTED_RAW_SUPPORT_C,
     TEMPERATURE_DROPOUT_GRACE_MS,
     TEMPERATURE_PERSISTENT_AFTER_MS,
     TEMPERATURE_RAW_DELTA_C_THRESHOLD,
@@ -1109,9 +1110,16 @@ def _temperature_signal_side(
         else TEMPERATURE_DELTA_C_THRESHOLD
     )
     corrected_candidates = [
-        (abs(delta) / corrected_threshold, delta)
-        for delta in _temperature_delta_from_baseline(metric, baseline)
-        if delta is not None and abs(delta) >= corrected_threshold
+        (abs(corrected) / corrected_threshold, corrected)
+        for raw, corrected in zip(
+            metric.temperature_delta_c,
+            _temperature_delta_from_baseline(metric, baseline),
+            strict=True,
+        )
+        if raw is not None
+        and corrected is not None
+        and abs(raw) >= TEMPERATURE_CORRECTED_RAW_SUPPORT_C
+        and abs(corrected) >= corrected_threshold
     ]
     if not corrected_candidates:
         return None
@@ -1306,9 +1314,16 @@ def _signal_is_active(
             return False
 
         corrected_candidates = [
-            (abs(delta) / TEMPERATURE_DELTA_C_EXIT_THRESHOLD, delta)
-            for delta in _temperature_delta_from_baseline(metric, baseline)
-            if delta is not None and abs(delta) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
+            (abs(corrected) / TEMPERATURE_DELTA_C_EXIT_THRESHOLD, corrected)
+            for raw, corrected in zip(
+                metric.temperature_delta_c,
+                _temperature_delta_from_baseline(metric, baseline),
+                strict=True,
+            )
+            if raw is not None
+            and corrected is not None
+            and abs(raw) >= TEMPERATURE_CORRECTED_RAW_SUPPORT_C
+            and abs(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
         ]
         if not corrected_candidates:
             return False
