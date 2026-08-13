@@ -133,6 +133,8 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
               baselineReady: controller.calibrationStatus?.baselineReady ??
                   controller.regionalAnalysis?.baselineReady ??
                   false,
+              pressureAvailable:
+                  controller.regionalAnalysis?.pressureAvailable ?? false,
             ),
             const SizedBox(height: 10),
             _WearingCalibrationCard(
@@ -308,6 +310,9 @@ class _WearingCalibrationCard extends StatelessWidget {
         'ready' => '本次穿戴基线已锁定，压力风险与马达已启用',
         'pressure_unavailable' => '压力通道不完整，请检查鞋垫与接线',
         'not_loaded' => '请穿好双脚并自然承重',
+        'left_not_loaded' => '左脚未形成有效多点承重，请调整左脚位置',
+        'right_not_loaded' => '右脚未形成有效多点承重，请调整右脚位置',
+        'pressure_residual' => '当前主要是固定残余压力，请双脚穿好并完整踩住鞋垫',
         'moving' => '身体移动较大，请保持自然站立',
         'unstable' => '数据波动较大，请放松并保持站稳',
         _ => '等待双脚有效压力数据',
@@ -403,6 +408,12 @@ class _MetricsCard extends StatelessWidget {
                       ? '--'
                       : '${controller.syncErrorMs} ms'),
               _Metric(label: '活动状态', value: controller.motionStatusLabel),
+              _Metric(
+                  label: '左脚运动',
+                  value: controller.footMotionStatusLabel('left')),
+              _Metric(
+                  label: '右脚运动',
+                  value: controller.footMotionStatusLabel('right')),
               _Metric(
                   label: '后端', value: controller.backendOnline ? '在线' : '离线'),
               _Metric(label: '数据源', value: controller.source.label),

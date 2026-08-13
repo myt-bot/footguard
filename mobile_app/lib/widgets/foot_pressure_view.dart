@@ -90,13 +90,22 @@ class FootPressureView extends StatelessWidget {
     return validity == null || validity.length != 6 || validity[index];
   }
 
+  bool _pressureChannelTrustedForContact(int index) {
+    final statuses = pressureChannelStatus;
+    return statuses == null ||
+        statuses.length != 6 ||
+        statuses[index] != 'residual_suspect';
+  }
+
   bool get _pressureContactPresent {
     if (frame == null || frame!.pressure.length != 6) {
       return false;
     }
     final validValues = [
       for (var index = 0; index < 6; index++)
-        if (_pressureChannelValid(index)) frame!.pressure[index],
+        if (_pressureChannelValid(index) &&
+            _pressureChannelTrustedForContact(index))
+          frame!.pressure[index],
     ];
     return validValues
             .where((value) => value >= _minimumFallbackPressure)

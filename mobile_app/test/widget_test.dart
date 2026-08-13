@@ -39,6 +39,25 @@ void main() {
     expect(find.text('检测到持续左偏'), findsOneWidget);
   });
 
+  testWidgets('risk banner distinguishes missing load from normal posture',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        body: RiskBanner(
+          risk: RiskState(
+              riskType: 'normal',
+              riskSide: 'none',
+              riskLevel: 0,
+              durationMs: 0),
+          pressureAvailable: false,
+        ),
+      ),
+    ));
+
+    expect(find.text('未检测到有效承重'), findsOneWidget);
+    expect(find.text('双足状态正常'), findsNothing);
+  });
+
   testWidgets('AI advice card identifies DeepSeek as an auxiliary explanation',
       (tester) async {
     await tester.pumpWidget(

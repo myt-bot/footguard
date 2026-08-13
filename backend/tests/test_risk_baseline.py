@@ -11,8 +11,10 @@ from backend.app.services.risk_service import (
     _current_risk,
     _current_risks,
     _pressure_metric_from_window,
+    _prebaseline_residual_suspect_channels,
     _regional_analysis,
     _signal,
+    _signals,
 )
 
 
@@ -206,6 +208,21 @@ def test_residual_channel_is_raw_valid_but_excluded_from_analysis() -> None:
     assert regional.right_pressure_channel_status[2] == "residual_suspect"
 
 
+def test_regional_pressure_is_unavailable_without_multipoint_contact() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    unloaded = _metric(
+        BASELINE_MIN_SAMPLES,
+        left_total=0.0,
+        right_total=0.0,
+    )
+
+    regional = _regional_analysis(unloaded, baseline)
+
+    assert regional.pressure_available is False
+
+
 def test_residual_on_unloaded_foot_does_not_reverse_real_single_foot_bias() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
@@ -222,6 +239,9 @@ def test_residual_on_unloaded_foot_does_not_reverse_real_single_foot_bias() -> N
     assert _signal(left_contact_with_right_residual, baseline) == (
         "left_load_bias",
         "left",
+    )
+    assert ("forefoot_high", "right") not in _signals(
+        left_contact_with_right_residual, baseline
     )
 
 
@@ -339,6 +359,35 @@ def test_moving_samples_do_not_train_personal_baseline() -> None:
     assert _baseline_profile(unavailable).ready is True
 
 
+def test_discontinuous_standing_samples_do_not_form_a_baseline() -> None:
+    first = [
+        replace(_metric(index), timestamp_ms=index * 200)
+        for index in range(25)
+    ]
+    second = [
+        replace(_metric(100 + index), timestamp_ms=20_000 + index * 200)
+        for index in range(25)
+    ]
+
+    baseline = _baseline_profile([*first, *second])
+
+    assert baseline.ready is False
+    assert baseline.sample_count == 25
+
+
+def test_prebaseline_fixed_single_point_is_diagnosed_as_residual() -> None:
+    single_right_p3 = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    metrics = [
+        _metric(index, right_total=0.12, right_distribution=single_right_p3)
+        for index in range(15)
+    ]
+
+    suspects = _prebaseline_residual_suspect_channels(metrics)
+
+    assert suspects[8] is True
+    assert sum(suspects) == 1
+
+
 def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
@@ -360,8 +409,27 @@ def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:
 
     assert risk.risk_type == "left_load_bias"
     assert risk.risk_side == "left"
-    assert risk.risk_level == 2
+    assert risk.risk_level == 3
     assert risk.duration_ms == 8_800
+
+
+def test_sustained_risk_tolerates_observed_android_batch_gap() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    risk_metrics = [
+        replace(
+            _metric(200 + index, left_total=0.45, right_total=0.15),
+            timestamp_ms=20_000 + index * 1_400,
+        )
+        for index in range(8)
+    ]
+
+    risks, _ = _current_risks(risk_metrics, baseline)
+
+    load_bias = next(risk for risk in risks if risk.risk_type == "left_load_bias")
+    assert load_bias.risk_level == 3
+    assert load_bias.duration_ms == 9_800
 
 def test_pressure_median_rejects_one_frame_spike() -> None:
     baseline_metrics = [

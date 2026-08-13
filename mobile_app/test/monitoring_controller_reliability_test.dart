@@ -152,11 +152,10 @@ void main() {
     controller.dispose();
   });
 
-  test('slow backend upload keeps only the newest pending bilateral pair',
-      () async {
+  test('slow backend upload preserves a bounded recent pair history', () async {
     final firstUploadStarted = Completer<void>();
     final releaseFirstUpload = Completer<void>();
-    final uploadedPacketSeqs = <int>[];
+    final uploadedPacketSeqBatches = <List<int>>[];
     var uploadCount = 0;
 
     final client = MockClient((request) async {
@@ -192,9 +191,11 @@ void main() {
       if (request.url.path == '/api/v1/sensor/batch') {
         final body = jsonDecode(request.body) as Map<String, dynamic>;
         final frames = body['frames'] as List<dynamic>;
-        uploadedPacketSeqs.add(
-          (frames.first as Map<String, dynamic>)['packet_seq'] as int,
-        );
+        uploadedPacketSeqBatches.add(frames
+            .cast<Map<String, dynamic>>()
+            .map((frame) => frame['packet_seq'] as int)
+            .toSet()
+            .toList());
         uploadCount += 1;
         if (uploadCount == 1) {
           firstUploadStarted.complete();
@@ -234,12 +235,15 @@ void main() {
     releaseFirstUpload.complete();
 
     for (var attempt = 0;
-        attempt < 20 && uploadedPacketSeqs.length < 2;
+        attempt < 20 && uploadedPacketSeqBatches.length < 2;
         attempt += 1) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
 
-    expect(uploadedPacketSeqs, [1, 5]);
+    expect(uploadedPacketSeqBatches, [
+      [1],
+      [2, 3, 4, 5],
+    ]);
     controller.dispose();
   });
 }

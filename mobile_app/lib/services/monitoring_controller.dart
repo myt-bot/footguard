@@ -26,7 +26,7 @@ class MonitoringController extends ChangeNotifier {
   final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  List<FootFrame>? _pendingUploadPair;
+  final List<List<FootFrame>> _pendingUploadPairs = [];
   Timer? _refreshTimer;
   bool _uploading = false;
   bool _refreshing = false;
@@ -57,6 +57,8 @@ class MonitoringController extends ChangeNotifier {
   double? loadDiff;
   int? syncErrorMs;
   String motionState = 'unavailable';
+  String leftMotionState = 'unavailable';
+  String rightMotionState = 'unavailable';
   RegionalAnalysis? regionalAnalysis;
   AiAdvice? aiAdvice;
   AiQuestionAnswer? aiQuestionAnswer;
@@ -73,6 +75,13 @@ class MonitoringController extends ChangeNotifier {
 
   String get motionStatusLabel => switch (motionState) {
         'stationary' => '静止/稳定',
+        'moving' => '运动中',
+        _ => '不可用',
+      };
+
+  String footMotionStatusLabel(String side) =>
+      switch (side == 'left' ? leftMotionState : rightMotionState) {
+        'stationary' => '静止',
         'moving' => '运动中',
         _ => '不可用',
       };
@@ -126,6 +135,8 @@ class MonitoringController extends ChangeNotifier {
     loadDiff = null;
     syncErrorMs = null;
     motionState = 'unavailable';
+    leftMotionState = 'unavailable';
+    rightMotionState = 'unavailable';
     regionalAnalysis = null;
     _clearAiQuestion();
     if (commandBridge == null) {
@@ -191,10 +202,13 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _enqueuePair(List<FootFrame> pair) {
-    // Sensor frames drive a live safety view, so stale backlog is less useful
-    // than the newest complete bilateral pair. Replacing the pending pair keeps
-    // backend risk evaluation close to real time when a request is slow.
-    _pendingUploadPair = List<FootFrame>.of(pair, growable: false);
+    // Keep a small bounded history. Replacing every pending pair can erase a
+    // short movement episode before the backend sees it; an unbounded queue
+    // would instead make risk decisions stale when the network is slow.
+    _pendingUploadPairs.add(List<FootFrame>.of(pair, growable: false));
+    if (_pendingUploadPairs.length > 6) {
+      _pendingUploadPairs.removeAt(0);
+    }
     if (!_uploading) {
       unawaited(_drainUploadQueue());
     }
@@ -206,9 +220,12 @@ class MonitoringController extends ChangeNotifier {
     }
     _uploading = true;
     try {
-      while (_pendingUploadPair != null) {
-        final batch = _pendingUploadPair!;
-        _pendingUploadPair = null;
+      while (_pendingUploadPairs.isNotEmpty) {
+        final queuedPairs = List<List<FootFrame>>.of(_pendingUploadPairs);
+        _pendingUploadPairs.clear();
+        final batch = [
+          for (final pair in queuedPairs) ...pair,
+        ];
         try {
           await api.uploadFrames(batch);
           backendOnline = true;
@@ -240,6 +257,8 @@ class MonitoringController extends ChangeNotifier {
         loadDiff = snapshot.loadDiff;
         syncErrorMs = snapshot.syncErrorMs;
         motionState = snapshot.motionState;
+        leftMotionState = snapshot.leftMotionState;
+        rightMotionState = snapshot.rightMotionState;
         risk = snapshot.risk;
         activeRisks = snapshot.activeRisks;
         regionalAnalysis = snapshot.regionalAnalysis;

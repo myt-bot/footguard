@@ -221,6 +221,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _calibrationReason(String reason) => switch (reason) {
         'pressure_unavailable' => '压力通道不可用，请先检查连接和传感器。',
         'not_loaded' => '等待双脚稳定承重。',
+        'left_not_loaded' => '左脚未形成有效多点承重，请调整左脚位置。',
+        'right_not_loaded' => '右脚未形成有效多点承重，请调整右脚位置。',
+        'pressure_residual' => '仅检测到固定残余压力，请完整穿好双脚。',
         'moving' => '当前移动较大，请保持自然站立。',
         'unstable' => '数据波动较大，请保持双脚平行并放松站立。',
         'ready' => '标定已完成。',

@@ -19,6 +19,8 @@ class RealtimeSnapshot {
     required this.loadDiff,
     required this.syncErrorMs,
     this.motionState = 'unavailable',
+    this.leftMotionState = 'unavailable',
+    this.rightMotionState = 'unavailable',
     this.pressureAvailable = false,
     this.temperatureAvailable = false,
     required this.risk,
@@ -32,6 +34,8 @@ class RealtimeSnapshot {
   final double? loadDiff;
   final int? syncErrorMs;
   final String motionState;
+  final String leftMotionState;
+  final String rightMotionState;
   final bool pressureAvailable;
   final bool temperatureAvailable;
   final RiskState risk;
@@ -50,6 +54,9 @@ class RealtimeSnapshot {
         loadDiff: (json['load_diff'] as num?)?.toDouble(),
         syncErrorMs: json['sync_error_ms'] as int?,
         motionState: json['motion_state'] as String? ?? 'unavailable',
+        leftMotionState: json['left_motion_state'] as String? ?? 'unavailable',
+        rightMotionState:
+            json['right_motion_state'] as String? ?? 'unavailable',
         pressureAvailable: json['pressure_available'] as bool? ?? false,
         temperatureAvailable: json['temperature_available'] as bool? ?? false,
         risk: RiskState.fromJson(json['risk'] as Map<String, dynamic>),

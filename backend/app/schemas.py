@@ -154,6 +154,8 @@ class RealtimeResponse(StrictModel):
     load_bias: float | None
     load_diff: float | None
     motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    left_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    right_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
     pressure_available: bool = False
     temperature_available: bool = False
     risk: RiskState
@@ -264,6 +266,9 @@ class CalibrationStatus(StrictModel):
         "waiting_for_data",
         "pressure_unavailable",
         "not_loaded",
+        "left_not_loaded",
+        "right_not_loaded",
+        "pressure_residual",
         "moving",
         "unstable",
     ] = "waiting_for_data"

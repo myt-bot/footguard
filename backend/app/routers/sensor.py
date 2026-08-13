@@ -16,23 +16,19 @@ def ingest_batch(
     groups: dict[tuple[int, int], list] = {}
     for frame in payload.frames:
         groups.setdefault((frame.sync_id, frame.packet_seq), []).append(frame)
-    accepted = 0
-    rejected = 0
-    latest = None
     ordered_groups = sorted(
         groups.items(), key=lambda item: max(frame.timestamp_ms for frame in item[1])
     )
-    for _, frames in ordered_groups:
-        group_accepted, group_rejected = add_frames(session, frames)
-        accepted += group_accepted
-        rejected += group_rejected
-        latest = evaluate_risk(
-            session, record=True, allow_motor_command=False
-        )
-    if latest is None:
+    ordered_frames = [
+        frame for _, frames in ordered_groups for frame in frames
+    ]
+    accepted, rejected = add_frames(session, ordered_frames)
+    if not ordered_frames:
         latest = evaluate_risk(session)
     else:
-        # Start the human-facing device-command TTL only after the whole upload finishes.
+        # Risk duration is derived from frame timestamps, so one evaluation of
+        # the newest pair preserves the episode while avoiding an expensive
+        # full-history scan for every pair in an Android backlog batch.
         latest = evaluate_risk(
             session, record=True, allow_motor_command=True
         )

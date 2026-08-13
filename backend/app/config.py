@@ -11,6 +11,10 @@ DEFAULT_DATABASE_URL = f"sqlite:///{(DATA_DIR / 'footguard.db').as_posix()}"
 # Competition prototype thresholds. These are engineering defaults, not medical standards.
 PAIRING_WINDOW_MS = 50
 CONTINUITY_GAP_MS = 1_000
+# BLE frames are nominally 5 Hz, but a busy Android/backend cycle can deliver
+# a retained batch with 1.4 s between stored pairs. This relaxed gap applies
+# only after a valid bilateral pair exists; disconnect freshness stays strict.
+RISK_CONTINUITY_GAP_MS = 1_800
 PRESSURE_INVALID_MASK = 0x0000003F
 TEMPERATURE_INVALID_MASK = 0x000003C0
 TIME_UNSYNCED_MASK = 0x00000800
@@ -24,6 +28,8 @@ PRESSURE_BLOCK_FLAGS = PRESSURE_INVALID_MASK | CALIBRATION_INVALID_MASK
 PRESSURE_MIN_VALID_CHANNELS_PER_FOOT = 4
 FOREFOOT_MIN_VALID_CHANNELS = 3
 REARFOOT_MIN_VALID_CHANNELS = 1
+FOREFOOT_MIN_ACTIVE_CHANNELS = 3
+FOREFOOT_MIN_ACTIVE_REAR_CHANNELS = 1
 LOAD_BIAS_ENTER_THRESHOLD = 0.20
 LOAD_BIAS_EXIT_THRESHOLD = 0.12
 # Five 5-Hz frames provide about one second of robust pressure smoothing.
@@ -41,6 +47,7 @@ REGIONAL_MIN_VISIBLE_SCORE = 0.12
 # bench press. These are prototype engineering limits, not diagnostic limits.
 BASELINE_MIN_SAMPLES = 40
 BASELINE_CALIBRATION_WINDOW_SAMPLES = 60
+BASELINE_STABLE_GAP_MS = 1_500
 BASELINE_MIN_FOOT_PRESSURE = 0.08
 # Do not classify pressure or temperature risk while the footwear is not
 # meaningfully loaded. This remains low enough for near-single-foot loading.
@@ -63,13 +70,20 @@ BASELINE_MAX_TEMPERATURE_DELTA_C = 4.0
 # detection remains active while walking. Missing MPU data fails open.
 IMU_GRAVITY_MS2 = 9.80665
 IMU_ACCEL_STATIONARY_TOLERANCE_MS2 = 3.0
-IMU_GYRO_STATIONARY_THRESHOLD_DPS = 25.0
+# A shoe can rotate while the acceleration magnitude remains close to 1 g.
+# Use a lower gyro threshold and compare consecutive vectors in risk_service.
+IMU_GYRO_STATIONARY_THRESHOLD_DPS = 12.0
+IMU_ACCEL_DELTA_MOVING_MS2 = 0.75
+IMU_MOTION_HOLD_MS = 3_000
 BASELINE_LOAD_BIAS_INLIER_TOLERANCE = 0.20
 BASELINE_DISTRIBUTION_INLIER_TOLERANCE = 0.25
 BASELINE_TEMPERATURE_INLIER_TOLERANCE_C = 1.5
 BASELINE_MAD_SCALE = 1.4826
-LOAD_RATIO_NOISE_MULTIPLIER = 6.0
-FOREFOOT_NOISE_MULTIPLIER = 6.0
+LOAD_RATIO_NOISE_MULTIPLIER = 3.0
+FOREFOOT_NOISE_MULTIPLIER = 3.0
+# A noisy first wearing session must not make the demonstration insensitive.
+LOAD_RATIO_MAX_THRESHOLD = 0.55
+FOREFOOT_MAX_THRESHOLD = 0.22
 DEFAULT_PRESSURE_DISTRIBUTION = (0.16, 0.17, 0.18, 0.14, 0.18, 0.17)
 FOREFOOT_RATIO_DELTA_THRESHOLD = 0.08
 FOREFOOT_RATIO_EXIT_THRESHOLD = 0.05
@@ -85,9 +99,12 @@ TEMPERATURE_DELTA_C_EXIT_THRESHOLD = 1.5
 # an established temperature episode alive across that short dropout, while a
 # genuine recovery still clears promptly.
 TEMPERATURE_DROPOUT_GRACE_MS = 1_200
-ATTENTION_AFTER_MS = 3_000
-WARNING_AFTER_MS = 6_000
-PERSISTENT_AFTER_MS = 10_000
+ATTENTION_AFTER_MS = 2_000
+WARNING_AFTER_MS = 4_000
+PERSISTENT_AFTER_MS = 7_000
+TEMPERATURE_ATTENTION_AFTER_MS = 3_000
+TEMPERATURE_WARNING_AFTER_MS = 6_000
+TEMPERATURE_PERSISTENT_AFTER_MS = 10_000
 MOTOR_COMMAND_LEVEL = 2
 MOTOR_WARNING_PATTERN = "double"
 MOTOR_WARNING_DURATION_MS = 800
