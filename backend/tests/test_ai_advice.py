@@ -12,9 +12,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app.main import create_app
-from backend.app.schemas import AiAdviceRequest, AiQuestionRequest
+from backend.app.schemas import AiAdviceRequest, AiChatRequest, AiQuestionRequest
 from backend.app.services.ai_advisor_service import (
     generate_advice,
+    generate_chat_answer,
     generate_question_answer,
 )
 
@@ -198,6 +199,59 @@ def test_question_endpoint_rejects_arbitrary_user_prompt(
     assert client.post("/api/v1/ai/question", json=payload).status_code == 422
 
 
+def test_free_chat_works_during_normal_pressure_with_temperature_unavailable(
+    client: TestClient,
+) -> None:
+    payload = advice_payload(
+        risk_type="normal",
+        risk_side="none",
+        risk_level=0,
+        duration_ms=0,
+    )
+    payload.update(
+        {
+            "question": "现在的状态怎么样？",
+            "pressure_available": True,
+            "temperature_available": False,
+            "valid_temperature_pairs": 0,
+            "motion_state": "stationary",
+            "left_connected": True,
+            "right_connected": True,
+        }
+    )
+
+    response = client.post("/api/v1/ai/chat", json=payload)
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["question"] == "现在的状态怎么样？"
+    assert "不影响压力监测" in result["answer"]
+    assert "不能替代医疗诊断" in result["answer"]
+
+
+def test_free_chat_explains_wearing_calibration() -> None:
+    payload = advice_payload(
+        risk_type="normal",
+        risk_side="none",
+        risk_level=0,
+        duration_ms=0,
+    )
+    payload.update(
+        {
+            "question": "为什么还没开始判断？",
+            "baseline_ready": False,
+            "pressure_available": True,
+            "temperature_available": True,
+            "valid_temperature_pairs": 4,
+            "motion_state": "stationary",
+            "left_connected": True,
+            "right_connected": True,
+        }
+    )
+    result = generate_chat_answer(AiChatRequest.model_validate(payload))
+    assert "本次穿戴基线" in result.answer
+
+
 def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,7 +323,32 @@ def test_cloud_failure_falls_back_to_safe_mock(
 
     assert result.provider == "mock-risk-advisor-v1:fallback"
     assert result.target == "right"
-    assert result.candidate_pattern == "double"
+    assert result.candidate_pattern == "short"
+
+
+def test_combined_risks_use_target_union_and_forefoot_pattern(
+    client: TestClient,
+) -> None:
+    payload = advice_payload(
+        risk_type="right_load_bias",
+        risk_side="right",
+        risk_level=2,
+    )
+    payload["active_risks"] = [
+        payload["risk"],
+        {
+            "risk_type": "forefoot_high",
+            "risk_side": "left",
+            "risk_level": 2,
+            "duration_ms": 7_600,
+        },
+    ]
+
+    response = client.post("/api/v1/ai/advice", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["target"] == "both"
+    assert response.json()["candidate_pattern"] == "long"
 
 
 def test_cloud_text_cannot_override_local_motor_safety(

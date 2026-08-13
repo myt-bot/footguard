@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../data/api_client.dart';
 import '../data/foot_data_source.dart';
 import '../models/ai_advice.dart';
+import '../models/ai_chat_answer.dart';
 import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/foot_frame.dart';
@@ -33,6 +34,8 @@ class MonitoringController extends ChangeNotifier {
   final Map<String, List<double>> _displayPressureBySide = {};
   bool _aiAdviceLoading = false;
   bool _aiQuestionLoading = false;
+  bool _aiChatLoading = false;
+  bool _calibrationResetting = false;
   String? _lastAdviceSignature;
   String? _aiQuestionSignature;
   DateTime? _lastAdviceAttemptAt;
@@ -42,6 +45,7 @@ class MonitoringController extends ChangeNotifier {
   FootConnectionSnapshot connections =
       const FootConnectionSnapshot.disconnected();
   RiskState risk = const RiskState.incomplete();
+  List<RiskState> activeRisks = const [];
   DeviceCommand? motorCommand;
   bool backendOnline = false;
   String? _sourceError;
@@ -56,11 +60,16 @@ class MonitoringController extends ChangeNotifier {
   RegionalAnalysis? regionalAnalysis;
   AiAdvice? aiAdvice;
   AiQuestionAnswer? aiQuestionAnswer;
+  AiChatAnswer? aiChatAnswer;
+  CalibrationStatus? calibrationStatus;
   String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
   String aiQuestionStatus = '请选择一个常见问题';
+  String aiChatStatus = '可询问当前状态、设备检查或日常观察建议';
 
   bool get aiAdviceLoading => _aiAdviceLoading;
   bool get aiQuestionLoading => _aiQuestionLoading;
+  bool get aiChatLoading => _aiChatLoading;
+  bool get calibrationResetting => _calibrationResetting;
 
   String get motionStatusLabel => switch (motionState) {
         'stationary' => '静止/稳定',
@@ -112,6 +121,7 @@ class MonitoringController extends ChangeNotifier {
 
   void _resetBilateralState() {
     risk = const RiskState.incomplete();
+    activeRisks = const [];
     loadBias = null;
     loadDiff = null;
     syncErrorMs = null;
@@ -231,7 +241,22 @@ class MonitoringController extends ChangeNotifier {
         syncErrorMs = snapshot.syncErrorMs;
         motionState = snapshot.motionState;
         risk = snapshot.risk;
+        activeRisks = snapshot.activeRisks;
         regionalAnalysis = snapshot.regionalAnalysis;
+        try {
+          calibrationStatus = await api.calibrationStatus();
+        } catch (_) {
+          final analysis = regionalAnalysis;
+          if (analysis != null) {
+            calibrationStatus = CalibrationStatus(
+              baselineReady: analysis.baselineReady,
+              sampleCount: analysis.baselineSampleCount,
+              requiredSamples: analysis.baselineRequiredSamples,
+              statusReason:
+                  analysis.baselineReady ? 'ready' : 'waiting_for_data',
+            );
+          }
+        }
         _updateAiAdviceIfNeeded();
       } else {
         _resetBilateralState();
@@ -255,7 +280,17 @@ class MonitoringController extends ChangeNotifier {
       _backendError = null;
     } catch (error) {
       backendOnline = false;
-      _backendError = '后端不可用：$error';
+      risk = const RiskState.incomplete();
+      activeRisks = const [];
+      regionalAnalysis = null;
+      loadBias = null;
+      loadDiff = null;
+      syncErrorMs = null;
+      motorCommand = null;
+      motorStatus = '后端离线，风险闭环与马达提醒已暂停';
+      _backendError = source.shouldUploadToBackend
+          ? '后端离线：本地 BLE 压力图继续显示，风险判断与马达提醒已暂停'
+          : '后端不可用：$error';
     } finally {
       _refreshing = false;
       notifyListeners();
@@ -286,25 +321,10 @@ class MonitoringController extends ChangeNotifier {
 
   void _updateAiAdviceIfNeeded() {
     if (_aiQuestionSignature != null &&
-        _aiQuestionSignature != _currentRiskSignature) {
+        _aiQuestionSignature != _currentMonitoringSignature) {
       _clearAiQuestion();
     }
-    if (risk.isIncomplete) {
-      aiAdvice = null;
-      aiAdviceStatus = '双足有效数据不完整，暂不生成 AI 解释';
-      _lastAdviceSignature = null;
-      _lastAdviceAttemptAt = null;
-      return;
-    }
-    if (risk.isNormal) {
-      aiAdvice = null;
-      aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
-      _lastAdviceSignature = null;
-      _lastAdviceAttemptAt = null;
-      return;
-    }
-
-    final signature = '${risk.riskType}|${risk.riskSide}|${risk.riskLevel}';
+    final signature = _currentMonitoringSignature;
     final now = DateTime.now();
     final withinCooldown = _lastAdviceSignature == signature &&
         _lastAdviceAttemptAt != null &&
@@ -331,17 +351,22 @@ class MonitoringController extends ChangeNotifier {
     try {
       final advice = await api.aiAdvice(
         risk: requestedRisk,
+        activeRisks: activeRisks,
         loadDiff: loadDiff,
         temperatureDeltaMaxC:
             _maximumTemperatureDelta(requestedAnalysis?.temperatureDeltaC),
         baselineReady: requestedAnalysis?.baselineReady ?? false,
+        pressureAvailable: requestedAnalysis?.pressureAvailable ?? false,
+        temperatureAvailable: requestedAnalysis?.temperatureAvailable ?? false,
+        leftConnected: left != null,
+        rightConnected: right != null,
       );
-      if (_currentRiskSignature == signature) {
+      if (_currentMonitoringSignature == signature) {
         aiAdvice = advice;
         aiAdviceStatus = advice.usedFallback ? '云端暂不可用，已使用本地安全降级解释' : '辅助解释已更新';
       }
     } catch (error) {
-      if (_currentRiskSignature == signature) {
+      if (_currentMonitoringSignature == signature) {
         aiAdviceStatus = 'AI 辅助解释暂不可用：$error';
       }
     } finally {
@@ -356,7 +381,7 @@ class MonitoringController extends ChangeNotifier {
     if (_aiQuestionLoading) {
       return;
     }
-    final signature = _currentRiskSignature;
+    final signature = _currentMonitoringSignature;
     _aiQuestionSignature = signature;
     _aiQuestionLoading = true;
     aiQuestionAnswer = null;
@@ -366,17 +391,22 @@ class MonitoringController extends ChangeNotifier {
       final answer = await api.aiQuestion(
         questionKey: questionKey,
         risk: risk,
+        activeRisks: activeRisks,
         loadDiff: loadDiff,
         temperatureDeltaMaxC:
             _maximumTemperatureDelta(regionalAnalysis?.temperatureDeltaC),
         baselineReady: regionalAnalysis?.baselineReady ?? false,
+        pressureAvailable: regionalAnalysis?.pressureAvailable ?? false,
+        temperatureAvailable: regionalAnalysis?.temperatureAvailable ?? false,
+        leftConnected: left != null,
+        rightConnected: right != null,
       );
-      if (_currentRiskSignature == signature) {
+      if (_currentMonitoringSignature == signature) {
         aiQuestionAnswer = answer;
         aiQuestionStatus = answer.usedFallback ? '云端暂不可用，已使用本地安全回答' : '回答已更新';
       }
     } catch (error) {
-      if (_currentRiskSignature == signature) {
+      if (_currentMonitoringSignature == signature) {
         aiQuestionStatus = '常见问题暂时无法回答：$error';
       }
     } finally {
@@ -387,21 +417,101 @@ class MonitoringController extends ChangeNotifier {
     }
   }
 
+  Future<void> askAiChat(String question) async {
+    final trimmed = question.trim();
+    if (_aiChatLoading || trimmed.isEmpty || trimmed.length > 120) return;
+    _aiChatLoading = true;
+    aiChatAnswer = null;
+    aiChatStatus = '正在结合当前状态生成回答…';
+    notifyListeners();
+    try {
+      final analysis = regionalAnalysis;
+      final validTemperaturePairs = analysis == null
+          ? 0
+          : List.generate(4, (index) {
+              return analysis.leftTemperatureValid[index] &&
+                  analysis.rightTemperatureValid[index];
+            }).where((valid) => valid).length;
+      aiChatAnswer = await api.aiChat(
+        question: trimmed,
+        risk: risk,
+        activeRisks: activeRisks,
+        loadDiff: loadDiff,
+        temperatureDeltaMaxC:
+            _maximumTemperatureDelta(analysis?.temperatureDeltaC),
+        baselineReady: analysis?.baselineReady ?? false,
+        pressureAvailable: analysis?.pressureAvailable ??
+            (left?.pressureChannelsValid == true &&
+                right?.pressureChannelsValid == true),
+        temperatureAvailable: validTemperaturePairs > 0,
+        validTemperaturePairs: validTemperaturePairs,
+        motionState: motionState,
+        leftConnected: left != null,
+        rightConnected: right != null,
+      );
+      aiChatStatus =
+          aiChatAnswer!.usedFallback ? '云端暂不可用，已使用当前状态对应的本地回答' : '回答已更新';
+    } catch (error) {
+      aiChatStatus = backendOnline ? '自由问答暂时不可用：$error' : '后端离线，自由问答暂时不可用';
+    } finally {
+      _aiChatLoading = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> restartWearingCalibration() async {
+    if (_calibrationResetting) return;
+    _calibrationResetting = true;
+    notifyListeners();
+    try {
+      calibrationStatus = await api.resetCalibration();
+      risk = const RiskState(
+        riskType: 'normal',
+        riskSide: 'none',
+        riskLevel: 0,
+        durationMs: 0,
+      );
+      regionalAnalysis = null;
+      motorCommand = null;
+      motorStatus = '基线学习中，压力马达提醒已暂停';
+      aiAdvice = null;
+      aiQuestionAnswer = null;
+      _lastAdviceSignature = null;
+      _aiQuestionSignature = null;
+      _backendError = null;
+    } catch (error) {
+      _backendError = '无法开始本次穿戴标定：$error';
+      rethrow;
+    } finally {
+      _calibrationResetting = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
   void _clearAiQuestion() {
     aiQuestionAnswer = null;
     aiQuestionStatus = '请选择一个常见问题';
     _aiQuestionSignature = null;
   }
 
-  String get _currentRiskSignature =>
-      '${risk.riskType}|${risk.riskSide}|${risk.riskLevel}';
+  String get _currentMonitoringSignature => [
+        risk.riskType,
+        risk.riskSide,
+        risk.riskLevel,
+        regionalAnalysis?.baselineReady ?? false,
+        regionalAnalysis?.pressureAvailable ?? false,
+        regionalAnalysis?.temperatureAvailable ?? false,
+        left != null,
+        right != null,
+      ].join('|');
 
-  static double? _maximumTemperatureDelta(List<double>? values) {
+  static double? _maximumTemperatureDelta(List<double?>? values) {
     if (values == null || values.isEmpty) {
       return null;
     }
     var maximum = 0.0;
     for (final value in values) {
+      if (value == null) continue;
       final absolute = value.abs();
       if (absolute > maximum) {
         maximum = absolute;

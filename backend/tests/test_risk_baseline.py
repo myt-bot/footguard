@@ -9,6 +9,7 @@ from backend.app.services.risk_service import (
     PairMetric,
     _baseline_profile,
     _current_risk,
+    _current_risks,
     _pressure_metric_from_window,
     _regional_analysis,
     _signal,
@@ -26,7 +27,7 @@ def _metric(
     right_total: float = 0.26,
     left_distribution: tuple[float, ...] = LEFT_DISTRIBUTION,
     right_distribution: tuple[float, ...] = RIGHT_DISTRIBUTION,
-    temperature_delta_c: tuple[float, ...] = (1.2, 2.4, -1.8, 0.8),
+    temperature_delta_c: tuple[float | None, ...] = (1.2, 2.4, -1.8, 0.8),
     motion_state: str = "unavailable",
 ) -> PairMetric:
     total = max(left_total + right_total, 1e-9)
@@ -98,6 +99,19 @@ def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
     assert _baseline_profile(metrics).ready is False
 
 
+def test_baseline_rejects_too_few_responsive_channels_on_one_foot() -> None:
+    sparse_left = (0.34, 0.33, 0.33, 0.0, 0.0, 0.0)
+    metrics = [
+        _metric(index, left_distribution=sparse_left)
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is False
+    assert baseline.sample_count == BASELINE_MIN_SAMPLES
+
+
 def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
@@ -128,6 +142,100 @@ def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
     )
     assert _signal(normal_off_ground, baseline) is None
     assert _signal(single_foot_load, baseline) == ("left_load_bias", "left")
+
+
+def test_single_residual_pressure_point_cannot_create_load_bias() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    unloaded_right_residual = _metric(
+        BASELINE_MIN_SAMPLES + 3,
+        left_total=0.0,
+        right_total=0.12,
+        left_distribution=LEFT_DISTRIBUTION,
+        right_distribution=(0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    assert baseline.ready is True
+    assert _signal(unloaded_right_residual, baseline) is None
+
+
+def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    forefoot_heavy = (0.30, 0.25, 0.20, 0.15, 0.05, 0.05)
+    metrics = [
+        _metric(
+            100 + index,
+            left_total=0.45,
+            right_total=0.12,
+            left_distribution=forefoot_heavy,
+        )
+        for index in range(25)
+    ]
+
+    risks, _ = _current_risks(metrics, baseline)
+
+    assert {(risk.risk_type, risk.risk_side) for risk in risks} == {
+        ("left_load_bias", "left"),
+        ("forefoot_high", "left"),
+    }
+
+
+def test_residual_channel_is_raw_valid_but_excluded_from_analysis() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    diagnosed = replace(
+        baseline,
+        pressure_channel_contact_trust=(True,) * 8 + (False,) + (True,) * 3,
+    )
+
+    regional = _regional_analysis(
+        _metric(BASELINE_MIN_SAMPLES),
+        diagnosed,
+        baseline_trust=baseline.pressure_channel_trust,
+        residual_suspects=(False,) * 8 + (True,) + (False,) * 3,
+    )
+
+    assert regional.right_pressure_valid[2] is True
+    assert regional.right_pressure_baseline_trusted[2] is True
+    assert regional.right_pressure_analysis_valid[2] is False
+    assert regional.right_pressure_channel_status[2] == "residual_suspect"
+
+
+def test_residual_on_unloaded_foot_does_not_reverse_real_single_foot_bias() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    left_contact_with_right_residual = _metric(
+        BASELINE_MIN_SAMPLES + 4,
+        left_total=0.08,
+        right_total=0.12,
+        left_distribution=LEFT_DISTRIBUTION,
+        right_distribution=(0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    assert _signal(left_contact_with_right_residual, baseline) == (
+        "left_load_bias",
+        "left",
+    )
+
+
+def test_single_valid_temperature_pair_cannot_trigger_temperature_risk() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    single_valid_pair = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        temperature_delta_c=(8.0, None, None, None),
+    )
+
+    assert baseline.ready is True
+    assert _signal(single_valid_pair, baseline) is None
 
 
 def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
@@ -199,9 +307,9 @@ def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     )
 
     assert baseline.ready is False
-    # High-confidence fallback rules remain available during cold start, while
-    # the regional heatmap waits for the personal baseline.
-    assert _signal(forefoot, baseline) == ("forefoot_high", "left")
+    # A new wearing session must finish its personal pressure baseline before
+    # pressure risks or motor actions are enabled.
+    assert _signal(forefoot, baseline) is None
 
     regional = _regional_analysis(forefoot, baseline)
     assert regional.baseline_ready is False

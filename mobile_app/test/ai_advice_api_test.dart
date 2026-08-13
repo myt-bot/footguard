@@ -45,6 +45,10 @@ void main() {
       loadDiff: 0.31,
       temperatureDeltaMaxC: 2.6,
       baselineReady: true,
+      pressureAvailable: true,
+      temperatureAvailable: true,
+      leftConnected: true,
+      rightConnected: true,
     );
 
     expect(result.sourceLabel, 'DeepSeek 云端解释');
@@ -94,6 +98,56 @@ void main() {
     expect(result.sourceLabel, 'DeepSeek 云端回答');
     expect(result.question, '怎样判断已经改善？');
     expect(result.answer, '观察负载差是否持续下降。');
+    api.close();
+  });
+
+  test('free AI chat posts only a structured current-state summary', () async {
+    final client = MockClient((request) async {
+      expect(request.method, 'POST');
+      expect(request.url.path, '/api/v1/ai/chat');
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['question'], '温度不可用会影响压力判断吗？');
+      expect(body['pressure_available'], isTrue);
+      expect(body['temperature_available'], isFalse);
+      expect(body['valid_temperature_pairs'], 0);
+      expect(body.containsKey('frames'), isFalse);
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'protocol_version': 1,
+          'provider': 'local-safe-fallback',
+          'question': '温度不可用会影响压力判断吗？',
+          'answer': '不会。温度通道与压力显示、压力风险独立处理。',
+        })),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: client,
+    );
+
+    final result = await api.aiChat(
+      question: '温度不可用会影响压力判断吗？',
+      risk: const RiskState(
+        riskType: 'normal',
+        riskSide: 'none',
+        riskLevel: 0,
+        durationMs: 0,
+      ),
+      loadDiff: 0.02,
+      temperatureDeltaMaxC: null,
+      baselineReady: true,
+      pressureAvailable: true,
+      temperatureAvailable: false,
+      validTemperaturePairs: 0,
+      motionState: 'stationary',
+      leftConnected: true,
+      rightConnected: true,
+    );
+
+    expect(result.usedFallback, isTrue);
+    expect(result.answer, contains('独立处理'));
     api.close();
   });
 

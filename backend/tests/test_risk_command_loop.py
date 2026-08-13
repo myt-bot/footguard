@@ -15,6 +15,8 @@ if str(ROOT) not in sys.path:
 
 from backend.app.main import create_app
 from backend.app.models import Command, CommandAck, InterventionFeedback, RiskEvent
+from backend.app.schemas import RiskState
+from backend.app.services.command_service import ensure_combined_motor_command
 
 SAMPLE_DATA = ROOT / "sample_data"
 
@@ -86,16 +88,22 @@ def test_normal_scenarios_do_not_create_alarm_or_motor_command(
 
 
 @pytest.mark.parametrize(
-    ("scenario", "risk_type", "side"),
+    ("scenario", "risk_type", "side", "pattern", "duration_ms"),
     [
-        ("left_load_bias", "left_load_bias", "left"),
-        ("right_load_bias", "right_load_bias", "right"),
-        ("left_forefoot_high", "forefoot_high", "left"),
-        ("left_temperature_rise", "temperature_asymmetry", "left"),
+        ("left_load_bias", "left_load_bias", "left", "double", 800),
+        ("right_load_bias", "right_load_bias", "right", "double", 800),
+        ("left_forefoot_high", "forefoot_high", "left", "long", 1_500),
+        ("left_temperature_rise", "temperature_asymmetry", "left", "short", 500),
     ],
 )
 def test_sustained_risk_creates_one_event_and_motor_vibration_command(
-    scenario: str, risk_type: str, side: str, client: TestClient, app
+    scenario: str,
+    risk_type: str,
+    side: str,
+    pattern: str,
+    duration_ms: int,
+    client: TestClient,
+    app,
 ) -> None:
     calibrate(client)
     result = upload(client, scenario_frames(scenario))
@@ -107,8 +115,8 @@ def test_sustained_risk_creates_one_event_and_motor_vibration_command(
         assert event.risk_side == side
         assert command.event_id == event.event_id
         assert command.target == side
-        assert command.pattern == "long"
-        assert command.duration_ms == 1_500
+        assert command.pattern == pattern
+        assert command.duration_ms == duration_ms
         assert command.reason_code == risk_type
 
 
@@ -130,6 +138,92 @@ def test_pressure_risk_is_invariant_to_overall_weight_scale(
     assert result["latest_risk"] == "left_load_bias"
     realtime = client.get("/api/v1/realtime").json()
     assert realtime["load_bias"] > 0.25
+
+
+@pytest.mark.parametrize(
+    "invalid_flags",
+    [0x40, 0x80 | 0x100, 0x3C0],
+)
+def test_temperature_dropout_never_blocks_pressure_risk(
+    invalid_flags: int,
+    client: TestClient,
+) -> None:
+    calibrate(client)
+    frames = scenario_frames("left_load_bias")
+    for frame in frames:
+        frame["quality_flags"] |= invalid_flags
+        for index, bit in enumerate((0x40, 0x80, 0x100, 0x200)):
+            if invalid_flags & bit:
+                frame["temperature"][index] = 0.0
+
+    result = upload(client, frames)
+    assert result["latest_risk"] == "left_load_bias"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["pressure_available"] is True
+    assert realtime["risk"]["risk_type"] == "left_load_bias"
+    if invalid_flags == 0x3C0:
+        assert realtime["temperature_available"] is False
+        assert realtime["regional_analysis"]["temperature_delta_c"] == [
+            None,
+            None,
+            None,
+            None,
+        ]
+
+
+def test_one_invalid_pressure_channel_still_allows_load_bias_risk(
+    client: TestClient,
+) -> None:
+    calibrate(client)
+    frames = scenario_frames("left_load_bias")
+    for frame in frames:
+        if frame["side"] == "left":
+            frame["pressure"][5] = 0.0
+            frame["quality_flags"] |= 0x20
+
+    result = upload(client, frames)
+
+    assert result["latest_risk"] == "left_load_bias"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["pressure_available"] is True
+    assert realtime["regional_analysis"]["left_pressure_valid"][5] is False
+
+
+def test_too_few_pressure_channels_pause_pressure_risk(
+    client: TestClient,
+) -> None:
+    calibrate(client)
+    frames = scenario_frames("left_load_bias")
+    for frame in frames:
+        if frame["side"] == "left":
+            for index in (0, 1, 2):
+                frame["pressure"][index] = 0.0
+            frame["quality_flags"] |= 0x07
+
+    result = upload(client, frames)
+
+    assert result["latest_risk"] == "normal"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["pressure_available"] is False
+    assert realtime["regional_analysis"]["pressure_available"] is False
+
+
+def test_one_temperature_pair_is_insufficient_for_temperature_risk(
+    client: TestClient,
+) -> None:
+    calibrate(client)
+    frames = scenario_frames("left_temperature_rise")
+    for frame in frames:
+        frame["quality_flags"] |= 0x380
+        for index in (1, 2, 3):
+            frame["temperature"][index] = 0.0
+
+    result = upload(client, frames)
+
+    assert result["latest_risk"] == "normal"
+    realtime = client.get("/api/v1/realtime").json()
+    assert realtime["temperature_available"] is True
+    assert realtime["regional_analysis"]["temperature_delta_c"][0] is not None
 
 
 def test_stable_pairs_build_personal_baseline(client: TestClient) -> None:
@@ -184,6 +278,79 @@ def test_warning_escalation_uses_distinct_double_then_long_patterns(
         assert persistent.command_id != warning.command_id
         assert repeated_persistent.command_id == persistent.command_id
         assert session.scalar(select(func.count()).select_from(Command)) == 2
+
+
+def test_combined_motor_uses_side_union_and_risk_pattern_priority(app) -> None:
+    with app.state.session_factory() as session:
+        event = RiskEvent(
+            event_id="evt_combined_motor",
+            risk_type="forefoot_high",
+            risk_side="both",
+            risk_level=2,
+            started_at_ms=1,
+            duration_ms=7_600,
+            status="active",
+        )
+        session.add(event)
+        session.commit()
+
+        command = ensure_combined_motor_command(
+            session,
+            event,
+            [
+                RiskState(
+                    risk_type="right_load_bias",
+                    risk_side="right",
+                    risk_level=2,
+                    duration_ms=7_600,
+                ),
+                RiskState(
+                    risk_type="forefoot_high",
+                    risk_side="left",
+                    risk_level=2,
+                    duration_ms=7_200,
+                ),
+            ],
+        )
+
+        assert command is not None
+        assert command.target == "both"
+        assert command.pattern == "long"
+        assert command.duration_ms == 1_500
+        assert command.reason_code == "forefoot_high"
+
+
+def test_temperature_motor_targets_hotter_side_with_short_pattern(app) -> None:
+    with app.state.session_factory() as session:
+        event = RiskEvent(
+            event_id="evt_temperature_motor",
+            risk_type="temperature_asymmetry",
+            risk_side="right",
+            risk_level=2,
+            started_at_ms=1,
+            duration_ms=6_000,
+            status="active",
+        )
+        session.add(event)
+        session.commit()
+
+        command = ensure_combined_motor_command(
+            session,
+            event,
+            [
+                RiskState(
+                    risk_type="temperature_asymmetry",
+                    risk_side="right",
+                    risk_level=2,
+                    duration_ms=6_000,
+                )
+            ],
+        )
+
+        assert command is not None
+        assert command.target == "right"
+        assert command.pattern == "short"
+        assert command.duration_ms == 500
 
 
 def test_new_sync_window_creates_a_new_motor_reminder(
@@ -262,7 +429,7 @@ def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> 
     split = 130  # first 13 seconds contain the sustained-bias phase
     upload(client, frames[:split])
     pending = client.get("/api/v1/command/pending?target=left").json()["command"]
-    assert pending["pattern"] == "long"
+    assert pending["pattern"] == "double"
     now_ms = int(time() * 1000)
     ack = {
         "protocol_version": 1,

@@ -218,7 +218,7 @@ class _HistoryEventCard extends StatelessWidget {
           child: Icon(_riskIcon(event.riskType), color: severityColor),
         ),
         title: Text(
-          _riskLabel(event.riskType),
+          event.activeRisks.length > 1 ? '组合风险事件' : _riskLabel(event.riskType),
           style: const TextStyle(fontWeight: FontWeight.w800),
         ),
         subtitle: Padding(
@@ -234,6 +234,39 @@ class _HistoryEventCard extends StatelessWidget {
         children: [
           const Divider(height: 1),
           const SizedBox(height: 14),
+          if (event.activeRisks.length > 1) ...[
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '本次同时存在',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+            ),
+            const SizedBox(height: 8),
+            ...event.activeRisks.map(
+              (risk) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    Icon(_riskIcon(risk.riskType),
+                        size: 17, color: severityColor),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        '${_riskLabel(risk.riskType)} · ${_sideLabel(risk.riskSide)}',
+                      ),
+                    ),
+                    Text(
+                      '${_levelLabel(risk.riskLevel)} · ${_formatDuration(risk.durationMs)}',
+                      style: const TextStyle(
+                          fontSize: 12, color: Color(0xFF60706F)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           Row(
             children: [
               Expanded(

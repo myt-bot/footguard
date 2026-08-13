@@ -87,9 +87,14 @@ class RiskState(StrictModel):
 class AiAdviceRequest(StrictModel):
     protocol_version: Literal[1]
     risk: RiskState
+    active_risks: list[RiskState] = Field(default_factory=list)
     load_diff: float | None = Field(default=None, ge=0)
     temperature_delta_max_c: float | None = Field(default=None, ge=0)
     baseline_ready: bool = False
+    pressure_available: bool = True
+    temperature_available: bool = True
+    left_connected: bool = True
+    right_connected: bool = True
 
 
 class AiAdviceResponse(StrictModel):
@@ -124,6 +129,23 @@ class AiQuestionResponse(StrictModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class AiChatRequest(AiAdviceRequest):
+    question: str = Field(min_length=1, max_length=120)
+    pressure_available: bool = False
+    temperature_available: bool = False
+    valid_temperature_pairs: int = Field(default=0, ge=0, le=4)
+    motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    left_connected: bool = False
+    right_connected: bool = False
+
+
+class AiChatResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=1, max_length=120)
+    answer: str = Field(min_length=1, max_length=500)
+
+
 class RealtimeResponse(StrictModel):
     left: FootFrame | None
     right: FootFrame | None
@@ -132,7 +154,10 @@ class RealtimeResponse(StrictModel):
     load_bias: float | None
     load_diff: float | None
     motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    pressure_available: bool = False
+    temperature_available: bool = False
     risk: RiskState
+    active_risks: list[RiskState] = Field(default_factory=list)
     regional_analysis: "RegionalAnalysis | None" = None
 
 
@@ -143,7 +168,23 @@ class RegionalAnalysis(StrictModel):
     baseline_required_samples: int = Field(gt=0)
     left_pressure_scores: list[float] = Field(min_length=6, max_length=6)
     right_pressure_scores: list[float] = Field(min_length=6, max_length=6)
-    temperature_delta_c: list[float] = Field(min_length=4, max_length=4)
+    pressure_available: bool = False
+    left_pressure_valid: list[bool] = Field(min_length=6, max_length=6)
+    right_pressure_valid: list[bool] = Field(min_length=6, max_length=6)
+    left_pressure_baseline_trusted: list[bool] = Field(min_length=6, max_length=6)
+    right_pressure_baseline_trusted: list[bool] = Field(min_length=6, max_length=6)
+    left_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
+    right_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
+    left_pressure_channel_status: list[
+        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+    ] = Field(min_length=6, max_length=6)
+    right_pressure_channel_status: list[
+        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+    ] = Field(min_length=6, max_length=6)
+    temperature_available: bool = False
+    left_temperature_valid: list[bool] = Field(min_length=4, max_length=4)
+    right_temperature_valid: list[bool] = Field(min_length=4, max_length=4)
+    temperature_delta_c: list[float | None] = Field(min_length=4, max_length=4)
     left_temperature_scores: list[float] = Field(min_length=4, max_length=4)
     right_temperature_scores: list[float] = Field(min_length=4, max_length=4)
 
@@ -218,6 +259,14 @@ class CalibrationStatus(StrictModel):
     sample_count: int = Field(ge=0)
     required_samples: int = Field(gt=0)
     reset_at_ms: int | None = Field(default=None, ge=0)
+    status_reason: Literal[
+        "ready",
+        "waiting_for_data",
+        "pressure_unavailable",
+        "not_loaded",
+        "moving",
+        "unstable",
+    ] = "waiting_for_data"
 
 
 class RiskEventOut(StrictModel):
@@ -235,6 +284,7 @@ class RiskEventOut(StrictModel):
     effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
     recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
+    active_risks: list[RiskState] = Field(default_factory=list)
 
 
 class InterventionFeedbackRequest(StrictModel):

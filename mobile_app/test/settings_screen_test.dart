@@ -149,15 +149,15 @@ void main() {
             onChanged: (_) {},
             calibrationStatusLoader: (_) async => const CalibrationStatus(
               baselineReady: true,
-              sampleCount: 15,
-              requiredSamples: 15,
+              sampleCount: 40,
+              requiredSamples: 40,
             ),
             calibrationResetter: (_) async {
               resetCalls += 1;
               return const CalibrationStatus(
                 baselineReady: false,
                 sampleCount: 0,
-                requiredSamples: 15,
+                requiredSamples: 40,
                 resetAtMs: 1785000000000,
               );
             },
@@ -169,10 +169,10 @@ void main() {
     await _scrollUntilVisible(tester, find.byTooltip('刷新基线状态'));
     await tester.tap(find.byTooltip('刷新基线状态'));
     await tester.pumpAndSettle();
-    expect(find.text('已完成个人基线学习'), findsOneWidget);
+    expect(find.text('本次穿戴基线已完成，压力风险与马达已启用'), findsOneWidget);
 
-    await _scrollUntilVisible(tester, find.text('重新校准个人基线'));
-    await tester.tap(find.text('重新校准个人基线'));
+    await _scrollUntilVisible(tester, find.text('新体验者 / 重新穿戴'));
+    await tester.tap(find.text('新体验者 / 重新穿戴'));
     await tester.pumpAndSettle();
     expect(find.text('重新学习个人基线？'), findsOneWidget);
     expect(resetCalls, 0);
@@ -180,6 +180,6 @@ void main() {
     await tester.tap(find.text('确认重新校准'));
     await tester.pumpAndSettle();
     expect(resetCalls, 1);
-    expect(find.textContaining('学习中：0/15'), findsOneWidget);
+    expect(find.textContaining('学习中：0/40'), findsOneWidget);
   });
 }

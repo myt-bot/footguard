@@ -179,7 +179,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (context) => AlertDialog(
         title: const Text('重新学习个人基线？'),
         content: const Text(
-          '请在传感器固定、双脚自然站立且数据稳定时操作。'
+          '更换体验者或重新穿鞋后都需要重新建立本次穿戴基线。'
+          '确认后请双脚平行自然站立约 8–12 秒。'
           '重新校准不会删除历史事件，但会结束当前风险并使待执行马达命令失效。',
         ),
         actions: [
@@ -205,7 +206,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('基线已重置，请自然站立完成学习')),
+        const SnackBar(content: Text('已开始新体验者标定，请双脚平行自然站立')),
       );
     } catch (error) {
       if (!mounted) return;
@@ -216,6 +217,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
     }
   }
+
+  String _calibrationReason(String reason) => switch (reason) {
+        'pressure_unavailable' => '压力通道不可用，请先检查连接和传感器。',
+        'not_loaded' => '等待双脚稳定承重。',
+        'moving' => '当前移动较大，请保持自然站立。',
+        'unstable' => '数据波动较大，请保持双脚平行并放松站立。',
+        'ready' => '标定已完成。',
+        _ => '等待双脚同步数据。',
+      };
 
   void _restoreDefaults() {
     const defaults = AppSettings();
@@ -383,10 +393,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 12),
         const _InfoPanel(
           icon: Icons.science_outlined,
-          title: '当前竞赛原型规则',
-          body: '个人基线至少需要 15 组稳定双足承重样本；偏载相对基线差值达到 '
-              '0.25、前掌占比较基线增加 0.12，或同位置左右校正温差达到 '
-              '2.0°C 时开始计时。持续 3/6/10 秒分别进入关注、警告、持续风险；'
+          title: '当前穿戴自适应规则',
+          body: '每次更换体验者或重新穿鞋后，先采集 40 组稳定双足承重样本。'
+              '偏载使用左右载荷对数比相对本次基线的变化，前掌使用足内占比变化，'
+              '并结合基线波动自动提高噪声较大场景的阈值。持续 3/6/10 秒分别进入关注、警告、持续风险；'
               '等级 2 发送双振 800 ms，等级 3 发送长振 1500 ms。'
               '以上为工程原型规则，不是医疗诊断标准。',
         ),
@@ -404,7 +414,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        '个人基线',
+                        '本次穿戴基线',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
@@ -426,7 +436,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _calibrationStatus == null
                       ? '点击刷新，从后端读取当前学习进度。'
                       : _calibrationStatus!.baselineReady
-                          ? '已完成个人基线学习'
+                          ? '本次穿戴基线已完成，压力风险与马达已启用'
                           : '学习中：${_calibrationStatus!.sampleCount}/'
                               '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
                   key: const ValueKey('calibration-status'),
@@ -436,6 +446,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 8),
                   LinearProgressIndicator(
                     value: _calibrationStatus!.progress,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _calibrationReason(_calibrationStatus!.statusReason),
+                    style: const TextStyle(
+                      color: Color(0xFF718096),
+                      fontSize: 12,
+                    ),
                   ),
                 ],
                 if (_calibrationError != null) ...[
@@ -453,7 +471,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onPressed:
                         _loadingCalibration ? null : _confirmResetCalibration,
                     icon: const Icon(Icons.restart_alt_rounded),
-                    label: const Text('重新校准个人基线'),
+                    label: const Text('新体验者 / 重新穿戴'),
                   ),
                 ),
               ],

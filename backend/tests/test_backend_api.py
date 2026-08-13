@@ -107,7 +107,7 @@ def test_calibration_status_and_reset_start_a_new_learning_window(
     assert initial_status.json()["sample_count"] == 0
 
     base = sensor_batch()
-    for index in range(15):
+    for index in range(40):
         frames = []
         for source in base["frames"]:
             frame = dict(source)
@@ -248,7 +248,7 @@ def test_realtime_reports_incomplete_after_side_skew_exceeds_continuity_gap(
         pytest.param(3, 0x00000200, id="T4"),
     ],
 )
-def test_temperature_invalid_flag_blocks_pairing(
+def test_temperature_invalid_flag_only_degrades_that_channel(
     temperature_index: int,
     invalid_flag: int,
     client: TestClient,
@@ -259,11 +259,14 @@ def test_temperature_invalid_flag_blocks_pairing(
 
     response = client.post("/api/v1/sensor/batch", json=payload)
     assert response.status_code == 200
-    assert response.json()["latest_risk"] == "data_incomplete"
+    assert response.json()["latest_risk"] == "normal"
 
     realtime = client.get("/api/v1/realtime").json()
-    assert realtime["risk"]["risk_type"] == "data_incomplete"
-    assert realtime["regional_analysis"] is None
+    assert realtime["risk"]["risk_type"] == "normal"
+    assert realtime["pressure_available"] is True
+    assert realtime["regional_analysis"] is not None
+    assert realtime["regional_analysis"]["temperature_delta_c"][temperature_index] is None
+    assert realtime["regional_analysis"]["left_temperature_valid"][temperature_index] is False
 
 
 def test_low_battery_does_not_block_pressure_or_temperature_pairing(
@@ -346,6 +349,83 @@ def test_backend_restart_expires_pending_commands(tmp_path: Path) -> None:
         restarted_app.state.engine.dispose()
 
 
+def test_calibration_profile_survives_backend_restart(tmp_path: Path) -> None:
+    database_path = tmp_path / "restart-calibration.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    first_app = create_app(database_url)
+    with TestClient(first_app) as client:
+        base = sensor_batch()
+        for index in range(40):
+            frames = []
+            for source in base["frames"]:
+                frame = dict(source)
+                frame["packet_seq"] = source["packet_seq"] + index
+                frame["timestamp_ms"] = source["timestamp_ms"] + index * 200
+                frames.append(frame)
+            response = client.post(
+                "/api/v1/sensor/batch",
+                json={
+                    "protocol_version": 1,
+                    "app_received_at_ms": frames[-1]["timestamp_ms"],
+                    "frames": frames,
+                },
+            )
+            assert response.status_code == 200
+        assert client.get("/api/v1/calibration/status").json()["baseline_ready"] is True
+    first_app.state.engine.dispose()
+
+    restarted_app = create_app(database_url)
+    try:
+        with TestClient(restarted_app) as client:
+            status = client.get("/api/v1/calibration/status").json()
+            assert status["baseline_ready"] is True
+            assert status["sample_count"] == 40
+    finally:
+        restarted_app.state.engine.dispose()
+
+
+def test_saved_baseline_is_rejected_when_device_pair_changes(
+    client: TestClient,
+) -> None:
+    base = sensor_batch()
+    for index in range(40):
+        frames = []
+        for source in base["frames"]:
+            frame = dict(source)
+            frame["packet_seq"] = source["packet_seq"] + index
+            frame["timestamp_ms"] = source["timestamp_ms"] + index * 200
+            frames.append(frame)
+        assert client.post(
+            "/api/v1/sensor/batch",
+            json={
+                "protocol_version": 1,
+                "app_received_at_ms": frames[-1]["timestamp_ms"],
+                "frames": frames,
+            },
+        ).status_code == 200
+    assert client.get("/api/v1/calibration/status").json()["baseline_ready"] is True
+
+    changed_frames = []
+    for source in base["frames"]:
+        frame = dict(source)
+        frame["device_id"] = f"new_{frame['side']}"
+        frame["packet_seq"] += 100
+        frame["timestamp_ms"] += 100_000
+        changed_frames.append(frame)
+    assert client.post(
+        "/api/v1/sensor/batch",
+        json={
+            "protocol_version": 1,
+            "app_received_at_ms": changed_frames[-1]["timestamp_ms"],
+            "frames": changed_frames,
+        },
+    ).status_code == 200
+
+    status = client.get("/api/v1/calibration/status").json()
+    assert status["baseline_ready"] is False
+    assert status["sample_count"] == 1
+
+
 def test_expired_command_is_not_returned(client: TestClient, app) -> None:
     add_command(app, expire_offset_ms=-1)
     assert client.get("/api/v1/command/pending?target=left").json() == {"command": None}
@@ -369,6 +449,41 @@ def test_ack_updates_command_and_replay_is_idempotent(client: TestClient, app) -
     assert client.post("/api/v1/ack", json=payload).json() == {"recorded": True}
     with app.state.session_factory() as session:
         assert session.get(Command, "cmd_test_1").status == "executed"
+
+
+def test_bilateral_ack_waits_for_both_devices(client: TestClient, app) -> None:
+    now_ms = int(time() * 1000)
+    payload = DeviceCommand(
+        command_id="cmd_test_both",
+        target="both",
+        pattern="long",
+        duration_ms=1_500,
+        expire_at_ms=now_ms + 60_000,
+        reason_code="forefoot_high",
+    )
+    with app.state.session_factory() as session:
+        create_command(session, payload, now_ms)
+
+    def ack(device_id: str) -> dict:
+        return {
+            "protocol_version": 1,
+            "command_id": "cmd_test_both",
+            "device_id": device_id,
+            "status": "executed",
+            "ack_at_ms": now_ms + 100,
+            "executed_at_ms": now_ms + 100,
+            "error_code": "none",
+        }
+
+    assert client.post("/api/v1/ack", json=ack("foot_left_001")).status_code == 200
+    with app.state.session_factory() as session:
+        assert session.get(Command, "cmd_test_both").status == "pending"
+
+    assert client.post("/api/v1/ack", json=ack("foot_right_001")).status_code == 200
+    with app.state.session_factory() as session:
+        command = session.get(Command, "cmd_test_both")
+        assert command.status == "executed"
+        assert command.executed_at_ms == now_ms + 100
 
 
 def test_ack_unknown_command_returns_404(client: TestClient) -> None:

@@ -11,22 +11,34 @@ class FootPressureView extends StatelessWidget {
     required this.frame,
     this.oppositeFrame,
     this.pressureScores,
+    this.pressureValid,
+    this.oppositePressureValid,
+    this.pressureAnalysisValid,
+    this.pressureChannelStatus,
     this.temperatureScores,
     this.temperatureDeltaC,
     this.baselineReady = false,
     this.baselineSampleCount = 0,
-    this.baselineRequiredSamples = 15,
+    this.baselineRequiredSamples = 40,
+    this.showPressureAbnormality = false,
+    this.showTemperatureAbnormality = true,
   });
 
   final String side;
   final FootFrame? frame;
   final FootFrame? oppositeFrame;
   final List<double>? pressureScores;
+  final List<bool>? pressureValid;
+  final List<bool>? oppositePressureValid;
+  final List<bool>? pressureAnalysisValid;
+  final List<String>? pressureChannelStatus;
   final List<double>? temperatureScores;
-  final List<double>? temperatureDeltaC;
+  final List<double?>? temperatureDeltaC;
   final bool baselineReady;
   final int baselineSampleCount;
   final int baselineRequiredSamples;
+  final bool showPressureAbnormality;
+  final bool showTemperatureAbnormality;
 
   static const _defaultDistribution = <double>[
     0.16,
@@ -52,20 +64,44 @@ class FootPressureView extends StatelessWidget {
   ];
 
   // Competition-prototype display gate; recalibrate after final insole assembly.
+  // One unloaded FSR can retain a high residual. Require multi-point contact
+  // before using pressure data to paint an abnormal region.
   static const double _minimumFallbackPressure = 0.01;
+  static const int _minimumContactChannels = 2;
 
-  // Pressure and temperature form one diabetic-foot assessment frame. If the
-  // current frame is incomplete, do not render cached backend risk scores.
-  bool get _sensorFrameValid =>
-      frame != null &&
-      frame!.pressureChannelsValid &&
-      frame!.temperatureChannelsValid;
+  bool _pressureChannelValid(int index) {
+    final backendValidity = pressureValid;
+    if (backendValidity != null && backendValidity.length == 6) {
+      return backendValidity[index];
+    }
+    return frame?.pressureChannelValid(index) == true;
+  }
+
+  bool _oppositePressureChannelValid(int index) {
+    final backendValidity = oppositePressureValid;
+    if (backendValidity != null && backendValidity.length == 6) {
+      return backendValidity[index];
+    }
+    return oppositeFrame?.pressureChannelValid(index) == true;
+  }
+
+  bool _pressureChannelAnalysisValid(int index) {
+    final validity = pressureAnalysisValid;
+    return validity == null || validity.length != 6 || validity[index];
+  }
 
   bool get _pressureContactPresent {
-    if (!_sensorFrameValid || frame!.pressure.length != 6) {
+    if (frame == null || frame!.pressure.length != 6) {
       return false;
     }
-    return frame!.pressure.reduce(math.max) >= _minimumFallbackPressure;
+    final validValues = [
+      for (var index = 0; index < 6; index++)
+        if (_pressureChannelValid(index)) frame!.pressure[index],
+    ];
+    return validValues
+            .where((value) => value >= _minimumFallbackPressure)
+            .length >=
+        _minimumContactChannels;
   }
 
   List<double> get _fallbackPressureScores {
@@ -103,22 +139,45 @@ class FootPressureView extends StatelessWidget {
   }
 
   List<double> get _resolvedPressureScores {
-    if (!_pressureContactPresent) {
+    if (!_pressureContactPresent || !showPressureAbnormality) {
       return List.filled(6, 0.0);
     }
-    // The BLE frame is the 5 Hz display source. Backend regional scores are
-    // intentionally slower because they are derived from a smoothed personal
-    // baseline. Rendering those cached scores made the heatmap freeze and jump
-    // even while the current BLE pressure was changing normally.
-    //
-    // Keep backend scores for risk decisions, event history and motor commands;
-    // use the current paired BLE frame for the live visual response.
-    return _fallbackPressureScores;
+    final values = pressureScores;
+    return values != null && values.length == 6
+        ? List.generate(
+            6,
+            (index) => _pressureChannelAnalysisValid(index)
+                ? values[index].clamp(0.0, 1.0).toDouble()
+                : 0.0,
+            growable: false,
+          )
+        : _fallbackPressureScores;
+  }
+
+  List<double> get _pressureIntensity {
+    final current = frame?.pressure;
+    if (current == null || current.length != 6 || !_pressureContactPresent) {
+      return List.filled(6, 0.0);
+    }
+    final allValidValues = <double>[
+      for (var index = 0; index < 6; index++)
+        if (_pressureChannelValid(index)) current[index],
+      if (oppositeFrame?.pressure.length == 6)
+        for (var index = 0; index < 6; index++)
+          if (_oppositePressureChannelValid(index))
+            oppositeFrame!.pressure[index],
+    ];
+    final maximum =
+        allValidValues.isEmpty ? 0.0 : allValidValues.reduce(math.max);
+    if (maximum <= 0) return List.filled(6, 0.0);
+    return List.generate(6, (index) {
+      if (!_pressureChannelValid(index)) return 0.0;
+      return (current[index] / maximum).clamp(0.0, 1.0).toDouble();
+    }, growable: false);
   }
 
   List<double> get _fallbackTemperatureScores {
-    if (frame?.temperatureChannelsValid != true ||
-        oppositeFrame?.temperatureChannelsValid != true) {
+    if (frame == null || oppositeFrame == null) {
       return List.filled(4, 0.0);
     }
     final current = frame?.temperature;
@@ -129,22 +188,28 @@ class FootPressureView extends StatelessWidget {
         peer.length != 4) {
       return List.filled(4, 0.0);
     }
-    return List.generate(
-      4,
-      (index) =>
-          ((current[index] - peer[index]) / 2.0).clamp(0.0, 1.0).toDouble(),
-    );
+    return List.generate(4, (index) {
+      if (frame?.temperatureChannelValid(index) != true ||
+          oppositeFrame?.temperatureChannelValid(index) != true) {
+        return 0.0;
+      }
+      return ((current[index] - peer[index]) / 2.0).clamp(0.0, 1.0).toDouble();
+    });
   }
 
   List<double> get _resolvedTemperatureScores {
-    if (frame?.temperatureChannelsValid != true) {
+    if (!showTemperatureAbnormality || frame == null) {
       return List.filled(4, 0.0);
     }
     final values = temperatureScores;
     return values != null && values.length == 4
-        ? values
-            .map((value) => value.clamp(0.0, 1.0).toDouble())
-            .toList(growable: false)
+        ? List.generate(
+            4,
+            (index) => frame?.temperatureChannelValid(index) == true
+                ? values[index].clamp(0.0, 1.0).toDouble()
+                : 0.0,
+            growable: false,
+          )
         : _fallbackTemperatureScores;
   }
 
@@ -169,14 +234,46 @@ class FootPressureView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scores = _resolvedPressureScores;
+    final riskScores = _resolvedPressureScores;
+    final pressureIntensity = _pressureIntensity;
     final temperatureSeverity = _resolvedTemperatureScores;
-    final maximum = scores.reduce(math.max);
+    final maximum = math.max(
+      riskScores.reduce(math.max),
+      temperatureSeverity.reduce(math.max),
+    );
     final abnormalIndexes = [
-      for (var index = 0; index < scores.length; index++)
-        if (scores[index] >= 0.25) index,
-    ]..sort((left, right) => scores[right].compareTo(scores[left]));
+      for (var index = 0; index < riskScores.length; index++)
+        if (riskScores[index] >= 0.25) index,
+    ]..sort((left, right) => riskScores[right].compareTo(riskScores[left]));
     final total = frame?.totalLoad ?? 0.0;
+    final validPressureCount = frame == null
+        ? 0
+        : List.generate(6, _pressureChannelValid)
+            .where((valid) => valid)
+            .length;
+    final channelStatuses = pressureChannelStatus;
+    final rawInvalidCount = channelStatuses == null
+        ? 6 - validPressureCount
+        : channelStatuses.where((value) => value == 'raw_invalid').length;
+    final uncoveredCount = channelStatuses
+            ?.where((value) => value == 'uncovered_in_baseline')
+            .length ??
+        0;
+    final residualCount =
+        channelStatuses?.where((value) => value == 'residual_suspect').length ??
+            0;
+    final validTemperatureCount = frame == null
+        ? 0
+        : List.generate(4, frame!.temperatureChannelValid)
+            .where((valid) => valid)
+            .length;
+    final pressureStatus = frame == null
+        ? '等待压力数据'
+        : validPressureCount < 4
+            ? '压力不可用'
+            : !_pressureContactPresent
+                ? '未承重'
+                : null;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 13),
@@ -196,14 +293,14 @@ class FootPressureView extends StatelessWidget {
                     ),
               ),
               const Spacer(),
-              _LevelBadge(score: maximum),
+              _LevelBadge(score: maximum, statusLabel: pressureStatus),
             ],
           ),
           const SizedBox(height: 5),
           Text(
             baselineReady
-                ? '依据：实时BLE压力 + 个人基线风险判定 + 左右镜像同区对比'
-                : '依据：布局参考分布 + 左右镜像同区对比'
+                ? '颜色显示实时受力；异常描边依据本次穿戴基线与左右同区对比'
+                : '颜色显示实时受力；压力风险将在本次穿戴基线完成后启用'
                     '（基线学习中 $baselineSampleCount/'
                     '$baselineRequiredSamples）',
             style: const TextStyle(color: Color(0xFF718096), fontSize: 11),
@@ -216,7 +313,13 @@ class FootPressureView extends StatelessWidget {
               child: CustomPaint(
                 painter: _FootMapPainter(
                   side: side,
-                  pressureScores: scores,
+                  pressureIntensity: pressureIntensity,
+                  pressureRiskScores: riskScores,
+                  pressureValid: List.generate(
+                    6,
+                    _pressureChannelValid,
+                    growable: false,
+                  ),
                   temperatureScores: temperatureSeverity,
                 ),
               ),
@@ -249,12 +352,18 @@ class FootPressureView extends StatelessWidget {
                 Expanded(
                   child: Text(
                     abnormalIndexes.isEmpty
-                        ? '当前未发现明显的相对压力异常'
+                        ? frame == null
+                            ? '等待压力数据'
+                            : validPressureCount < 4
+                                ? '有效压力点不足，已暂停本脚压力判断'
+                                : !_pressureContactPresent
+                                    ? '当前未承重或受力过低'
+                                    : '当前未发现明显的相对压力异常'
                         : '相对异常区域：${abnormalIndexes.take(3).map((index) {
                             final share = total <= 0
                                 ? 0.0
                                 : frame!.pressure[index] / total * 100;
-                            return '${_pressureZones[index]}（占比 ${share.toStringAsFixed(1)}%，异常程度 ${(scores[index] * 100).round()}%）';
+                            return '${_pressureZones[index]}（占比 ${share.toStringAsFixed(1)}%，变化程度 ${(riskScores[index] * 100).round()}%）';
                           }).join('、')}',
                     style: const TextStyle(fontSize: 12, height: 1.45),
                   ),
@@ -262,12 +371,56 @@ class FootPressureView extends StatelessWidget {
               ],
             ),
           ),
+          if (frame != null && rawInvalidCount > 0) ...[
+            const SizedBox(height: 7),
+            Text(
+              '$rawInvalidCount 个压力点数据不可用，已置灰且不按零压力参与计算',
+              style: const TextStyle(
+                color: Color(0xFF9A6200),
+                fontSize: 11,
+              ),
+            ),
+          ],
+          if (frame != null && uncoveredCount > 0) ...[
+            const SizedBox(height: 7),
+            Text(
+              '$uncoveredCount 个压力点本次标定未覆盖，保留实时显示但未纳入区域风险分析',
+              style: const TextStyle(color: Color(0xFF9A6200), fontSize: 11),
+            ),
+          ],
+          if (frame != null && residualCount > 0) ...[
+            const SizedBox(height: 7),
+            Text(
+              '$residualCount 个压力点检测到稳定空载残余，保留显示但已从压力风险中排除',
+              style: const TextStyle(color: Color(0xFF9A6200), fontSize: 11),
+            ),
+          ],
           const SizedBox(height: 11),
-          Text(
-            '温度测点位置',
-            style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w800,
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '温度测点位置',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
                 ),
+              ),
+              Text(
+                validTemperatureCount == 0
+                    ? '温度不可用'
+                    : validTemperatureCount < 4
+                        ? '$validTemperatureCount/4 可用'
+                        : '4/4 可用',
+                style: TextStyle(
+                  color: validTemperatureCount == 4
+                      ? const Color(0xFF168A70)
+                      : const Color(0xFF9A6200),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 7),
           for (var row = 0; row < 2; row++) ...[
@@ -299,18 +452,21 @@ class FootPressureView extends StatelessWidget {
 }
 
 class _LevelBadge extends StatelessWidget {
-  const _LevelBadge({required this.score});
+  const _LevelBadge({required this.score, this.statusLabel});
 
   final double score;
+  final String? statusLabel;
 
   @override
   Widget build(BuildContext context) {
-    final (label, color) = switch (score) {
-      >= 0.75 => ('严重异常', const Color(0xFFD62F2F)),
-      >= 0.50 => ('明显异常', const Color(0xFFF06A24)),
-      >= 0.25 => ('需关注', const Color(0xFFE5A11B)),
-      _ => ('相对正常', const Color(0xFF168A70)),
-    };
+    final (label, color) = statusLabel != null
+        ? (statusLabel!, const Color(0xFF718096))
+        : switch (score) {
+            >= 0.75 => ('严重异常', const Color(0xFFD62F2F)),
+            >= 0.50 => ('明显异常', const Color(0xFFF06A24)),
+            >= 0.25 => ('需关注', const Color(0xFFE5A11B)),
+            _ => ('相对正常', const Color(0xFF168A70)),
+          };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
@@ -352,11 +508,11 @@ class _RelativeLegend extends StatelessWidget {
         const Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('相对正常',
+            Text('低受力',
                 style: TextStyle(fontSize: 10, color: Color(0xFF718096))),
-            Text('相对基线/对侧的变化程度',
+            Text('当前相对受力强度',
                 style: TextStyle(fontSize: 10, color: Color(0xFF718096))),
-            Text('严重异常',
+            Text('高受力',
                 style: TextStyle(fontSize: 10, color: Color(0xFF718096))),
           ],
         ),
@@ -426,12 +582,16 @@ class _TemperatureTile extends StatelessWidget {
 class _FootMapPainter extends CustomPainter {
   _FootMapPainter({
     required this.side,
-    required this.pressureScores,
+    required this.pressureIntensity,
+    required this.pressureRiskScores,
+    required this.pressureValid,
     required this.temperatureScores,
   });
 
   final String side;
-  final List<double> pressureScores;
+  final List<double> pressureIntensity;
+  final List<double> pressureRiskScores;
+  final List<bool> pressureValid;
   final List<double> temperatureScores;
 
   bool get _isLeft => side == 'left';
@@ -453,8 +613,15 @@ class _FootMapPainter extends CustomPainter {
     canvas.save();
     canvas.clipPath(foot);
     _drawSections(canvas, size);
-    for (var index = 0; index < pressureScores.length; index++) {
-      _drawPressureArea(canvas, size, index, pressureScores[index]);
+    for (var index = 0; index < pressureIntensity.length; index++) {
+      _drawPressureArea(
+        canvas,
+        size,
+        index,
+        pressureIntensity[index],
+        pressureRiskScores[index],
+        pressureValid[index],
+      );
     }
     canvas.restore();
 
@@ -573,12 +740,19 @@ class _FootMapPainter extends CustomPainter {
     return Offset(x * size.width, position.dy * size.height);
   }
 
-  void _drawPressureArea(Canvas canvas, Size size, int index, double score) {
+  void _drawPressureArea(
+    Canvas canvas,
+    Size size,
+    int index,
+    double intensityScore,
+    double riskScore,
+    bool valid,
+  ) {
     final center = _pressurePosition(size, index);
     final radiusX = size.width * (index <= 3 ? 0.31 : 0.28);
     final radiusY = size.height * (index <= 3 ? 0.15 : 0.14);
-    final color = _heatColor(score);
-    final intensity = 0.18 + score * 0.75;
+    final color = valid ? _heatColor(intensityScore) : const Color(0xFF9BA9AC);
+    final intensity = valid ? 0.18 + intensityScore * 0.75 : 0.32;
     final area = Rect.fromCenter(
       center: center,
       width: radiusX * 2,
@@ -593,6 +767,17 @@ class _FootMapPainter extends CustomPainter {
       stops: const [0, 0.52, 1],
     ).createShader(area);
     canvas.drawOval(area, Paint()..shader = shader);
+    if (riskScore >= 0.25 && valid) {
+      canvas.drawOval(
+        area.deflate(2),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = riskScore >= 0.75 ? 3.2 : 2.2
+          ..color = riskScore >= 0.75
+              ? const Color(0xFFD62F2F)
+              : const Color(0xFFE66D22),
+      );
+    }
   }
 
   Color _heatColor(double score) {
@@ -652,7 +837,11 @@ class _FootMapPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _FootMapPainter oldDelegate) {
     return oldDelegate.side != side ||
-        oldDelegate.pressureScores.toString() != pressureScores.toString() ||
+        oldDelegate.pressureIntensity.toString() !=
+            pressureIntensity.toString() ||
+        oldDelegate.pressureRiskScores.toString() !=
+            pressureRiskScores.toString() ||
+        oldDelegate.pressureValid.toString() != pressureValid.toString() ||
         oldDelegate.temperatureScores.toString() !=
             temperatureScores.toString();
   }

@@ -190,4 +190,60 @@ void main() {
     expect(find.textContaining('90.0% → 10.0%'), findsNothing);
     expect(find.textContaining('明显改善'), findsNothing);
   });
+
+  testWidgets('combined event lists every active risk component',
+      (tester) async {
+    final client = MockClient((request) async => http.Response.bytes(
+          utf8.encode(jsonEncode([
+            {
+              'event_id': 'evt_combined',
+              'risk_type': 'left_load_bias',
+              'risk_side': 'left',
+              'risk_level': 2,
+              'started_at_ms': 1760000000000,
+              'ended_at_ms': 1760000010000,
+              'duration_ms': 10000,
+              'before_load_diff': 0.40,
+              'after_load_diff': 0.15,
+              'status': 'resolved',
+              'active_risks': [
+                {
+                  'risk_type': 'left_load_bias',
+                  'risk_side': 'left',
+                  'risk_level': 2,
+                  'duration_ms': 7600,
+                },
+                {
+                  'risk_type': 'forefoot_high',
+                  'risk_side': 'left',
+                  'risk_level': 2,
+                  'duration_ms': 7200,
+                },
+              ],
+            },
+          ])),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        ));
+    final api =
+        FootGuardApiClient(baseUrl: 'http://example.test', client: client);
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: HistoryScreen(
+          backendUrl: 'http://example.test',
+          apiClient: api,
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('组合风险事件'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('本次同时存在'), findsOneWidget);
+    expect(find.text('左脚负载持续偏高 · 左脚'), findsOneWidget);
+    expect(find.text('前掌持续高载 · 左脚'), findsOneWidget);
+    expect(find.textContaining('7.6 秒'), findsOneWidget);
+    expect(find.textContaining('7.2 秒'), findsOneWidget);
+  });
 }
