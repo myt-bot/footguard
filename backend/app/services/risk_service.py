@@ -32,7 +32,6 @@ from ..config import (
     FOREFOOT_RATIO_EXIT_THRESHOLD,
     FOREFOOT_MIN_VALID_CHANNELS,
     FOREFOOT_MIN_ACTIVE_CHANNELS,
-    FOREFOOT_MIN_ACTIVE_REAR_CHANNELS,
     FOREFOOT_MAX_THRESHOLD,
     FOREFOOT_NOISE_MULTIPLIER,
     IMU_ACCEL_STATIONARY_TOLERANCE_MS2,
@@ -848,13 +847,66 @@ def _forefoot_delta(
     baseline: BaselineProfile,
     side: str,
 ) -> float:
-    distribution = _estimated_distribution(metric, baseline, side)
+    pressure = metric.left_pressure if side == "left" else metric.right_pressure
     baseline_distribution = (
         baseline.left_distribution
         if side == "left"
         else baseline.right_distribution
     )
-    return sum(distribution[:4]) - sum(baseline_distribution[:4])
+    usable = tuple(
+        _runtime_pressure_channel_usable(metric, baseline, side, index)
+        for index in range(6)
+    )
+    current_total = sum(
+        pressure[index] for index in range(6) if usable[index]
+    )
+    baseline_total = sum(
+        baseline_distribution[index]
+        for index in range(6)
+        if usable[index]
+    )
+    if current_total <= 1e-9 or baseline_total <= 1e-9:
+        return 0.0
+    current_forefoot = sum(
+        pressure[index] for index in range(4) if usable[index]
+    ) / current_total
+    baseline_forefoot = sum(
+        baseline_distribution[index]
+        for index in range(4)
+        if usable[index]
+    ) / baseline_total
+    return current_forefoot - baseline_forefoot
+
+
+def _runtime_pressure_channel_usable(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    side: str,
+    index: int,
+) -> bool:
+    """Allow coordinated current pressure to recover a baseline-uncovered FSR.
+
+    A channel that was quiet during standing calibration is not necessarily
+    faulty: a strong forefoot lean can activate it later. In contrast, a
+    baseline-trusted channel later diagnosed as residual remains excluded.
+    """
+    raw_valid = (
+        metric.left_pressure_valid if side == "left" else metric.right_pressure_valid
+    )
+    if not raw_valid[index]:
+        return False
+    trust_offset = 0 if side == "left" else 6
+    channel = trust_offset + index
+    if baseline.pressure_channel_contact_trust[channel]:
+        return True
+    if baseline.pressure_channel_trust[channel]:
+        return False
+    pressure = metric.left_pressure if side == "left" else metric.right_pressure
+    return (
+        PRESSURE_CONTACT_ACTIVE_FLOOR
+        <= pressure[index]
+        < BASELINE_CHANNEL_SATURATION
+    )
 
 
 def _forefoot_supported(
@@ -862,22 +914,20 @@ def _forefoot_supported(
     baseline: BaselineProfile,
     side: str,
 ) -> bool:
-    if (
-        _pressure_contact_count(metric, baseline, side)
-        < PRESSURE_CONTACT_MIN_ACTIVE_CHANNELS
-    ):
-        return False
     raw_valid = (
         metric.left_pressure_valid if side == "left" else metric.right_pressure_valid
     )
     trust_offset = 0 if side == "left" else 6
     valid = tuple(
-        raw_valid[index] and baseline.pressure_channel_trust[trust_offset + index]
+        raw_valid[index]
+        and (
+            baseline.pressure_channel_trust[trust_offset + index]
+            or _runtime_pressure_channel_usable(metric, baseline, side, index)
+        )
         for index in range(6)
     )
     active = tuple(
-        valid[index]
-        and baseline.pressure_channel_contact_trust[trust_offset + index]
+        _runtime_pressure_channel_usable(metric, baseline, side, index)
         and pressure >= PRESSURE_CONTACT_ACTIVE_FLOOR
         for index, pressure in enumerate(
             metric.left_pressure if side == "left" else metric.right_pressure
@@ -887,7 +937,6 @@ def _forefoot_supported(
         sum(valid[:4]) >= FOREFOOT_MIN_VALID_CHANNELS
         and sum(valid[4:]) >= REARFOOT_MIN_VALID_CHANNELS
         and sum(active[:4]) >= FOREFOOT_MIN_ACTIVE_CHANNELS
-        and sum(active[4:]) >= FOREFOOT_MIN_ACTIVE_REAR_CHANNELS
     )
 
 
@@ -1025,7 +1074,7 @@ def _pressure_contact_count(
     trust_offset = 0 if side == "left" else 6
     return sum(
         raw_valid[index]
-        and baseline.pressure_channel_contact_trust[trust_offset + index]
+        and _runtime_pressure_channel_usable(metric, baseline, side, index)
         and pressure[index] >= PRESSURE_CONTACT_ACTIVE_FLOOR
         for index in range(6)
     )

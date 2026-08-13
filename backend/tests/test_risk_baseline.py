@@ -211,6 +211,33 @@ def test_forefoot_risk_works_with_two_covered_forefoot_channels() -> None:
     assert ("forefoot_high", "left") in _signals(metric, partially_covered)
 
 
+def test_forefoot_risk_recovers_two_uncovered_channels_without_heel_contact() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    partially_covered = replace(
+        baseline,
+        pressure_channel_trust=(False, True, True, False, True, True) + (True,) * 6,
+        pressure_channel_contact_trust=(
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+        ) + (True,) * 6,
+    )
+    uncovered_forefoot_loaded = _metric(
+        101,
+        left_distribution=(0.52, 0.0, 0.0, 0.48, 0.0, 0.0),
+    )
+
+    assert ("forefoot_high", "left") in _signals(
+        uncovered_forefoot_loaded,
+        partially_covered,
+    )
+
+
 def test_residual_channel_is_raw_valid_but_excluded_from_analysis() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
