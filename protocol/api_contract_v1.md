@@ -65,6 +65,10 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
   "sync_error_ms": null,
   "load_bias": null,
   "load_diff": null,
+  "motion_state": "unavailable",
+  "pressure_available": false,
+  "temperature_available": false,
+  "active_risks": [],
   "regional_analysis": null,
   "risk": {
     "risk_type": "data_incomplete",
@@ -75,11 +79,75 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
 }
 ~~~
 
-双足配对有效时，`regional_analysis` 返回六个压力区域分数、四个温度区域分数、左右同区温差以及基线状态。压力分数由足内占比变化和左右同区差异计算，不是原始压力固定阈值；`baseline_source=personal` 表示已获得至少 10 对稳定帧的个人基线。
+双足配对有效时，`regional_analysis` 返回六个压力区域分数、四个温度区域分数、左右同区温差、逐通道有效位以及基线状态。温度同区任一侧无效时，相应 `temperature_delta_c` 为 `null`；不得用 0 代替。压力分数由足内占比变化和左右同区差异计算，不是原始压力固定阈值；`baseline_source=personal` 表示已获得至少 40 对合格压力帧，并已持久化本次穿戴基线。温度缺失不改变 `pressure_available`。
+
+`active_risks` 包含当前同时成立的全部风险。兼容字段 `risk` 仍返回一个主风险，旧客户端可以继续使用；新客户端必须优先展示 `active_risks`。偏载和左右脚前掌高载独立计算，因此可以同时出现。
+
+`regional_analysis` 还返回以下逐压力通道数组：
+
+- `left/right_pressure_valid`：固件原始有效位；为 `false` 时按数据/硬件不可用处理并置灰。
+- `left/right_pressure_baseline_trusted`：本次标定是否覆盖该点。
+- `left/right_pressure_analysis_valid`：当前是否参与区域风险计算。
+- `left/right_pressure_channel_status`：值为 `ok`、`uncovered_in_baseline`、`raw_invalid` 或 `residual_suspect`。后两种可信度诊断不得阻止原始有效通道继续显示实时受力颜色。
+
+## GET /api/v1/calibration/status
+
+响应示例：
+
+~~~json
+{
+  "baseline_ready": false,
+  "sample_count": 18,
+  "required_samples": 40,
+  "reset_at_ms": 1785000000000,
+  "status_reason": "unstable"
+}
+~~~
+
+`status_reason` 可为 `ready`、`waiting_for_data`、`pressure_unavailable`、`not_loaded`、`moving` 或 `unstable`。温度和 MPU 缺失不直接阻止压力基线；MPU 明确检测到移动时会暂停采样。
+
+## POST /api/v1/calibration/reset
+
+开始新体验者或重新穿戴标定，返回与状态接口相同的结构。该操作清除当前活动基线、终止活动风险并使待执行命令过期，但不删除历史事件。
+
+## POST /api/v1/ai/chat
+
+请求只包含自由问题和结构化当前状态摘要，不上传连续原始传感器帧：
+
+~~~json
+{
+  "protocol_version": 1,
+  "question": "温度不可用会影响压力判断吗？",
+  "risk": {"risk_type":"normal","risk_side":"none","risk_level":0,"duration_ms":0},
+  "active_risks": [],
+  "load_diff": 0.03,
+  "temperature_delta_max_c": null,
+  "baseline_ready": true,
+  "pressure_available": true,
+  "temperature_available": false,
+  "valid_temperature_pairs": 0,
+  "motion_state": "stationary",
+  "left_connected": true,
+  "right_connected": true
+}
+~~~
+
+响应：
+
+~~~json
+{
+  "protocol_version": 1,
+  "provider": "local-safe-fallback",
+  "question": "温度不可用会影响压力判断吗？",
+  "answer": "温度通道与压力显示、压力风险独立处理。"
+}
+~~~
+
+云端失败时后端必须根据当前状态返回本地模板。AI 不得产生或修改风险等级、目标侧、马达模式和命令。
 
 ## GET /api/v1/events
 
-查询参数 limit 默认 50，最大 200，返回风险事件数组。
+查询参数 limit 默认 50，最大 200，返回风险事件数组。同一连续时间段内同时出现的偏载、前掌高载和温差风险合并为一条事件，`active_risks` 保存全部组件及各自侧别、等级和持续时间；旧记录缺少组合字段时按其兼容主风险生成单个组件。
 
 ## GET /api/v1/command/pending
 
@@ -116,6 +184,8 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
 ~~~
 
 后端按 `(command_id, device_id)` 幂等记录。重复提交相同 ACK 返回 recorded=true，但不得重复产生副作用；同一键内容冲突返回 409。
+
+`target=both` 的命令必须分别收到左右设备 ACK。收到第一侧 ACK 后命令仍为 `pending`，只有两个设备均返回最终 ACK 后才汇总为完成或失败。
 
 响应：
 

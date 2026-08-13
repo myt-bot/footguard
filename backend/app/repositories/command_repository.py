@@ -114,9 +114,35 @@ def apply_ack(session: Session, payload: AckRequest) -> bool:
             error_code=payload.error_code,
         )
     )
-    command.status = payload.status
-    command.ack_at_ms = payload.ack_at_ms
-    command.executed_at_ms = payload.executed_at_ms
-    command.error_code = payload.error_code
+    session.flush()
+    acknowledgements = list(
+        session.scalars(
+            select(CommandAck).where(CommandAck.command_id == payload.command_id)
+        )
+    )
+    expected_count = 2 if command.target == "both" else 1
+    if len(acknowledgements) < expected_count:
+        # A bilateral command is complete only after both devices report their
+        # own final AckEvent. Keep it pending after the first side responds.
+        command.status = "pending"
+        command.ack_at_ms = None
+        command.executed_at_ms = None
+        command.error_code = "none"
+    else:
+        failed = next(
+            (ack for ack in acknowledgements if ack.status != "executed"),
+            None,
+        )
+        if failed is None:
+            command.status = "executed"
+            command.error_code = "none"
+            command.executed_at_ms = max(
+                ack.executed_at_ms or 0 for ack in acknowledgements
+            )
+        else:
+            command.status = failed.status
+            command.error_code = failed.error_code
+            command.executed_at_ms = None
+        command.ack_at_ms = max(ack.ack_at_ms for ack in acknowledgements)
     session.commit()
     return True

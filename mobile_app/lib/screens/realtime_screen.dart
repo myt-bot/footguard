@@ -63,6 +63,51 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
     super.dispose();
   }
 
+  bool _riskAppliesToSide(String side) {
+    return controller.activeRisks.any(
+      (risk) => risk.riskSide == side || risk.riskSide == 'both',
+    );
+  }
+
+  bool _showTemperatureAbnormality(String side) {
+    return _riskAppliesToSide(side) &&
+        controller.activeRisks.any(
+          (risk) =>
+              risk.riskType == 'temperature_asymmetry' &&
+              (risk.riskSide == side || risk.riskSide == 'both'),
+        );
+  }
+
+  bool _showPressureAbnormality(String side) {
+    return _riskAppliesToSide(side) &&
+        controller.activeRisks.any(
+          (risk) =>
+              const {
+                'left_load_bias',
+                'right_load_bias',
+                'forefoot_high',
+              }.contains(risk.riskType) &&
+              (risk.riskSide == side || risk.riskSide == 'both'),
+        );
+  }
+
+  Future<void> _restartCalibration() async {
+    try {
+      await controller.restartWearingCalibration();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已开始本次穿戴标定，请双脚平行自然站稳约 8–12 秒'),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('标定启动失败，请确认后端已连接')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -75,18 +120,27 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
             Row(
               children: [
                 ConnectionStatusCard(
-                    label: '左脚设备',
-                    status: controller.connections.left,
-                    battery: controller.left?.battery),
+                    label: '左脚设备', status: controller.connections.left),
                 const SizedBox(width: 10),
                 ConnectionStatusCard(
-                    label: '右脚设备',
-                    status: controller.connections.right,
-                    battery: controller.right?.battery),
+                    label: '右脚设备', status: controller.connections.right),
               ],
             ),
             const SizedBox(height: 12),
-            RiskBanner(risk: controller.risk),
+            RiskBanner(
+              risk: controller.risk,
+              activeRisks: controller.activeRisks,
+              baselineReady: controller.calibrationStatus?.baselineReady ??
+                  controller.regionalAnalysis?.baselineReady ??
+                  false,
+            ),
+            const SizedBox(height: 10),
+            _WearingCalibrationCard(
+              status: controller.calibrationStatus,
+              backendOnline: controller.backendOnline,
+              resetting: controller.calibrationResetting,
+              onRestart: _restartCalibration,
+            ),
             if (controller.errorMessage != null) ...[
               const SizedBox(height: 10),
               Text(controller.errorMessage!,
@@ -100,30 +154,44 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                 Expanded(
                   child: FootPressureView(
                     side: 'left',
+                    showPressureAbnormality: _showPressureAbnormality('left'),
+                    showTemperatureAbnormality:
+                        _showTemperatureAbnormality('left'),
                     frame: controller.left,
                     oppositeFrame: controller.right,
                     pressureScores: analysis?.leftPressureScores,
+                    pressureValid: analysis?.leftPressureValid,
+                    oppositePressureValid: analysis?.rightPressureValid,
+                    pressureAnalysisValid: analysis?.leftPressureAnalysisValid,
+                    pressureChannelStatus: analysis?.leftPressureChannelStatus,
                     temperatureScores: analysis?.leftTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
                     baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
-                        analysis?.baselineRequiredSamples ?? 15,
+                        analysis?.baselineRequiredSamples ?? 40,
                   ),
                 ),
                 const SizedBox(width: 12, height: 12),
                 Expanded(
                   child: FootPressureView(
                     side: 'right',
+                    showPressureAbnormality: _showPressureAbnormality('right'),
+                    showTemperatureAbnormality:
+                        _showTemperatureAbnormality('right'),
                     frame: controller.right,
                     oppositeFrame: controller.left,
                     pressureScores: analysis?.rightPressureScores,
+                    pressureValid: analysis?.rightPressureValid,
+                    oppositePressureValid: analysis?.leftPressureValid,
+                    pressureAnalysisValid: analysis?.rightPressureAnalysisValid,
+                    pressureChannelStatus: analysis?.rightPressureChannelStatus,
                     temperatureScores: analysis?.rightTemperatureScores,
                     temperatureDeltaC: analysis?.temperatureDeltaC,
                     baselineReady: analysis?.baselineReady ?? false,
                     baselineSampleCount: analysis?.baselineSampleCount ?? 0,
                     baselineRequiredSamples:
-                        analysis?.baselineRequiredSamples ?? 15,
+                        analysis?.baselineRequiredSamples ?? 40,
                   ),
                 ),
               ];
@@ -135,30 +203,50 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                       children: [
                         FootPressureView(
                           side: 'left',
+                          showPressureAbnormality:
+                              _showPressureAbnormality('left'),
+                          showTemperatureAbnormality:
+                              _showTemperatureAbnormality('left'),
                           frame: controller.left,
                           oppositeFrame: controller.right,
                           pressureScores: analysis?.leftPressureScores,
+                          pressureValid: analysis?.leftPressureValid,
+                          oppositePressureValid: analysis?.rightPressureValid,
+                          pressureAnalysisValid:
+                              analysis?.leftPressureAnalysisValid,
+                          pressureChannelStatus:
+                              analysis?.leftPressureChannelStatus,
                           temperatureScores: analysis?.leftTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
                           baselineSampleCount:
                               analysis?.baselineSampleCount ?? 0,
                           baselineRequiredSamples:
-                              analysis?.baselineRequiredSamples ?? 15,
+                              analysis?.baselineRequiredSamples ?? 40,
                         ),
                         const SizedBox(height: 12),
                         FootPressureView(
                           side: 'right',
+                          showPressureAbnormality:
+                              _showPressureAbnormality('right'),
+                          showTemperatureAbnormality:
+                              _showTemperatureAbnormality('right'),
                           frame: controller.right,
                           oppositeFrame: controller.left,
                           pressureScores: analysis?.rightPressureScores,
+                          pressureValid: analysis?.rightPressureValid,
+                          oppositePressureValid: analysis?.leftPressureValid,
+                          pressureAnalysisValid:
+                              analysis?.rightPressureAnalysisValid,
+                          pressureChannelStatus:
+                              analysis?.rightPressureChannelStatus,
                           temperatureScores: analysis?.rightTemperatureScores,
                           temperatureDeltaC: analysis?.temperatureDeltaC,
                           baselineReady: analysis?.baselineReady ?? false,
                           baselineSampleCount:
                               analysis?.baselineSampleCount ?? 0,
                           baselineRequiredSamples:
-                              analysis?.baselineRequiredSamples ?? 15,
+                              analysis?.baselineRequiredSamples ?? 40,
                         ),
                       ],
                     );
@@ -174,6 +262,10 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
               questionStatus: controller.aiQuestionStatus,
               questionLoading: controller.aiQuestionLoading,
               onQuestionSelected: controller.askAiQuestion,
+              chatAnswer: controller.aiChatAnswer,
+              chatLoading: controller.aiChatLoading,
+              chatStatus: controller.aiChatStatus,
+              onChatSubmitted: controller.askAiChat,
             ),
             const SizedBox(height: 12),
             Card(
@@ -191,6 +283,93 @@ class _RealtimeScreenState extends State<RealtimeScreen> {
                         onPressed: controller.executeMotorCommand,
                         child: const Text('模拟执行')),
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WearingCalibrationCard extends StatelessWidget {
+  const _WearingCalibrationCard({
+    required this.status,
+    required this.backendOnline,
+    required this.resetting,
+    required this.onRestart,
+  });
+
+  final CalibrationStatus? status;
+  final bool backendOnline;
+  final bool resetting;
+  final Future<void> Function() onRestart;
+
+  String get _reason => switch (status?.statusReason) {
+        'ready' => '本次穿戴基线已锁定，压力风险与马达已启用',
+        'pressure_unavailable' => '压力通道不完整，请检查鞋垫与接线',
+        'not_loaded' => '请穿好双脚并自然承重',
+        'moving' => '身体移动较大，请保持自然站立',
+        'unstable' => '数据波动较大，请放松并保持站稳',
+        _ => '等待双脚有效压力数据',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final ready = status?.baselineReady ?? false;
+    final progress = status?.progress ?? 0.0;
+    final count = status?.sampleCount ?? 0;
+    final required = status?.requiredSamples ?? 40;
+    final color = ready ? const Color(0xFF168A70) : const Color(0xFF39758C);
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              runSpacing: 8,
+              spacing: 12,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      ready ? Icons.verified_rounded : Icons.tune_rounded,
+                      color: color,
+                    ),
+                    const SizedBox(width: 9),
+                    Text(
+                      ready ? '本次穿戴已就绪' : '本次穿戴标定 $count/$required',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
+                FilledButton.icon(
+                  onPressed: !backendOnline || resetting ? null : onRestart,
+                  icon: resetting
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.person_add_alt_1_rounded, size: 18),
+                  label: const Text('新体验者 / 重新穿戴'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            LinearProgressIndicator(
+              value: ready ? 1 : progress,
+              minHeight: 7,
+              borderRadius: BorderRadius.circular(4),
+              color: color,
+            ),
+            const SizedBox(height: 7),
+            Text(
+              _reason,
+              style: const TextStyle(color: Color(0xFF63757B), fontSize: 12),
             ),
           ],
         ),

@@ -2,12 +2,12 @@
 
 > 状态：BASELINE（真实 BLE 联调修订版）  
 > 逻辑协议版本：1  
-> 文档修订号：1.3<br>
+> 文档修订号：1.4<br>
 > 传感器布局版本：layout_6p4t_v1
 
 本目录是 ESP32 固件、Flutter App 和 FastAPI 后端共同遵守的协议基线。未经确认，不得在任意一端自行增加、删除、更名或静默兼容字段。
 
-本次 1.3 文档修订冻结 `layout_6p4t_v1` 的 P1～P6、T1～T4 物理位置语义，并修复后端 quality_flags 校验。protocol_version=1、layout_id=2、60 字节 SensorData、字段、数组长度、帧偏移、BLE UUID 和 CRC 均保持不变。此前的 `layout_6p3t_v1` 不再兼容。
+本次 1.4 文档修订明确压力与温度按通道、按风险模态独立降级，并补充本次穿戴基线和 AI 自由问答接口。protocol_version=1、layout_id=2、60 字节 SensorData、字段、数组长度、帧偏移、BLE UUID 和 CRC 均保持不变。此前的 `layout_6p3t_v1` 不再兼容。
 
 ## 文件说明
 
@@ -21,6 +21,7 @@
 - REVISION_NOTES_v1_1.md：上一版 6压3温 BLE 修订历史记录。
 - REVISION_NOTES_v1_2.md：6压4温布局、帧长度及相对风险算法修订说明。
 - REVISION_NOTES_v1_3.md：6压4温物理位置语义冻结及后端 quality_flags 校验修订说明。
+- REVISION_NOTES_v1_4.md：温压独立降级、持久化穿戴基线和 AI 状态问答修订说明。
 - examples：左右脚帧、设备状态、指令、ACK、TimeSync 和 BLE 十六进制标准样例。
 
 ## 版本规则

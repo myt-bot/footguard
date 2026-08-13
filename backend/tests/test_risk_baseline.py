@@ -9,6 +9,7 @@ from backend.app.services.risk_service import (
     PairMetric,
     _baseline_profile,
     _current_risk,
+    _current_risks,
     _pressure_metric_from_window,
     _regional_analysis,
     _signal,
@@ -26,7 +27,7 @@ def _metric(
     right_total: float = 0.26,
     left_distribution: tuple[float, ...] = LEFT_DISTRIBUTION,
     right_distribution: tuple[float, ...] = RIGHT_DISTRIBUTION,
-    temperature_delta_c: tuple[float, ...] = (1.2, 2.4, -1.8, 0.8),
+    temperature_delta_c: tuple[float | None, ...] = (1.2, 2.4, -1.8, 0.8),
     motion_state: str = "unavailable",
 ) -> PairMetric:
     total = max(left_total + right_total, 1e-9)
@@ -98,26 +99,184 @@ def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
     assert _baseline_profile(metrics).ready is False
 
 
-def test_suppresses_risk_when_footwear_is_not_loaded() -> None:
+def test_baseline_rejects_too_few_responsive_channels_on_one_foot() -> None:
+    sparse_left = (0.34, 0.33, 0.33, 0.0, 0.0, 0.0)
+    metrics = [
+        _metric(index, left_distribution=sparse_left)
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is False
+    assert baseline.sample_count == BASELINE_MIN_SAMPLES
+
+
+def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     )
-    off_ground = _metric(
+    heated_off_ground = _metric(
         BASELINE_MIN_SAMPLES,
         left_total=0.01,
         right_total=0.03,
-        temperature_delta_c=(8.0, -7.0, 6.0, -5.0),
+        temperature_delta_c=(8.0, 2.4, -1.8, 0.8),
+    )
+    normal_off_ground = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        left_total=0.01,
+        right_total=0.03,
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
     )
     single_foot_load = _metric(
-        BASELINE_MIN_SAMPLES + 1,
+        BASELINE_MIN_SAMPLES + 2,
         left_total=0.20,
         right_total=0.0,
         temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
     )
 
     assert baseline.ready is True
-    assert _signal(off_ground, baseline) is None
+    assert _signal(heated_off_ground, baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+    assert _signal(normal_off_ground, baseline) is None
     assert _signal(single_foot_load, baseline) == ("left_load_bias", "left")
+
+
+def test_single_residual_pressure_point_cannot_create_load_bias() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    unloaded_right_residual = _metric(
+        BASELINE_MIN_SAMPLES + 3,
+        left_total=0.0,
+        right_total=0.12,
+        left_distribution=LEFT_DISTRIBUTION,
+        right_distribution=(0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    assert baseline.ready is True
+    assert _signal(unloaded_right_residual, baseline) is None
+
+
+def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    forefoot_heavy = (0.30, 0.25, 0.20, 0.15, 0.05, 0.05)
+    metrics = [
+        _metric(
+            100 + index,
+            left_total=0.45,
+            right_total=0.12,
+            left_distribution=forefoot_heavy,
+        )
+        for index in range(25)
+    ]
+
+    risks, _ = _current_risks(metrics, baseline)
+
+    assert {(risk.risk_type, risk.risk_side) for risk in risks} == {
+        ("left_load_bias", "left"),
+        ("forefoot_high", "left"),
+    }
+
+
+def test_residual_channel_is_raw_valid_but_excluded_from_analysis() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    diagnosed = replace(
+        baseline,
+        pressure_channel_contact_trust=(True,) * 8 + (False,) + (True,) * 3,
+    )
+
+    regional = _regional_analysis(
+        _metric(BASELINE_MIN_SAMPLES),
+        diagnosed,
+        baseline_trust=baseline.pressure_channel_trust,
+        residual_suspects=(False,) * 8 + (True,) + (False,) * 3,
+    )
+
+    assert regional.right_pressure_valid[2] is True
+    assert regional.right_pressure_baseline_trusted[2] is True
+    assert regional.right_pressure_analysis_valid[2] is False
+    assert regional.right_pressure_channel_status[2] == "residual_suspect"
+
+
+def test_residual_on_unloaded_foot_does_not_reverse_real_single_foot_bias() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    left_contact_with_right_residual = _metric(
+        BASELINE_MIN_SAMPLES + 4,
+        left_total=0.08,
+        right_total=0.12,
+        left_distribution=LEFT_DISTRIBUTION,
+        right_distribution=(0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+        temperature_delta_c=(1.2, 2.4, -1.8, 0.8),
+    )
+
+    assert _signal(left_contact_with_right_residual, baseline) == (
+        "left_load_bias",
+        "left",
+    )
+
+
+def test_single_valid_temperature_pair_cannot_trigger_temperature_risk() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    single_valid_pair = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        temperature_delta_c=(8.0, None, None, None),
+    )
+
+    assert baseline.ready is True
+    assert _signal(single_valid_pair, baseline) is None
+
+
+def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    shifted_baseline = replace(
+        baseline,
+        temperature_delta_c=(6.0, 2.4, -1.8, 0.8),
+    )
+    heated_off_ground = _metric(
+        BASELINE_MIN_SAMPLES + 1,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(7.0, 2.4, -1.8, 0.8),
+    )
+
+    assert shifted_baseline.ready is True
+    # The corrected delta is only 1 C, but the App-visible raw delta is 7 C.
+    assert _signal(heated_off_ground, shifted_baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+
+
+def test_unloaded_raw_delta_of_2_97_c_triggers_right_alert() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    heated_off_ground = _metric(
+        BASELINE_MIN_SAMPLES + 2,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(0.61, 0.36, -2.97, -0.99),
+    )
+
+    assert baseline.ready is True
+    assert _signal(heated_off_ground, baseline) == (
+        "temperature_asymmetry",
+        "right",
+    )
 
 
 def test_robust_baseline_ignores_a_multichannel_hand_press_outlier() -> None:
@@ -148,9 +307,9 @@ def test_suppresses_heatmap_until_personal_baseline_is_ready() -> None:
     )
 
     assert baseline.ready is False
-    # High-confidence fallback rules remain available during cold start, while
-    # the regional heatmap waits for the personal baseline.
-    assert _signal(forefoot, baseline) == ("forefoot_high", "left")
+    # A new wearing session must finish its personal pressure baseline before
+    # pressure risks or motor actions are enabled.
+    assert _signal(forefoot, baseline) is None
 
     regional = _regional_analysis(forefoot, baseline)
     assert regional.baseline_ready is False
@@ -304,7 +463,7 @@ def test_risk_continuity_uses_exit_hysteresis() -> None:
     assert risk.duration_ms >= 6_000
 
 
-def test_strong_load_bias_has_priority_over_competing_regions() -> None:
+def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() -> None:
     baseline_metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     baseline = _baseline_profile(baseline_metrics)
     history = [
@@ -323,6 +482,113 @@ def test_strong_load_bias_has_priority_over_competing_regions() -> None:
         baseline,
     )
 
-    assert (risk.risk_type, risk.risk_side) == ("left_load_bias", "left")
+    assert (risk.risk_type, risk.risk_side) == ("temperature_asymmetry", "left")
     assert risk.risk_level >= 2
     assert risk.duration_ms >= 6_000
+
+
+def test_raw_temperature_side_wins_over_opposite_baseline_correction() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    shifted_baseline = replace(
+        baseline,
+        temperature_delta_c=(3.0, 5.0, 0.0, 0.0),
+    )
+    visible_left_heat = _metric(
+        300,
+        left_total=0.0,
+        right_total=0.0,
+        temperature_delta_c=(3.2, -2.4, 0.0, 0.0),
+    )
+
+    # T1's App-visible +3.2 C is authoritative. The larger corrected T2
+    # residual must not flip the selected side to right.
+    assert _signal(visible_left_heat, shifted_baseline) == (
+        "temperature_asymmetry",
+        "left",
+    )
+
+
+def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                400 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(3.4, 0.2, -0.1, 0.0),
+            ),
+            sync_id=1_000 + index,
+            timestamp_ms=20_000 + index * 200,
+        )
+        for index in range(21)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "temperature_asymmetry"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 1
+    assert risk.duration_ms == 4_000
+
+
+def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                500 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(
+                    (1.2, 2.4, -1.8, 0.8)
+                    if 18 <= index <= 21
+                    else (3.4, 2.4, -1.8, 0.8)
+                ),
+            ),
+            timestamp_ms=30_000 + index * 200,
+        )
+        for index in range(40)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "temperature_asymmetry"
+    assert risk.risk_side == "left"
+    assert risk.risk_level == 2
+    assert risk.duration_ms == 7_800
+
+
+def test_temperature_risk_clears_after_dropout_grace() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        replace(
+            _metric(
+                600 + index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=(
+                    (3.4, 2.4, -1.8, 0.8)
+                    if index < 20
+                    else (1.2, 2.4, -1.8, 0.8)
+                ),
+            ),
+            timestamp_ms=40_000 + index * 200,
+        )
+        for index in range(28)
+    ]
+
+    risk, _ = _current_risk(history, baseline)
+
+    assert risk.risk_type == "normal"
+    assert risk.risk_side == "none"
+    assert risk.risk_level == 0
+    assert risk.duration_ms == 0

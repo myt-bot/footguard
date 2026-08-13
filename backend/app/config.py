@@ -17,13 +17,13 @@ TIME_UNSYNCED_MASK = 0x00000800
 IMU_INVALID_MASK = 0x00000400
 CALIBRATION_INVALID_MASK = 0x00002000
 SENSOR_STUCK_MASK = 0x00004000
-PAIRING_BLOCK_FLAGS = (
-    PRESSURE_INVALID_MASK
-    | TEMPERATURE_INVALID_MASK
-    | TIME_UNSYNCED_MASK
-    | CALIBRATION_INVALID_MASK
-    | SENSOR_STUCK_MASK
-)
+PAIRING_BLOCK_FLAGS = TIME_UNSYNCED_MASK | SENSOR_STUCK_MASK
+PRESSURE_BLOCK_FLAGS = PRESSURE_INVALID_MASK | CALIBRATION_INVALID_MASK
+# Runtime pressure decisions may tolerate one or two explicitly invalid
+# channels. Personal-baseline learning remains stricter and requires all six.
+PRESSURE_MIN_VALID_CHANNELS_PER_FOOT = 4
+FOREFOOT_MIN_VALID_CHANNELS = 3
+REARFOOT_MIN_VALID_CHANNELS = 1
 LOAD_BIAS_ENTER_THRESHOLD = 0.20
 LOAD_BIAS_EXIT_THRESHOLD = 0.12
 # Five 5-Hz frames provide about one second of robust pressure smoothing.
@@ -39,14 +39,24 @@ REGIONAL_MIN_VISIBLE_SCORE = 0.12
 # Automatic personal-baseline calibration. A candidate must look like
 # bilateral weight-bearing rather than off-ground noise or a single-point
 # bench press. These are prototype engineering limits, not diagnostic limits.
-BASELINE_MIN_SAMPLES = 15
-BASELINE_CALIBRATION_WINDOW_SAMPLES = 50
+BASELINE_MIN_SAMPLES = 40
+BASELINE_CALIBRATION_WINDOW_SAMPLES = 60
 BASELINE_MIN_FOOT_PRESSURE = 0.08
 # Do not classify pressure or temperature risk while the footwear is not
 # meaningfully loaded. This remains low enough for near-single-foot loading.
 RISK_MIN_TOTAL_PRESSURE = 0.08
+# A single high residual can come from an unloaded or mechanically biased FSR
+# (for example the observed right P3). Treat at least two trusted channels as
+# the minimum evidence that either foot is actually contacting the insole.
+PRESSURE_CONTACT_MIN_ACTIVE_CHANNELS = 2
+PRESSURE_CONTACT_ACTIVE_FLOOR = 0.01
+PRESSURE_RESIDUAL_MIN_SAMPLES = 10
+PRESSURE_RESIDUAL_FLOOR = 0.02
+PRESSURE_RESIDUAL_MAX_MAD = 0.008
 BASELINE_ACTIVE_PRESSURE_FLOOR = 0.005
 BASELINE_MIN_ACTIVE_CHANNELS = 3
+BASELINE_CHANNEL_SATURATION = 0.995
+BASELINE_CHANNEL_MAX_MAD = 0.08
 BASELINE_BALANCED_BIAS_MAX = 0.50
 BASELINE_MAX_TEMPERATURE_DELTA_C = 4.0
 # MPU only gates personal-baseline sampling. Pressure and temperature risk
@@ -57,19 +67,32 @@ IMU_GYRO_STATIONARY_THRESHOLD_DPS = 25.0
 BASELINE_LOAD_BIAS_INLIER_TOLERANCE = 0.20
 BASELINE_DISTRIBUTION_INLIER_TOLERANCE = 0.25
 BASELINE_TEMPERATURE_INLIER_TOLERANCE_C = 1.5
+BASELINE_MAD_SCALE = 1.4826
+LOAD_RATIO_NOISE_MULTIPLIER = 6.0
+FOREFOOT_NOISE_MULTIPLIER = 6.0
 DEFAULT_PRESSURE_DISTRIBUTION = (0.16, 0.17, 0.18, 0.14, 0.18, 0.17)
 FOREFOOT_RATIO_DELTA_THRESHOLD = 0.08
 FOREFOOT_RATIO_EXIT_THRESHOLD = 0.05
 REGIONAL_SHARE_DELTA_FOR_SEVERE = 0.50
 REGIONAL_ASYMMETRY_FOR_SEVERE = 0.35
+# A large raw same-region difference must always agree with the value shown
+# in the App. The baseline-corrected threshold remains more sensitive.
+TEMPERATURE_RAW_DELTA_C_THRESHOLD = 2.5
+TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD = 2.0
 TEMPERATURE_DELTA_C_THRESHOLD = 2.0
 TEMPERATURE_DELTA_C_EXIT_THRESHOLD = 1.5
+# Real NTC/contact readings can briefly dip for one or two 5-Hz frames. Keep
+# an established temperature episode alive across that short dropout, while a
+# genuine recovery still clears promptly.
+TEMPERATURE_DROPOUT_GRACE_MS = 1_200
 ATTENTION_AFTER_MS = 3_000
 WARNING_AFTER_MS = 6_000
 PERSISTENT_AFTER_MS = 10_000
 MOTOR_COMMAND_LEVEL = 2
 MOTOR_WARNING_PATTERN = "double"
 MOTOR_WARNING_DURATION_MS = 800
+MOTOR_TEMPERATURE_PATTERN = "short"
+MOTOR_TEMPERATURE_DURATION_MS = 500
 MOTOR_PERSISTENT_PATTERN = "long"
 MOTOR_PERSISTENT_DURATION_MS = 1_500
 # Human-facing competition demo: leave enough time for the App polling cycle

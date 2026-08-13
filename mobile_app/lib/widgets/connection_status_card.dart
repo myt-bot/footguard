@@ -7,12 +7,10 @@ class ConnectionStatusCard extends StatelessWidget {
     super.key,
     required this.label,
     required this.status,
-    required this.battery,
   });
 
   final String label;
   final FootConnectionStatus status;
-  final int? battery;
 
   @override
   Widget build(BuildContext context) {
@@ -37,7 +35,7 @@ class ConnectionStatusCard extends StatelessWidget {
                 children: [
                   Text(label,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                  Text(connected ? '已连接 · ${battery ?? '--'}%' : '未连接',
+                  Text(connected ? '已连接' : '未连接',
                       style: TextStyle(color: color, fontSize: 12)),
                 ],
               ),

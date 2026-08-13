@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/ai_advice.dart';
+import '../models/ai_chat_answer.dart';
 import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/device_ack.dart';
@@ -18,7 +19,10 @@ class RealtimeSnapshot {
     required this.loadDiff,
     required this.syncErrorMs,
     this.motionState = 'unavailable',
+    this.pressureAvailable = false,
+    this.temperatureAvailable = false,
     required this.risk,
+    this.activeRisks = const [],
     required this.regionalAnalysis,
   });
 
@@ -28,7 +32,10 @@ class RealtimeSnapshot {
   final double? loadDiff;
   final int? syncErrorMs;
   final String motionState;
+  final bool pressureAvailable;
+  final bool temperatureAvailable;
   final RiskState risk;
+  final List<RiskState> activeRisks;
   final RegionalAnalysis? regionalAnalysis;
 
   factory RealtimeSnapshot.fromJson(Map<String, dynamic> json) =>
@@ -43,7 +50,14 @@ class RealtimeSnapshot {
         loadDiff: (json['load_diff'] as num?)?.toDouble(),
         syncErrorMs: json['sync_error_ms'] as int?,
         motionState: json['motion_state'] as String? ?? 'unavailable',
+        pressureAvailable: json['pressure_available'] as bool? ?? false,
+        temperatureAvailable: json['temperature_available'] as bool? ?? false,
         risk: RiskState.fromJson(json['risk'] as Map<String, dynamic>),
+        activeRisks: (json['active_risks'] as List<dynamic>?)
+                ?.whereType<Map<String, dynamic>>()
+                .map(RiskState.fromJson)
+                .toList(growable: false) ??
+            const [],
         regionalAnalysis: json['regional_analysis'] == null
             ? null
             : RegionalAnalysis.fromJson(
@@ -67,6 +81,7 @@ class RiskEventRecord {
     this.interventionAction,
     this.effectLabel,
     this.recoveryTimeMs,
+    this.activeRisks = const [],
   });
 
   final String eventId;
@@ -81,6 +96,7 @@ class RiskEventRecord {
   final String? interventionAction;
   final String? effectLabel;
   final int? recoveryTimeMs;
+  final List<RiskState> activeRisks;
   final String status;
 
   bool get hasLoadDiffComparison =>
@@ -109,6 +125,11 @@ class RiskEventRecord {
         interventionAction: json['intervention_action'] as String?,
         effectLabel: json['effect_label'] as String?,
         recoveryTimeMs: json['recovery_time_ms'] as int?,
+        activeRisks: (json['active_risks'] as List<dynamic>?)
+                ?.whereType<Map<String, dynamic>>()
+                .map(RiskState.fromJson)
+                .toList(growable: false) ??
+            const [],
         status: json['status'] as String,
       );
 }
@@ -126,12 +147,14 @@ class CalibrationStatus {
     required this.sampleCount,
     required this.requiredSamples,
     this.resetAtMs,
+    this.statusReason = 'waiting_for_data',
   });
 
   final bool baselineReady;
   final int sampleCount;
   final int requiredSamples;
   final int? resetAtMs;
+  final String statusReason;
 
   double get progress => requiredSamples <= 0
       ? 0.0
@@ -143,6 +166,7 @@ class CalibrationStatus {
         sampleCount: json['sample_count'] as int,
         requiredSamples: json['required_samples'] as int,
         resetAtMs: json['reset_at_ms'] as int?,
+        statusReason: json['status_reason'] as String? ?? 'waiting_for_data',
       );
 }
 
@@ -288,9 +312,14 @@ class FootGuardApiClient {
 
   Future<AiAdvice> aiAdvice({
     required RiskState risk,
+    List<RiskState> activeRisks = const [],
     required double? loadDiff,
     required double? temperatureDeltaMaxC,
     required bool baselineReady,
+    required bool pressureAvailable,
+    required bool temperatureAvailable,
+    required bool leftConnected,
+    required bool rightConnected,
   }) async {
     final response = await _client
         .post(
@@ -299,9 +328,14 @@ class FootGuardApiClient {
           body: jsonEncode({
             'protocol_version': 1,
             'risk': risk.toJson(),
+            'active_risks': activeRisks.map((item) => item.toJson()).toList(),
             'load_diff': loadDiff,
             'temperature_delta_max_c': temperatureDeltaMaxC,
             'baseline_ready': baselineReady,
+            'pressure_available': pressureAvailable,
+            'temperature_available': temperatureAvailable,
+            'left_connected': leftConnected,
+            'right_connected': rightConnected,
           }),
         )
         .timeout(const Duration(seconds: 35));
@@ -313,9 +347,14 @@ class FootGuardApiClient {
   Future<AiQuestionAnswer> aiQuestion({
     required String questionKey,
     required RiskState risk,
+    List<RiskState> activeRisks = const [],
     required double? loadDiff,
     required double? temperatureDeltaMaxC,
     required bool baselineReady,
+    bool pressureAvailable = true,
+    bool temperatureAvailable = true,
+    bool leftConnected = true,
+    bool rightConnected = true,
   }) async {
     final response = await _client
         .post(
@@ -325,13 +364,58 @@ class FootGuardApiClient {
             'protocol_version': 1,
             'question_key': questionKey,
             'risk': risk.toJson(),
+            'active_risks': activeRisks.map((item) => item.toJson()).toList(),
             'load_diff': loadDiff,
             'temperature_delta_max_c': temperatureDeltaMaxC,
             'baseline_ready': baselineReady,
+            'pressure_available': pressureAvailable,
+            'temperature_available': temperatureAvailable,
+            'left_connected': leftConnected,
+            'right_connected': rightConnected,
           }),
         )
         .timeout(const Duration(seconds: 35));
     return AiQuestionAnswer.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AiChatAnswer> aiChat({
+    required String question,
+    required RiskState risk,
+    List<RiskState> activeRisks = const [],
+    required double? loadDiff,
+    required double? temperatureDeltaMaxC,
+    required bool baselineReady,
+    required bool pressureAvailable,
+    required bool temperatureAvailable,
+    required int validTemperaturePairs,
+    required String motionState,
+    required bool leftConnected,
+    required bool rightConnected,
+  }) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/ai/chat'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'protocol_version': 1,
+            'question': question,
+            'risk': risk.toJson(),
+            'active_risks': activeRisks.map((item) => item.toJson()).toList(),
+            'load_diff': loadDiff,
+            'temperature_delta_max_c': temperatureDeltaMaxC,
+            'baseline_ready': baselineReady,
+            'pressure_available': pressureAvailable,
+            'temperature_available': temperatureAvailable,
+            'left_connected': leftConnected,
+            'right_connected': rightConnected,
+            'valid_temperature_pairs': validTemperaturePairs,
+            'motion_state': motionState,
+          }),
+        )
+        .timeout(const Duration(seconds: 35));
+    return AiChatAnswer.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
   }

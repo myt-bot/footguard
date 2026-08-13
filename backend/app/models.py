@@ -61,6 +61,7 @@ class RiskEvent(Base):
     before_load_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
     after_load_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active")
+    risk_components_json: Mapped[str] = mapped_column(String(1024), default="[]")
 
 
 class Command(Base):
@@ -113,3 +114,25 @@ class CalibrationState(Base):
     state_key: Mapped[str] = mapped_column(String(32), primary_key=True)
     reset_after_frame_id: Mapped[int] = mapped_column(Integer, default=0)
     reset_at_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class CalibrationProfile(Base):
+    __tablename__ = "calibration_profiles"
+
+    profile_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    protocol_version: Mapped[int] = mapped_column(Integer, default=1)
+    sensor_layout_version: Mapped[str] = mapped_column(String(32))
+    left_device_id: Mapped[str] = mapped_column(String(16))
+    right_device_id: Mapped[str] = mapped_column(String(16))
+    sample_count: Mapped[int] = mapped_column(Integer)
+    created_at_ms: Mapped[int] = mapped_column(Integer)
+    load_ratio: Mapped[float] = mapped_column(Float)
+    load_ratio_mad: Mapped[float] = mapped_column(Float)
+    left_distribution_json: Mapped[str] = mapped_column(String(512))
+    right_distribution_json: Mapped[str] = mapped_column(String(512))
+    left_forefoot_mad: Mapped[float] = mapped_column(Float)
+    right_forefoot_mad: Mapped[float] = mapped_column(Float)
+    pressure_asymmetry_json: Mapped[str] = mapped_column(String(512))
+    pressure_channel_trust_json: Mapped[str] = mapped_column(String(128))
+    temperature_delta_json: Mapped[str] = mapped_column(String(256))
+    temperature_valid_json: Mapped[str] = mapped_column(String(64))

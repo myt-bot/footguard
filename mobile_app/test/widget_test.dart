@@ -60,7 +60,7 @@ void main() {
       ),
     );
 
-    expect(find.text('AI 风险解释（辅助）'), findsOneWidget);
+    expect(find.text('AI 状态助手（辅助）'), findsOneWidget);
     expect(find.text('DeepSeek 云端解释'), findsOneWidget);
     expect(find.text('左脚负荷持续偏高。'), findsOneWidget);
     expect(find.textContaining('不构成医疗诊断'), findsOneWidget);
@@ -131,6 +131,7 @@ void main() {
               temperatureScores: [0.1, 0.8, 0.0, 0.2],
               temperatureDeltaC: [0.1, 2.4, 0.0, 0.3],
               baselineReady: true,
+              showPressureAbnormality: true,
             ),
           ),
         ),
@@ -138,8 +139,7 @@ void main() {
     );
 
     expect(find.text('左脚压力与温度分布'), findsOneWidget);
-    // The risk badge and the severity legend both display this label.
-    expect(find.text('严重异常'), findsNWidgets(2));
+    expect(find.text('严重异常'), findsOneWidget);
     expect(find.textContaining('拇趾区'), findsOneWidget);
     expect(find.textContaining('前掌外侧'), findsWidgets);
     expect(find.text('T1 前掌外侧'), findsOneWidget);
@@ -179,7 +179,8 @@ void main() {
       ),
     );
 
-    expect(find.text('当前未发现明显的相对压力异常'), findsOneWidget);
+    expect(find.text('当前未承重或受力过低'), findsOneWidget);
+    expect(find.text('未承重'), findsOneWidget);
     expect(find.textContaining('相对异常区域'), findsNothing);
   });
 
@@ -210,15 +211,89 @@ void main() {
               frame: frame,
               pressureScores: [1, 1, 1, 1, 1, 1],
               baselineReady: true,
+              showPressureAbnormality: true,
             ),
           ),
         ),
       ),
     );
 
-    expect(find.text('相对正常'), findsWidgets);
-    expect(find.text('当前未发现明显的相对压力异常'), findsOneWidget);
+    expect(find.text('未承重'), findsOneWidget);
+    expect(find.text('当前未承重或受力过低'), findsOneWidget);
     expect(find.textContaining('占比 0.0%'), findsNothing);
     expect(find.textContaining('异常程度 100%'), findsNothing);
+  });
+
+  testWidgets('single high residual pressure point is treated as unloaded',
+      (tester) async {
+    const frame = FootFrame(
+      protocolVersion: 1,
+      sensorLayoutVersion: 'layout_6p4t_v1',
+      deviceId: 'foot_right_001',
+      side: 'right',
+      syncId: 1,
+      packetSeq: 3,
+      timestampMs: 1760000000400,
+      pressure: [0, 0, 0.12, 0, 0, 0],
+      temperature: [30, 30, 30, 30],
+      imu: ImuData(ax: 0, ay: 0, az: 1, gx: 0, gy: 0, gz: 0),
+      battery: 95,
+      qualityFlags: 0,
+      source: 'ble',
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: FootPressureView(
+              side: 'right',
+              frame: frame,
+              pressureScores: [0, 0, 1, 0, 0, 0],
+              baselineReady: true,
+              showPressureAbnormality: true,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('未承重'), findsOneWidget);
+    expect(find.text('当前未承重或受力过低'), findsOneWidget);
+    expect(find.textContaining('相对异常区域'), findsNothing);
+  });
+
+  testWidgets('valid pressure regions stay visible when other channels fail',
+      (tester) async {
+    const frame = FootFrame(
+      protocolVersion: 1,
+      sensorLayoutVersion: 'layout_6p4t_v1',
+      deviceId: 'foot_left_001',
+      side: 'left',
+      syncId: 1,
+      packetSeq: 3,
+      timestampMs: 1760000000400,
+      pressure: [0.72, 0.41, 0.20, 0, 0, 0],
+      temperature: [0, 0, 0, 0],
+      imu: ImuData(ax: 0, ay: 0, az: 1, gx: 0, gy: 0, gz: 0),
+      battery: 95,
+      qualityFlags: 0x3f8,
+      source: 'ble',
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: FootPressureView(side: 'left', frame: frame),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('压力不可用'), findsOneWidget);
+    expect(find.textContaining('3 个压力点数据不可用'), findsOneWidget);
+    expect(find.text('当前未承重或受力过低'), findsNothing);
+    expect(find.text('温度不可用'), findsOneWidget);
   });
 }

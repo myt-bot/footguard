@@ -18,11 +18,12 @@ from ..config import (
 from ..schemas import (
     AiAdviceRequest,
     AiAdviceResponse,
+    AiChatRequest,
+    AiChatResponse,
     AiQuestionRequest,
     AiQuestionResponse,
 )
 from ..schemas import StrictModel
-from .command_service import motor_profile_for_level
 
 
 MOCK_PROVIDER = "mock-risk-advisor-v1"
@@ -51,6 +52,46 @@ class _CloudQuestionAnswer(StrictModel):
     answer: str = Field(min_length=1, max_length=430)
 
 
+def _chat_fallback(payload: AiChatRequest) -> str:
+    if not payload.left_connected or not payload.right_connected:
+        text = "当前左右设备连接不完整，请先恢复双脚连接和同步，再解读双足风险。"
+    elif not payload.pressure_available:
+        text = "当前压力数据不可用，请检查压力通道、鞋垫接触和连接状态。"
+    elif not payload.baseline_ready:
+        text = "当前正在建立本次穿戴基线，请双脚平行自然站立约 8–12 秒。"
+    elif payload.risk.risk_type == "normal":
+        temperature = (
+            "温度数据当前不可用，但不影响压力监测。"
+            if not payload.temperature_available
+            else "有效温度点暂未达到风险阈值。"
+        )
+        text = f"当前压力规则未发现持续异常。{temperature}请继续观察趋势和足部皮肤状态。"
+    else:
+        text = f"{_explanation(payload)}{_advice(payload)}"
+    return text if MEDICAL_BOUNDARY in text else f"{text}{MEDICAL_BOUNDARY}"
+
+
+def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是足安智垫辅助监测状态助手。只依据结构化状态回答用户问题，"
+                "不得诊断疾病、虚构数值或决定马达动作。用简洁中文输出 JSON，"
+                f"只包含 answer 字符串，末尾说明：{MEDICAL_BOUNDARY}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+
 @dataclass(frozen=True)
 class _CloudSettings:
     base_url: str
@@ -75,23 +116,46 @@ def _cloud_settings() -> _CloudSettings | None:
 
 
 def _risk_target(payload: AiAdviceRequest) -> str:
-    risk = payload.risk
-    if risk.risk_type == "left_load_bias":
-        return "left" if risk.risk_side == "left" else "none"
-    if risk.risk_type == "right_load_bias":
-        return "right" if risk.risk_side == "right" else "none"
-    if risk.risk_type in {"forefoot_high", "temperature_asymmetry"}:
-        return risk.risk_side if risk.risk_side in {"left", "right", "both"} else "none"
-    return "none"
+    risks = payload.active_risks or [payload.risk]
+
+    def valid_sides(risk: RiskState) -> tuple[str, ...]:
+        if risk.risk_type == "left_load_bias":
+            return ("left",) if risk.risk_side == "left" else ()
+        if risk.risk_type == "right_load_bias":
+            return ("right",) if risk.risk_side == "right" else ()
+        if risk.risk_type in {"forefoot_high", "temperature_asymmetry"}:
+            if risk.risk_side == "both":
+                return ("left", "right")
+            return (risk.risk_side,) if risk.risk_side in {"left", "right"} else ()
+        return ()
+
+    sides = {
+        side
+        for risk in risks
+        if risk.risk_level >= MOTOR_COMMAND_LEVEL
+        for side in valid_sides(risk)
+    }
+    if sides == {"left", "right"}:
+        return "both"
+    return next(iter(sides)) if sides else "none"
 
 
 def _candidate_pattern(payload: AiAdviceRequest, target: str) -> str:
-    if target == "none" or payload.risk.risk_level < MOTOR_COMMAND_LEVEL:
+    risks = [
+        risk
+        for risk in (payload.active_risks or [payload.risk])
+        if risk.risk_level >= MOTOR_COMMAND_LEVEL
+    ]
+    if target == "none" or not risks:
         return "off"
-    profile = motor_profile_for_level(payload.risk.risk_level)
-    if profile is None:
-        return "off"
-    pattern, _ = profile
+    if any(risk.risk_type == "forefoot_high" for risk in risks):
+        pattern = "long"
+    elif any(risk.risk_type in {"left_load_bias", "right_load_bias"} for risk in risks):
+        pattern = "double"
+    elif any(risk.risk_type == "temperature_asymmetry" for risk in risks):
+        pattern = "short"
+    else:
+        pattern = "off"
     if pattern not in SUPPORTED_PATTERNS:
         raise RuntimeError(f"unsupported motor pattern: {pattern}")
     return pattern
@@ -100,7 +164,15 @@ def _candidate_pattern(payload: AiAdviceRequest, target: str) -> str:
 def _explanation(payload: AiAdviceRequest) -> str:
     risk = payload.risk
     if risk.risk_type == "normal":
-        return "当前双足压力与温度对比未发现达到规则阈值的明显异常。"
+        if not payload.left_connected or not payload.right_connected:
+            return "当前左右设备连接不完整，暂时不能形成可靠的双足风险结论。"
+        if not payload.pressure_available:
+            return "当前压力有效点不足，压力风险判断已暂停。"
+        if not payload.baseline_ready:
+            return "当前正在建立本次穿戴压力基线，热力图可见但压力风险尚未启用。"
+        if not payload.temperature_available:
+            return "当前压力规则未发现持续异常；温度数据不可用，但不会影响压力监测。"
+        return "当前双足压力与有效温度对比未发现达到规则阈值的明显异常。"
     if risk.risk_type == "data_incomplete":
         return "当前双足数据不完整，无法形成可靠的风险解释。"
     if risk.risk_type == "left_load_bias":
@@ -132,6 +204,12 @@ def _explanation(payload: AiAdviceRequest) -> str:
 def _advice(payload: AiAdviceRequest) -> str:
     risk_type = payload.risk.risk_type
     if risk_type == "normal":
+        if not payload.left_connected or not payload.right_connected:
+            return "请先恢复左右设备连接和同步，再解读双足状态。"
+        if not payload.pressure_available:
+            return "请检查压力通道、鞋垫接触和接线，恢复足够有效点后再判断压力风险。"
+        if not payload.baseline_ready:
+            return "请双脚平行自然站立约 8–12 秒，等待本次穿戴基线完成。"
         return "继续保持当前状态并观察趋势；如有不适，请及时检查足部。"
     if risk_type == "data_incomplete":
         return "请检查左右脚设备连接、传感器接触和供电，数据恢复后再判断风险。"
@@ -331,6 +409,38 @@ def _request_cloud_question_answer(
             active_client.close()
 
 
+def _request_cloud_chat_answer(
+    payload: AiChatRequest,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> _CloudQuestionAnswer:
+    owns_client = client is None
+    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    try:
+        response = active_client.post(
+            f"{settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.model,
+                "messages": _cloud_chat_prompt(payload),
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise CloudAdviceError("cloud response content is not text")
+        return _CloudQuestionAnswer.model_validate_json(content)
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        raise CloudAdviceError("cloud provider returned an invalid response") from error
+    finally:
+        if owns_client:
+            active_client.close()
+
+
 def _cloud_provider_name(model: str) -> str:
     return f"openai-compatible:{model}"[:64]
 
@@ -398,4 +508,34 @@ def generate_question_answer(
         return generate_mock_question_answer(
             payload,
             provider=FALLBACK_PROVIDER,
+        )
+
+
+def generate_chat_answer(
+    payload: AiChatRequest,
+    client: httpx.Client | None = None,
+) -> AiChatResponse:
+    settings = _cloud_settings()
+    if settings is None:
+        return AiChatResponse(
+            provider=MOCK_PROVIDER,
+            question=payload.question,
+            answer=_chat_fallback(payload),
+        )
+    try:
+        narrative = _request_cloud_chat_answer(payload, settings, client)
+        answer = narrative.answer.rstrip()
+        if MEDICAL_BOUNDARY not in answer:
+            answer = f"{answer}{MEDICAL_BOUNDARY}"
+        return AiChatResponse(
+            provider=_cloud_provider_name(settings.model),
+            question=payload.question,
+            answer=answer,
+        )
+    except CloudAdviceError as error:
+        logger.warning("Cloud AI chat unavailable; using fallback: %s", error)
+        return AiChatResponse(
+            provider=FALLBACK_PROVIDER,
+            question=payload.question,
+            answer=_chat_fallback(payload),
         )
