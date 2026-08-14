@@ -16,4 +16,10 @@ class SessionAdvice {
         sessionStatus: json['session_status'] as String,
         advice: json['advice'] as String,
       );
+
+  Map<String, dynamic> toJson() => {
+        'provider': provider,
+        'session_status': sessionStatus,
+        'advice': advice,
+      };
 }

@@ -1,5 +1,10 @@
 enum FootDataMode { mock, csvReplay, backend, ble }
 
+const diagnosticReplayEnabled = bool.fromEnvironment(
+  'FOOTGUARD_DIAGNOSTIC_REPLAY',
+  defaultValue: false,
+);
+
 bool isValidBackendUrl(String value) {
   final uri = Uri.tryParse(value.trim());
   return uri != null &&
@@ -36,7 +41,7 @@ class CsvReplayOption {
 class AppSettings {
   const AppSettings({
     this.backendUrl = 'http://10.0.2.2:8000',
-    this.dataMode = FootDataMode.mock,
+    this.dataMode = FootDataMode.ble,
     this.mockScenario = 'normal_stand',
     this.csvAsset = 'assets/sample_data/intervention_recovery.csv',
     this.replaySpeed = 1.0,

@@ -9,6 +9,8 @@ class OfflineMonitoringStore {
   static const _framesKey = 'footguard.offline_frame_pairs.v1';
   static const _baselineKey = 'footguard.local_baseline.v1';
   static const _interventionsKey = 'footguard.offline_interventions.v1';
+  static const _analyticsKey = 'footguard.session_analytics.v1';
+  static const _sessionAdviceKey = 'footguard.session_advice.v1';
   static const maxPairs = 1800;
 
   Future<List<List<FootFrame>>> loadPairs() async {
@@ -90,6 +92,43 @@ class OfflineMonitoringStore {
         _interventionsKey,
         jsonEncode(records.take(200).map((item) => item.toJson()).toList()),
       );
+    } catch (_) {}
+  }
+
+  Future<List<Map<String, dynamic>>> loadAnalytics() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_analyticsKey);
+      if (raw == null) return [];
+      return (jsonDecode(raw) as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveAnalytics(List<Map<String, dynamic>> rows) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(_analyticsKey, jsonEncode(rows));
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>?> loadSessionAdvice() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_sessionAdviceKey);
+      return raw == null ? null : jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveSessionAdvice(Map<String, dynamic> advice) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(_sessionAdviceKey, jsonEncode(advice));
     } catch (_) {}
   }
 }

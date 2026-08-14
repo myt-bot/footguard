@@ -16,7 +16,7 @@ void main() {
     final settings = await store.load();
 
     expect(settings.backendUrl, 'http://10.0.2.2:8000');
-    expect(settings.dataMode, FootDataMode.mock);
+    expect(settings.dataMode, FootDataMode.ble);
     expect(settings.mockScenario, 'normal_stand');
     expect(settings.replaySpeed, 1.0);
   });
@@ -54,7 +54,7 @@ void main() {
     final restored = await store.load();
 
     expect(restored.backendUrl, const AppSettings().backendUrl);
-    expect(restored.dataMode, FootDataMode.mock);
+    expect(restored.dataMode, FootDataMode.ble);
     expect(restored.mockScenario, 'normal_stand');
     expect(restored.csvAsset, const AppSettings().csvAsset);
     expect(restored.replaySpeed, 4.0);

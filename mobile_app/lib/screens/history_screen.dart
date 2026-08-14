@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../data/api_client.dart';
+import '../models/session_advice.dart';
+import '../services/offline_monitoring_store.dart';
+import '../widgets/session_analysis_view.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({
@@ -18,11 +21,28 @@ class HistoryScreen extends StatefulWidget {
 
 enum _HistoryFilter { all, active, finished }
 
+enum _HistoryView { analysis, events }
+
+class _HistoryPayload {
+  const _HistoryPayload({
+    required this.events,
+    required this.points,
+    required this.advice,
+    this.cached = false,
+  });
+  final List<RiskEventRecord> events;
+  final List<AnalyticsFramePoint> points;
+  final SessionAdvice? advice;
+  final bool cached;
+}
+
 class _HistoryScreenState extends State<HistoryScreen> {
   late final FootGuardApiClient api =
       widget.apiClient ?? FootGuardApiClient(baseUrl: widget.backendUrl);
-  late Future<List<RiskEventRecord>> events = api.events();
+  final OfflineMonitoringStore _store = OfflineMonitoringStore();
+  late Future<_HistoryPayload> payload = _load();
   _HistoryFilter filter = _HistoryFilter.all;
+  _HistoryView view = _HistoryView.analysis;
 
   @override
   void dispose() {
@@ -31,8 +51,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<List<RiskEventRecord>>(
-        future: events,
+  Widget build(BuildContext context) => FutureBuilder<_HistoryPayload>(
+        future: payload,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -43,11 +63,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 text: '无法读取历史事件\n${snapshot.error}',
                 onRetry: _reload);
           }
-          final data = snapshot.data ?? const [];
-          if (data.isEmpty) {
-            return _Message(
-                icon: Icons.event_available, text: '暂无风险事件', onRetry: _reload);
-          }
+          final result = snapshot.data ??
+              const _HistoryPayload(events: [], points: [], advice: null);
+          final data = result.events;
 
           final filtered = data.where((event) {
             return switch (filter) {
@@ -72,62 +90,87 @@ class _HistoryScreenState extends State<HistoryScreen> {
               padding: const EdgeInsets.all(16),
               children: [
                 const Text(
-                  '历史风险记录',
+                  '会话分析与风险记录',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '查看风险发生、提醒与负载改善结果。记录仅用于辅助监测，不替代医疗诊断。',
+                  '查看压力、温度、提醒与负载改善结果。记录仅用于辅助监测，不替代医疗诊断。',
                   style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
                 ),
                 const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _SummaryTile(
-                        label: '风险事件',
-                        value: '${data.length} 条',
-                        icon: Icons.event_note_rounded,
-                        color: const Color(0xFF147D73),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _SummaryTile(
-                        label: '预警及以上',
-                        value: '$highRiskCount 条',
-                        icon: Icons.warning_amber_rounded,
-                        color: const Color(0xFFE07A36),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _SummaryTile(
-                        label: '负载有改善',
-                        value: '$improvedCount 条',
-                        icon: Icons.trending_down_rounded,
-                        color: const Color(0xFF1A9B78),
-                      ),
-                    ),
+                SegmentedButton<_HistoryView>(
+                  segments: const [
+                    ButtonSegment(
+                        value: _HistoryView.analysis,
+                        label: Text('会话分析'),
+                        icon: Icon(Icons.insights_outlined)),
+                    ButtonSegment(
+                        value: _HistoryView.events,
+                        label: Text('风险事件'),
+                        icon: Icon(Icons.history_rounded)),
                   ],
+                  selected: {view},
+                  onSelectionChanged: (selected) =>
+                      setState(() => view = selected.first),
                 ),
                 const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    _filterChip(_HistoryFilter.all, '全部'),
-                    _filterChip(_HistoryFilter.active, '进行中'),
-                    _filterChip(_HistoryFilter.finished, '已结束'),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (filtered.isEmpty)
-                  const _EmptyFilter()
-                else
-                  for (final event in filtered) ...[
-                    _HistoryEventCard(event: event),
-                    const SizedBox(height: 10),
-                  ],
+                if (view == _HistoryView.analysis)
+                  SessionAnalysisView(
+                    points: result.points,
+                    events: data,
+                    advice: result.advice,
+                    cached: result.cached,
+                  )
+                else ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _SummaryTile(
+                          label: '风险事件',
+                          value: '${data.length} 条',
+                          icon: Icons.event_note_rounded,
+                          color: const Color(0xFF147D73),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _SummaryTile(
+                          label: '需要减负事件',
+                          value: '$highRiskCount 条',
+                          icon: Icons.warning_amber_rounded,
+                          color: const Color(0xFFE07A36),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _SummaryTile(
+                          label: '负载有改善',
+                          value: '$improvedCount 条',
+                          icon: Icons.trending_down_rounded,
+                          color: const Color(0xFF1A9B78),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      _filterChip(_HistoryFilter.all, '全部'),
+                      _filterChip(_HistoryFilter.active, '进行中'),
+                      _filterChip(_HistoryFilter.finished, '已结束'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (filtered.isEmpty)
+                    const _EmptyFilter()
+                  else
+                    for (final event in filtered) ...[
+                      _HistoryEventCard(event: event),
+                      const SizedBox(height: 10),
+                    ],
+                ],
               ],
             ),
           );
@@ -142,9 +185,87 @@ class _HistoryScreenState extends State<HistoryScreen> {
     );
   }
 
+  Future<_HistoryPayload> _load() async {
+    List<RiskEventRecord> events = const [];
+    List<AnalyticsFramePoint> points = const [];
+    SessionAdvice? advice;
+    Object? primaryError;
+    try {
+      events = await api.events();
+    } catch (error) {
+      primaryError = error;
+    }
+    var cached = false;
+    try {
+      points = await api.analyticsTimeseries();
+      await _store.saveAnalytics(
+          points.map((item) => item.toJson()).toList(growable: false));
+    } catch (_) {
+      points = (await _store.loadAnalytics())
+          .map(AnalyticsFramePoint.fromJson)
+          .toList(growable: false);
+      if (points.isEmpty) {
+        final pairs = await _store.loadPairs();
+        points = pairs
+            .expand((pair) => pair)
+            .map(AnalyticsFramePoint.fromFootFrame)
+            .toList(growable: false);
+      }
+      cached = points.isNotEmpty;
+    }
+    try {
+      advice = await api.sessionAdvice();
+      await _store.saveSessionAdvice(advice.toJson());
+    } catch (_) {
+      final raw = await _store.loadSessionAdvice();
+      advice = raw == null ? null : SessionAdvice.fromJson(raw);
+      advice ??= _localSessionAdvice(events, points);
+      cached = cached || advice != null;
+    }
+    if (primaryError != null && points.isEmpty && advice == null) {
+      throw primaryError;
+    }
+    return _HistoryPayload(
+        events: events, points: points, advice: advice, cached: cached);
+  }
+
+  SessionAdvice? _localSessionAdvice(
+    List<RiskEventRecord> events,
+    List<AnalyticsFramePoint> points,
+  ) {
+    if (events.isEmpty && points.isEmpty) return null;
+    final pressureEvents = events.where(
+      (event) => event.riskType != 'temperature_asymmetry',
+    );
+    final recovered = events.where(
+      (event) => const {'effective', 'partial'}.contains(event.effectLabel),
+    );
+    final left = points.where((point) => point.side == 'left').toList();
+    final right = points.where((point) => point.side == 'right').toList();
+    double averageLoad(List<AnalyticsFramePoint> rows) => rows.isEmpty
+        ? 0
+        : rows.fold<double>(0, (sum, row) => sum + row.totalPressure) /
+            rows.length;
+    final leftLoad = averageLoad(left);
+    final rightLoad = averageLoad(right);
+    final loadNote = leftLoad <= 0 && rightLoad <= 0
+        ? '本地缓存中没有足够的承重数据。'
+        : '最近缓存的左右平均载荷比约为 '
+            '${leftLoad.toStringAsFixed(2)}:${rightLoad.toStringAsFixed(2)}。';
+    return SessionAdvice(
+      provider: 'local-session-template',
+      sessionStatus: 'recent',
+      advice: '当前无实时后端数据，以下为最近会话辅助建议：'
+          '$loadNote本地记录 ${pressureEvents.length} 次压力减负事件，'
+          '其中 ${recovered.length} 次在观察期内有改善。'
+          '建议优先核对反复出现的一侧和前掌区域，并结合皮肤外观、鞋内异物与鞋垫贴合情况观察。'
+          '本建议仅用于辅助监测，不替代医疗诊断。',
+    );
+  }
+
   Future<void> _reload() async {
-    setState(() => events = api.events());
-    await events;
+    setState(() => payload = _load());
+    await payload;
   }
 }
 
@@ -271,7 +392,7 @@ class _HistoryEventCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _DetailValue(
-                  label: '风险等级',
+                  label: '事件状态',
                   value: _levelLabel(event.riskLevel),
                 ),
               ),
@@ -364,6 +485,12 @@ class _RecoveryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final componentFeedback = event.componentFeedback
+        .where((item) => item.pressureIntervention)
+        .toList(growable: false);
+    if (componentFeedback.isNotEmpty) {
+      return _ComponentRecoveryPanel(feedback: componentFeedback);
+    }
     if (!_isLoadBiasRisk(event.riskType)) {
       return _NonLoadBiasRecoveryPanel(event: event);
     }
@@ -447,6 +574,48 @@ class _RecoveryPanel extends StatelessWidget {
   }
 }
 
+class _ComponentRecoveryPanel extends StatelessWidget {
+  const _ComponentRecoveryPanel({required this.feedback});
+
+  final List<RiskComponentFeedbackRecord> feedback;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEAF7F3),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('提醒后的压力重新分配观察',
+                style: TextStyle(
+                    color: Color(0xFF147D73), fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            for (final item in feedback)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                        child: Text(
+                            '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}')),
+                    Text(_componentEffectLabel(item.effectLabel),
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    if (item.improvementRatio != null) ...[
+                      const SizedBox(width: 6),
+                      Text('${(item.improvementRatio! * 100).round()}%'),
+                    ],
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+}
+
 class _NonLoadBiasRecoveryPanel extends StatelessWidget {
   const _NonLoadBiasRecoveryPanel({required this.event});
 
@@ -519,10 +688,10 @@ class _EmptyFilter extends StatelessWidget {
 }
 
 String _riskLabel(String riskType) => switch (riskType) {
-      'left_load_bias' => '左脚负载持续偏高',
-      'right_load_bias' => '右脚负载持续偏高',
-      'forefoot_high' => '前掌持续高载',
-      'temperature_asymmetry' => '同区温差异常',
+      'left_load_bias' => '左侧负载持续偏高',
+      'right_load_bias' => '右侧负载持续偏高',
+      'forefoot_high' => '前掌负荷持续集中',
+      'temperature_asymmetry' => '同区温度趋势异常',
       _ => riskType,
     };
 
@@ -559,10 +728,17 @@ String _sideLabel(String side) => switch (side) {
     };
 
 String _levelLabel(int level) => switch (level) {
-      >= 3 => '3级 · 持续风险',
-      2 => '2级 · 预警',
-      1 => '1级 · 关注',
-      _ => '0级 · 正常',
+      >= 3 => '持续未改善',
+      2 => '需要减负',
+      1 => '趋势观察',
+      _ => '正常',
+    };
+
+String _componentEffectLabel(String value) => switch (value) {
+      'effective' => '明显改善',
+      'partial' => '部分改善',
+      'ineffective' => '未改善',
+      _ => '数据不足',
     };
 
 String _statusLabel(String status) => switch (status) {

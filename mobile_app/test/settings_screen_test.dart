@@ -26,7 +26,8 @@ Future<void> _scrollUntilVisible(
 }
 
 void main() {
-  testWidgets('settings display mock scenarios in Chinese', (tester) async {
+  testWidgets('release settings expose BLE mode without simulation controls',
+      (tester) async {
     AppSettings? applied;
     await tester.pumpWidget(
       MaterialApp(
@@ -39,50 +40,15 @@ void main() {
       ),
     );
 
-    expect(find.text('模拟场景'), findsOneWidget);
-    expect(find.text('正常站立'), findsWidgets);
-    expect(find.textContaining('双脚稳定承重'), findsOneWidget);
-    expect(find.text('normal_stand'), findsNothing);
-
-    await tester.tap(find.text('正常站立').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('左脚持续偏载').last);
-    await tester.pumpAndSettle();
-    await _scrollUntilVisible(tester, find.text('应用设置'));
-    await tester.tap(find.text('应用设置'));
-    await tester.pump();
-
-    expect(applied?.mockScenario, 'left_load_bias');
-  });
-
-  testWidgets('CSV mode exposes dataset and replay speed controls',
-      (tester) async {
-    AppSettings? applied;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: const AppSettings(dataMode: FootDataMode.csvReplay),
-            onChanged: (settings) => applied = settings,
-          ),
-        ),
-      ),
-    );
-
-    expect(find.text('CSV 回放数据'), findsOneWidget);
-    expect(find.text('提醒前后恢复演示'), findsOneWidget);
-    expect(find.text('CSV 回放速度'), findsOneWidget);
+    expect(find.text('BLE 真机模式'), findsOneWidget);
+    expect(find.text('数据源'), findsNothing);
     expect(find.text('模拟场景'), findsNothing);
-
-    await tester.tap(find.text('提醒前后恢复演示'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('正常行走').last);
-    await tester.pumpAndSettle();
+    expect(find.text('CSV 回放数据'), findsNothing);
     await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
 
-    expect(applied?.csvAsset, 'assets/sample_data/normal_walk.csv');
+    expect(applied?.dataMode, FootDataMode.ble);
   });
 
   testWidgets('backend address can be validated before applying settings',

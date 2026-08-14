@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/api_client.dart';
 import '../models/risk_state.dart';
 
 class RiskBanner extends StatelessWidget {
@@ -9,21 +10,31 @@ class RiskBanner extends StatelessWidget {
     this.activeRisks = const [],
     this.baselineReady = true,
     this.pressureAvailable = true,
+    this.recoveryObservation,
+    this.backendOnline = true,
   });
 
   final RiskState risk;
   final List<RiskState> activeRisks;
   final bool baselineReady;
   final bool pressureAvailable;
+  final RecoveryObservation? recoveryObservation;
+  final bool backendOnline;
 
   @override
   Widget build(BuildContext context) {
     final displayedRisks = activeRisks.isEmpty ? [risk] : activeRisks;
+    final ordered = List<RiskState>.of(displayedRisks)
+      ..sort((a, b) {
+        final priority = _priority(b).compareTo(_priority(a));
+        return priority != 0 ? priority : b.riskLevel.compareTo(a.riskLevel);
+      });
+    final primary = ordered.first;
     final (color, icon, title) = !baselineReady && risk.isNormal
         ? (const Color(0xFF39758C), Icons.tune_rounded, '本次穿戴基线学习中')
         : !pressureAvailable && risk.isNormal
             ? (const Color(0xFFC77822), Icons.sensors_off_rounded, '未检测到有效承重')
-            : switch (risk.riskType) {
+            : switch (primary.riskType) {
                 'normal' => (
                     const Color(0xFF1A9B78),
                     Icons.verified_rounded,
@@ -32,22 +43,22 @@ class RiskBanner extends StatelessWidget {
                 'left_load_bias' => (
                     const Color(0xFFF08A24),
                     Icons.keyboard_double_arrow_left,
-                    '检测到持续左偏'
+                    '双足负载分配异常'
                   ),
                 'right_load_bias' => (
                     const Color(0xFFF08A24),
                     Icons.keyboard_double_arrow_right,
-                    '检测到持续右偏'
+                    '双足负载分配异常'
                   ),
                 'forefoot_high' => (
                     const Color(0xFFDE5D52),
                     Icons.warning_amber_rounded,
-                    '前掌持续高载'
+                    _riskLabel(primary)
                   ),
                 'temperature_asymmetry' => (
                     const Color(0xFFD9534F),
                     Icons.device_thermostat_rounded,
-                    '检测到同区异常温差'
+                    '同区温度趋势异常'
                   ),
                 _ => (
                     const Color(0xFF718096),
@@ -55,6 +66,21 @@ class RiskBanner extends StatelessWidget {
                     '双足数据不完整'
                   ),
               };
+    final observation = recoveryObservation;
+    final observing = observation?.status == 'observing';
+    final seconds =
+        observation == null ? 0 : (observation.remainingMs / 1000).ceil();
+    final progress = observation == null
+        ? 0.0
+        : observing
+            ? (1 - observation.remainingMs / 15000).clamp(0.0, 1.0)
+            : 1.0;
+    final result = switch (observation?.effectLabel) {
+      'effective' => '压力分配已改善',
+      'partial' => '部分压力指标改善',
+      'ineffective' => '压力分配仍未改善',
+      _ => '数据不足',
+    };
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -62,49 +88,156 @@ class RiskBanner extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
-              backgroundColor: color, child: Icon(icon, color: Colors.white)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          Row(
+            children: [
+              CircleAvatar(
+                  backgroundColor: color,
+                  child: Icon(icon, color: Colors.white)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 3),
+                    Text(!baselineReady && risk.isNormal
+                        ? '热力图继续显示，压力风险与马达暂未启用'
+                        : !pressureAvailable && risk.isNormal
+                            ? '压力风险已暂停；请确认已穿戴并检查压力采集连接'
+                            : primary.isNormal
+                                ? '当前未发现需要减负的持续异常'
+                                : '${_stateLabel(primary.riskLevel)} · '
+                                    '持续 ${(primary.durationMs / 1000).toStringAsFixed(1)} 秒'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (ordered.length > 1) ...[
+            const SizedBox(height: 10),
+            const Text('同时存在',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: ordered
+                  .skip(1)
+                  .map((item) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_riskLabel(item)),
+                      ))
+                  .toList(growable: false),
+            ),
+          ],
+          if (observation != null) ...[
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 10),
+            Row(
               children: [
-                Text(title,
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 3),
-                Text(!baselineReady && risk.isNormal
-                    ? '热力图继续显示，压力风险与马达暂未启用'
-                    : !pressureAvailable && risk.isNormal
-                        ? '压力风险已暂停；请确认已穿戴并检查压力采集连接'
-                        : displayedRisks
-                            .map((item) =>
-                                '${_riskLabel(item)} · 等级 ${item.riskLevel} · '
-                                '${(item.durationMs / 1000).toStringAsFixed(1)} 秒')
-                            .join('\n')),
+                Icon(observing
+                    ? Icons.timer_outlined
+                    : Icons.fact_check_outlined),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    observing
+                        ? (!backendOnline &&
+                                !observation.eventId.startsWith('local_evt_')
+                            ? '后端断开，压力重新分配观察已暂停'
+                            : '提醒后的压力重新分配观察：$seconds 秒')
+                        : '观察结果：$result',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
               ],
             ),
-          ),
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: progress),
+            if (!observing && observation.componentFeedback.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: observation.componentFeedback
+                    .where((item) => item.pressureIntervention)
+                    .map(
+                      (item) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(
+                          '${_componentLabel(item)}：${_componentEffect(item.effectLabel)}',
+                        ),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ],
+          ],
+          if (ordered
+              .any((item) => item.riskType == 'temperature_asymmetry')) ...[
+            const SizedBox(height: 10),
+            const Text(
+              '温度趋势用于足部检查与持续观察，不计入15秒压力改善结果。',
+              style: TextStyle(fontSize: 11, color: Color(0xFF806119)),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  String _riskLabel(RiskState item) => switch (item.riskType) {
-        'left_load_bias' => '左偏',
-        'right_load_bias' => '右偏',
+  static int _priority(RiskState risk) => switch (risk.riskType) {
+        'forefoot_high' => 3,
+        'left_load_bias' || 'right_load_bias' => 2,
+        'temperature_asymmetry' => 1,
+        _ => 0,
+      };
+
+  static String _stateLabel(int level) => switch (level) {
+        >= 3 => '持续未改善',
+        2 => '需要减负',
+        1 => '趋势观察中',
+        _ => '正常',
+      };
+
+  static String _riskLabel(RiskState item) => switch (item.riskType) {
+        'left_load_bias' => '左侧负载持续偏高',
+        'right_load_bias' => '右侧负载持续偏高',
         'forefoot_high' => item.riskSide == 'both'
-            ? '双脚前掌高载'
+            ? '双脚前掌负荷持续集中'
             : item.riskSide == 'left'
-                ? '左脚前掌高载'
-                : '右脚前掌高载',
+                ? '左脚前掌负荷持续集中'
+                : '右脚前掌负荷持续集中',
         'temperature_asymmetry' =>
-          item.riskSide == 'left' ? '左脚同区温度较高' : '右脚同区温度较高',
+          item.riskSide == 'left' ? '左脚同区温度趋势异常' : '右脚同区温度趋势异常',
         'normal' => '当前正常',
         _ => '数据不完整',
+      };
+
+  static String _componentLabel(RiskComponentFeedbackRecord item) =>
+      switch (item.riskType) {
+        'left_load_bias' => '左侧负载',
+        'right_load_bias' => '右侧负载',
+        'forefoot_high' => item.riskSide == 'both'
+            ? '双脚前掌'
+            : item.riskSide == 'left'
+                ? '左脚前掌'
+                : '右脚前掌',
+        _ => '压力指标',
+      };
+
+  static String _componentEffect(String value) => switch (value) {
+        'effective' => '改善',
+        'partial' => '部分改善',
+        'ineffective' => '未改善',
+        _ => '数据不足',
       };
 }

@@ -6,8 +6,39 @@ import 'package:footguard/data/api_client.dart';
 import 'package:footguard/screens/history_screen.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+http.Response _supportingResponse(http.Request request) {
+  if (request.url.path == '/api/v1/analytics/timeseries') {
+    return http.Response('[]', 200,
+        headers: {'content-type': 'application/json; charset=utf-8'});
+  }
+  if (request.url.path == '/api/v1/ai/session-advice') {
+    return http.Response.bytes(
+      utf8.encode(jsonEncode({
+        'provider': 'local-session-template',
+        'session_status': 'recent',
+        'advice': '当前无实时数据，以下为最近会话辅助建议。',
+      })),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+  }
+  return http.Response('not found', 404);
+}
+
+Future<void> _showEvents(WidgetTester tester) async {
+  await tester.tap(find.text('风险事件'));
+  await tester.pumpAndSettle();
+}
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
   test('risk event parses before and after intervention values', () {
     final event = RiskEventRecord.fromJson({
       'event_id': 'evt_1_left',
@@ -35,6 +66,9 @@ void main() {
   testWidgets('history shows risk timeline and recovery comparison',
       (tester) async {
     final client = MockClient((request) async {
+      if (request.url.path != '/api/v1/events') {
+        return _supportingResponse(request);
+      }
       expect(request.url.path, '/api/v1/events');
       return http.Response.bytes(
         utf8.encode(jsonEncode([
@@ -86,15 +120,16 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await _showEvents(tester);
 
-    expect(find.text('历史风险记录'), findsOneWidget);
+    expect(find.text('会话分析与风险记录'), findsOneWidget);
     expect(find.text('2 条'), findsNWidgets(2));
-    expect(find.text('左脚负载持续偏高'), findsOneWidget);
-    expect(find.text('同区温差异常'), findsOneWidget);
+    expect(find.text('左侧负载持续偏高'), findsOneWidget);
+    expect(find.text('同区温度趋势异常'), findsOneWidget);
     expect(find.text('已恢复'), findsOneWidget);
     expect(find.text('进行中'), findsWidgets);
 
-    await tester.tap(find.text('左脚负载持续偏高'));
+    await tester.tap(find.text('左侧负载持续偏高'));
     await tester.pumpAndSettle();
 
     expect(find.text('干预后评估：明显改善'), findsOneWidget);
@@ -106,27 +141,30 @@ void main() {
 
   testWidgets('history derives load-bias result from displayed values',
       (tester) async {
-    final client = MockClient((request) async => http.Response.bytes(
-          utf8.encode(jsonEncode([
-            {
-              'event_id': 'evt_inconsistent',
-              'risk_type': 'right_load_bias',
-              'risk_side': 'right',
-              'risk_level': 3,
-              'started_at_ms': 1760000000000,
-              'ended_at_ms': 1760000010000,
-              'duration_ms': 10000,
-              'before_load_diff': 0.65,
-              'after_load_diff': 0.70,
-              'intervention_action': 'motor_vibration',
-              'effect_label': 'effective',
-              'recovery_time_ms': 2500,
-              'status': 'resolved',
-            },
-          ])),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        ));
+    final client =
+        MockClient((request) async => request.url.path != '/api/v1/events'
+            ? _supportingResponse(request)
+            : http.Response.bytes(
+                utf8.encode(jsonEncode([
+                  {
+                    'event_id': 'evt_inconsistent',
+                    'risk_type': 'right_load_bias',
+                    'risk_side': 'right',
+                    'risk_level': 3,
+                    'started_at_ms': 1760000000000,
+                    'ended_at_ms': 1760000010000,
+                    'duration_ms': 10000,
+                    'before_load_diff': 0.65,
+                    'after_load_diff': 0.70,
+                    'intervention_action': 'motor_vibration',
+                    'effect_label': 'effective',
+                    'recovery_time_ms': 2500,
+                    'status': 'resolved',
+                  },
+                ])),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              ));
     final api =
         FootGuardApiClient(baseUrl: 'http://example.test', client: client);
 
@@ -139,7 +177,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('右脚负载持续偏高'));
+    await _showEvents(tester);
+    await tester.tap(find.text('右侧负载持续偏高'));
     await tester.pumpAndSettle();
 
     expect(find.text('干预后评估：未见明显改善'), findsOneWidget);
@@ -149,27 +188,30 @@ void main() {
 
   testWidgets('temperature event does not claim load-bias improvement',
       (tester) async {
-    final client = MockClient((request) async => http.Response.bytes(
-          utf8.encode(jsonEncode([
-            {
-              'event_id': 'evt_temperature',
-              'risk_type': 'temperature_asymmetry',
-              'risk_side': 'left',
-              'risk_level': 2,
-              'started_at_ms': 1760000000000,
-              'ended_at_ms': 1760000010000,
-              'duration_ms': 10000,
-              'before_load_diff': 0.90,
-              'after_load_diff': 0.10,
-              'intervention_action': 'motor_vibration',
-              'effect_label': 'effective',
-              'recovery_time_ms': 2500,
-              'status': 'resolved',
-            },
-          ])),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        ));
+    final client =
+        MockClient((request) async => request.url.path != '/api/v1/events'
+            ? _supportingResponse(request)
+            : http.Response.bytes(
+                utf8.encode(jsonEncode([
+                  {
+                    'event_id': 'evt_temperature',
+                    'risk_type': 'temperature_asymmetry',
+                    'risk_side': 'left',
+                    'risk_level': 2,
+                    'started_at_ms': 1760000000000,
+                    'ended_at_ms': 1760000010000,
+                    'duration_ms': 10000,
+                    'before_load_diff': 0.90,
+                    'after_load_diff': 0.10,
+                    'intervention_action': 'motor_vibration',
+                    'effect_label': 'effective',
+                    'recovery_time_ms': 2500,
+                    'status': 'resolved',
+                  },
+                ])),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              ));
     final api =
         FootGuardApiClient(baseUrl: 'http://example.test', client: client);
 
@@ -182,7 +224,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('同区温差异常'));
+    await _showEvents(tester);
+    await tester.tap(find.text('同区温度趋势异常'));
     await tester.pumpAndSettle();
 
     expect(find.text('事件已解除'), findsOneWidget);
@@ -193,38 +236,41 @@ void main() {
 
   testWidgets('combined event lists every active risk component',
       (tester) async {
-    final client = MockClient((request) async => http.Response.bytes(
-          utf8.encode(jsonEncode([
-            {
-              'event_id': 'evt_combined',
-              'risk_type': 'left_load_bias',
-              'risk_side': 'left',
-              'risk_level': 2,
-              'started_at_ms': 1760000000000,
-              'ended_at_ms': 1760000010000,
-              'duration_ms': 10000,
-              'before_load_diff': 0.40,
-              'after_load_diff': 0.15,
-              'status': 'resolved',
-              'active_risks': [
-                {
-                  'risk_type': 'left_load_bias',
-                  'risk_side': 'left',
-                  'risk_level': 2,
-                  'duration_ms': 7600,
-                },
-                {
-                  'risk_type': 'forefoot_high',
-                  'risk_side': 'left',
-                  'risk_level': 2,
-                  'duration_ms': 7200,
-                },
-              ],
-            },
-          ])),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        ));
+    final client =
+        MockClient((request) async => request.url.path != '/api/v1/events'
+            ? _supportingResponse(request)
+            : http.Response.bytes(
+                utf8.encode(jsonEncode([
+                  {
+                    'event_id': 'evt_combined',
+                    'risk_type': 'left_load_bias',
+                    'risk_side': 'left',
+                    'risk_level': 2,
+                    'started_at_ms': 1760000000000,
+                    'ended_at_ms': 1760000010000,
+                    'duration_ms': 10000,
+                    'before_load_diff': 0.40,
+                    'after_load_diff': 0.15,
+                    'status': 'resolved',
+                    'active_risks': [
+                      {
+                        'risk_type': 'left_load_bias',
+                        'risk_side': 'left',
+                        'risk_level': 2,
+                        'duration_ms': 7600,
+                      },
+                      {
+                        'risk_type': 'forefoot_high',
+                        'risk_side': 'left',
+                        'risk_level': 2,
+                        'duration_ms': 7200,
+                      },
+                    ],
+                  },
+                ])),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              ));
     final api =
         FootGuardApiClient(baseUrl: 'http://example.test', client: client);
 
@@ -237,12 +283,13 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+    await _showEvents(tester);
     await tester.tap(find.text('组合风险事件'));
     await tester.pumpAndSettle();
 
     expect(find.text('本次同时存在'), findsOneWidget);
-    expect(find.text('左脚负载持续偏高 · 左脚'), findsOneWidget);
-    expect(find.text('前掌持续高载 · 左脚'), findsOneWidget);
+    expect(find.text('左侧负载持续偏高 · 左脚'), findsOneWidget);
+    expect(find.text('前掌负荷持续集中 · 左脚'), findsOneWidget);
     expect(find.textContaining('7.6 秒'), findsOneWidget);
     expect(find.textContaining('7.2 秒'), findsOneWidget);
   });

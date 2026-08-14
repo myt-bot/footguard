@@ -194,6 +194,7 @@ class RecoveryObservation(StrictModel):
     deadline_at_ms: int = Field(ge=0)
     remaining_ms: int = Field(ge=0)
     effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    component_feedback: list["RiskComponentFeedback"] = Field(default_factory=list)
 
 
 class RegionalAnalysis(StrictModel):
@@ -336,6 +337,20 @@ class RiskEventOut(StrictModel):
     recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
     active_risks: list[RiskState] = Field(default_factory=list)
+    intervention_started_at_ms: int | None = Field(default=None, ge=0)
+    component_feedback: list["RiskComponentFeedback"] = Field(default_factory=list)
+
+
+class RiskComponentFeedback(StrictModel):
+    risk_type: str
+    risk_side: str
+    before_value: float | None = None
+    after_value: float | None = None
+    improvement_ratio: float | None = None
+    effect_label: Literal[
+        "effective", "partial", "ineffective", "unknown", "observation_only"
+    ] = "unknown"
+    pressure_intervention: bool = True
 
 
 class SessionSummary(StrictModel):
@@ -357,6 +372,7 @@ class SessionSummary(StrictModel):
     motor_executed_count: int = Field(default=0, ge=0)
     motor_ack_count: int = Field(default=0, ge=0)
     recovery_counts: dict[str, int] = Field(default_factory=dict)
+    sensor_summary: dict[str, float] = Field(default_factory=dict)
     latest_events: list[RiskEventOut] = Field(default_factory=list)
 
 

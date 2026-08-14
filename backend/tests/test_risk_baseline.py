@@ -183,7 +183,7 @@ def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
             right_total=0.12,
             left_distribution=forefoot_heavy,
         )
-        for index in range(25)
+        for index in range(55)
     ]
 
     risks, _ = _current_risks(metrics, baseline)
@@ -192,6 +192,53 @@ def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
         ("left_load_bias", "left"),
         ("forefoot_high", "left"),
     }
+    assert risks[0].risk_type == "forefoot_high"
+    assert all(risk.risk_level == 2 for risk in risks)
+
+
+@pytest.mark.parametrize(
+    ("sample_count", "expected_level"),
+    [(25, 0), (26, 1), (51, 2), (101, 3)],
+)
+def test_pressure_risk_uses_5_10_20_second_boundaries(
+    sample_count: int, expected_level: int
+) -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    metrics = [
+        _metric(100 + index, left_total=0.45, right_total=0.15)
+        for index in range(sample_count)
+    ]
+
+    risk, _ = _current_risk(metrics, baseline)
+
+    assert risk.risk_level == expected_level
+
+
+@pytest.mark.parametrize(
+    ("sample_count", "expected_level"),
+    [(40, 0), (41, 1), (76, 2), (151, 3)],
+)
+def test_temperature_risk_uses_8_15_30_second_boundaries(
+    sample_count: int, expected_level: int
+) -> None:
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
+    )
+    metrics = [
+        _metric(
+            200 + index,
+            left_total=0,
+            right_total=0,
+            temperature_delta_c=(3.4, 0.2, -0.1, 0.0),
+        )
+        for index in range(sample_count)
+    ]
+
+    risk, _ = _current_risk(metrics, baseline)
+
+    assert risk.risk_level == expected_level
 
 
 def test_forefoot_risk_works_with_two_covered_forefoot_channels() -> None:
@@ -487,7 +534,7 @@ def test_sustained_risk_tolerates_dropped_realtime_packets() -> None:
 
     assert risk.risk_type == "left_load_bias"
     assert risk.risk_side == "left"
-    assert risk.risk_level == 3
+    assert risk.risk_level == 1
     assert risk.duration_ms == 8_800
 
 
@@ -506,7 +553,7 @@ def test_sustained_risk_tolerates_observed_android_batch_gap() -> None:
     risks, _ = _current_risks(risk_metrics, baseline)
 
     load_bias = next(risk for risk in risks if risk.risk_type == "left_load_bias")
-    assert load_bias.risk_level == 3
+    assert load_bias.risk_level == 1
     assert load_bias.duration_ms == 9_800
 
 def test_pressure_median_rejects_one_frame_spike() -> None:
@@ -559,7 +606,7 @@ def test_sustained_pressure_change_survives_brief_normal_frame() -> None:
     assert metric.load_bias == pytest.approx(0.5)
     assert risk.risk_type == "left_load_bias"
     assert risk.risk_side == "left"
-    assert risk.risk_level == 3
+    assert risk.risk_level == 2
 
 
 def test_regional_analysis_ignores_low_evidence_channel() -> None:
@@ -596,7 +643,7 @@ def test_risk_continuity_uses_exit_hysteresis() -> None:
                 near_exit if 18 <= index < 24 else high_forefoot
             ),
         )
-        for index in range(48)
+        for index in range(58)
     ]
 
     risk, _ = _current_risk(
@@ -620,7 +667,7 @@ def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() ->
             left_distribution=(0.12, 0.18, 0.25, 0.08, 0.12, 0.25),
             temperature_delta_c=(4.2, 2.4, -1.8, 0.8),
         )
-        for index in range(40)
+        for index in range(80)
     ]
 
     risk, _ = _current_risk(
@@ -630,7 +677,7 @@ def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() ->
 
     assert (risk.risk_type, risk.risk_side) == ("temperature_asymmetry", "left")
     assert risk.risk_level >= 2
-    assert risk.duration_ms >= 6_000
+    assert risk.duration_ms >= 15_000
 
 
 def test_temperature_baseline_correction_wins_over_raw_offset() -> None:
@@ -733,7 +780,7 @@ def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
             sync_id=1_000 + index,
             timestamp_ms=20_000 + index * 200,
         )
-        for index in range(21)
+        for index in range(41)
     ]
 
     risk, _ = _current_risk(history, baseline)
@@ -741,7 +788,7 @@ def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
     assert risk.risk_type == "temperature_asymmetry"
     assert risk.risk_side == "left"
     assert risk.risk_level == 1
-    assert risk.duration_ms == 4_000
+    assert risk.duration_ms == 8_000
 
 
 def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
@@ -762,7 +809,7 @@ def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
             ),
             timestamp_ms=30_000 + index * 200,
         )
-        for index in range(40)
+        for index in range(80)
     ]
 
     risk, _ = _current_risk(history, baseline)
@@ -770,7 +817,7 @@ def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
     assert risk.risk_type == "temperature_asymmetry"
     assert risk.risk_side == "left"
     assert risk.risk_level == 2
-    assert risk.duration_ms == 7_800
+    assert risk.duration_ms == 15_800
 
 
 def test_temperature_risk_clears_after_dropout_grace() -> None:

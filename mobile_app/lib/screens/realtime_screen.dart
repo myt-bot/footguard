@@ -11,7 +11,6 @@ import '../services/ble_connection_service.dart';
 import '../services/ble_command_bridge.dart';
 import '../services/monitoring_controller.dart';
 import '../services/risk_notification_service.dart';
-import '../widgets/ai_advice_card.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/foot_pressure_view.dart';
 import '../widgets/risk_banner.dart';
@@ -182,6 +181,8 @@ class _RealtimeScreenState extends State<RealtimeScreen>
                   controller.regionalAnalysis?.pressureAvailable ??
                       (controller.left?.pressureChannelsValid == true &&
                           controller.right?.pressureChannelsValid == true),
+              recoveryObservation: controller.recoveryObservation,
+              backendOnline: controller.backendOnline,
             ),
             if (controller.activeRisks.any(
                   (risk) => risk.riskType == 'temperature_asymmetry',
@@ -191,13 +192,6 @@ class _RealtimeScreenState extends State<RealtimeScreen>
               const Text(
                 '当前无承重，温度变化仅用于演示或辅助观察，不表示真实穿鞋状态下的医学风险。',
                 style: TextStyle(color: Color(0xFFA86612), fontSize: 12),
-              ),
-            ],
-            if (controller.recoveryObservation != null) ...[
-              const SizedBox(height: 10),
-              _RecoveryObservationCard(
-                observation: controller.recoveryObservation!,
-                backendOnline: controller.backendOnline,
               ),
             ],
             const SizedBox(height: 10),
@@ -328,20 +322,6 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             const SizedBox(height: 12),
             _MetricsCard(controller: controller),
             const SizedBox(height: 12),
-            AiAdviceCard(
-              advice: controller.aiAdvice,
-              status: controller.aiAdviceStatus,
-              loading: controller.aiAdviceLoading,
-              questionAnswer: controller.aiQuestionAnswer,
-              questionStatus: controller.aiQuestionStatus,
-              questionLoading: controller.aiQuestionLoading,
-              onQuestionSelected: controller.askAiQuestion,
-              chatAnswer: controller.aiChatAnswer,
-              chatLoading: controller.aiChatLoading,
-              chatStatus: controller.aiChatStatus,
-              onChatSubmitted: controller.askAiChat,
-            ),
-            const SizedBox(height: 12),
             _SessionAdviceCard(controller: controller),
             const SizedBox(height: 12),
             Card(
@@ -360,63 +340,6 @@ class _RealtimeScreenState extends State<RealtimeScreen>
                         child: const Text('模拟执行')),
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _RecoveryObservationCard extends StatelessWidget {
-  const _RecoveryObservationCard({
-    required this.observation,
-    required this.backendOnline,
-  });
-
-  final RecoveryObservation observation;
-  final bool backendOnline;
-
-  @override
-  Widget build(BuildContext context) {
-    final observing = observation.status == 'observing';
-    final seconds = (observation.remainingMs / 1000).ceil();
-    final progress =
-        observing ? (1 - observation.remainingMs / 15000).clamp(0.0, 1.0) : 1.0;
-    final result = switch (observation.effectLabel) {
-      'effective' => '有效',
-      'partial' => '部分有效',
-      'ineffective' => '未恢复',
-      _ => '数据不足',
-    };
-    return Card(
-      elevation: 0,
-      color: observing ? const Color(0xFFFFF7E8) : const Color(0xFFEAF7F3),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(observing
-                    ? Icons.timer_outlined
-                    : Icons.fact_check_outlined),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    observing
-                        ? (!backendOnline &&
-                                !observation.eventId.startsWith('local_evt_')
-                            ? '后端断开，干预倒计时已暂停'
-                            : '干预效果观察中 $seconds 秒')
-                        : '干预观察结果：$result',
-                    style: const TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            LinearProgressIndicator(value: progress),
           ],
         ),
       ),

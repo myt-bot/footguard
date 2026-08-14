@@ -30,11 +30,17 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
         csvReplayOptions.map((option) => option.assetPath).toSet();
     final savedReplaySpeed = preferences.getDouble(_replaySpeedKey);
 
+    final parsedMode = _parseDataMode(savedMode);
+    final dataMode =
+        diagnosticReplayEnabled && parsedMode == FootDataMode.csvReplay
+            ? FootDataMode.csvReplay
+            : FootDataMode.ble;
+
     return AppSettings(
       backendUrl: savedBackendUrl == null || !isValidBackendUrl(savedBackendUrl)
           ? defaults.backendUrl
           : normalizeBackendUrl(savedBackendUrl),
-      dataMode: _parseDataMode(savedMode) ?? defaults.dataMode,
+      dataMode: dataMode,
       mockScenario:
           savedScenario != null && mockScenarios.contains(savedScenario)
               ? savedScenario
@@ -53,9 +59,13 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
   @override
   Future<void> save(AppSettings settings) async {
     final preferences = await SharedPreferences.getInstance();
+    final dataMode =
+        diagnosticReplayEnabled && settings.dataMode == FootDataMode.csvReplay
+            ? FootDataMode.csvReplay
+            : FootDataMode.ble;
     await Future.wait([
       preferences.setString(_backendUrlKey, settings.backendUrl),
-      preferences.setString(_dataModeKey, settings.dataMode.name),
+      preferences.setString(_dataModeKey, dataMode.name),
       preferences.setString(_mockScenarioKey, settings.mockScenario),
       preferences.setString(_csvAssetKey, settings.csvAsset),
       preferences.setDouble(_replaySpeedKey, settings.replaySpeed),

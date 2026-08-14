@@ -21,9 +21,15 @@ from ..models import (
     RiskEvent,
     SensorFrame,
 )
-from ..schemas import RiskEventOut, RiskState, SessionAdviceResponse, SessionSummary
+from ..schemas import (
+    RiskEventOut,
+    RiskState,
+    SessionAdviceResponse,
+    SessionSummary,
+)
 from ..services.risk_service import calibration_status
 from ..services.session_service import recovery_observation
+from ..services.session_metrics import component_feedback
 from ..services.ai_advisor_service import generate_session_advice
 from ..repositories.calibration_repository import BASELINE_STATE_KEY
 
@@ -37,6 +43,18 @@ def _event_out(session: Session, event: RiskEvent) -> RiskEventOut:
         components = [RiskState.model_validate(item) for item in raw_components]
     except (TypeError, ValueError):
         components = []
+    components = components or [RiskState(risk_type=event.risk_type, risk_side=event.risk_side, risk_level=event.risk_level, duration_ms=event.duration_ms)]
+    command = session.scalar(
+        select(Command)
+        .where(Command.event_id == event.event_id, Command.status == "executed")
+        .order_by(Command.executed_at_ms.desc(), Command.created_at_ms.desc())
+        .limit(1)
+    )
+    intervention_started_at_ms = (
+        command.executed_at_ms or command.ack_at_ms or command.created_at_ms
+        if command is not None
+        else None
+    )
     return RiskEventOut(
         event_id=event.event_id, risk_type=event.risk_type, risk_side=event.risk_side,
         risk_level=event.risk_level, started_at_ms=event.started_at_ms,
@@ -47,8 +65,47 @@ def _event_out(session: Session, event: RiskEvent) -> RiskEventOut:
         effect_label=feedback.effect_label if feedback else None,
         recovery_time_ms=feedback.recovery_time_ms if feedback else None,
         status=event.status,
-        active_risks=components or [RiskState(risk_type=event.risk_type, risk_side=event.risk_side, risk_level=event.risk_level, duration_ms=event.duration_ms)],
+        active_risks=components,
+        intervention_started_at_ms=intervention_started_at_ms,
+        component_feedback=component_feedback(
+            session, components, intervention_started_at_ms
+        ),
     )
+
+
+def _session_sensor_summary(rows: list[SensorFrame]) -> dict[str, float]:
+    pairs: dict[tuple[int, int], dict[str, SensorFrame]] = {}
+    for row in rows:
+        pairs.setdefault((row.sync_id, row.packet_seq), {})[row.side] = row
+    values: list[dict[str, float]] = []
+    for pair in pairs.values():
+        left, right = pair.get("left"), pair.get("right")
+        if left is None or right is None:
+            continue
+        left_pressure = [left.p1, left.p2, left.p3, left.p4, left.p5, left.p6]
+        right_pressure = [right.p1, right.p2, right.p3, right.p4, right.p5, right.p6]
+        left_total, right_total = sum(left_pressure), sum(right_pressure)
+        values.append({
+            "left_total": left_total,
+            "right_total": right_total,
+            "load_ratio_abs": abs(log((left_total + 1e-6) / (right_total + 1e-6))),
+            "left_forefoot_ratio": sum(left_pressure[:4]) / max(left_total, 1e-6),
+            "right_forefoot_ratio": sum(right_pressure[:4]) / max(right_total, 1e-6),
+            "temperature_delta_max_c": max(abs(a - b) for a, b in zip(
+                [left.t1, left.t2, left.t3, left.t4],
+                [right.t1, right.t2, right.t3, right.t4],
+                strict=True,
+            )),
+        })
+    if not values:
+        return {}
+    return {
+        f"{key}_mean": round(sum(item[key] for item in values) / len(values), 4)
+        for key in values[0]
+    } | {
+        f"{key}_peak": round(max(item[key] for item in values), 4)
+        for key in values[0]
+    }
 
 
 @router.get("/session/latest", response_model=SessionSummary)
@@ -84,6 +141,12 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         item is not None and item.quality_flags & 0x3C0 != 0x3C0
         for item in (latest_left, latest_right)
     )
+    session_rows = list(session.scalars(
+        select(SensorFrame)
+        .where(SensorFrame.timestamp_ms >= window_start_ms)
+        .order_by(SensorFrame.timestamp_ms.desc())
+        .limit(4000)
+    ))
     return SessionSummary(
         session_status=status,
         data_source=latest.source if latest else "none",
@@ -101,6 +164,7 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         motor_executed_count=sum(command.status == "executed" for command in commands),
         motor_ack_count=ack_count,
         recovery_counts=dict(recoveries),
+        sensor_summary=_session_sensor_summary(session_rows),
         latest_events=[_event_out(session, event) for event in events[:8]],
     )
 
@@ -121,7 +185,7 @@ def analytics_summary(session: Session = Depends(get_db)) -> dict:
 def analytics_timeseries(limit: int = 240, session: Session = Depends(get_db)) -> list[dict]:
     rows = list(session.scalars(select(SensorFrame).order_by(SensorFrame.timestamp_ms.desc()).limit(min(limit, 2000))))
     return [
-        {"timestamp_ms": row.timestamp_ms, "side": row.side, "total_pressure": sum([row.p1,row.p2,row.p3,row.p4,row.p5,row.p6]), "forefoot_ratio": (row.p1+row.p2+row.p3) / max(sum([row.p1,row.p2,row.p3,row.p4,row.p5,row.p6]), 1e-6), "temperature_mean": sum([row.t1,row.t2,row.t3,row.t4]) / 4, "quality_flags": row.quality_flags}
+        {"timestamp_ms": row.timestamp_ms, "sync_id": row.sync_id, "packet_seq": row.packet_seq, "side": row.side, "total_pressure": sum([row.p1,row.p2,row.p3,row.p4,row.p5,row.p6]), "forefoot_ratio": (row.p1+row.p2+row.p3+row.p4) / max(sum([row.p1,row.p2,row.p3,row.p4,row.p5,row.p6]), 1e-6), "temperature_mean": sum([row.t1,row.t2,row.t3,row.t4]) / 4, "temperature": [row.t1,row.t2,row.t3,row.t4], "quality_flags": row.quality_flags}
         for row in reversed(rows)
     ]
 

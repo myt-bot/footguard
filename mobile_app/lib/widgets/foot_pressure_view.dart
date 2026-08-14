@@ -77,14 +77,6 @@ class FootPressureView extends StatelessWidget {
     return frame?.pressureChannelValid(index) == true;
   }
 
-  bool _oppositePressureChannelValid(int index) {
-    final backendValidity = oppositePressureValid;
-    if (backendValidity != null && backendValidity.length == 6) {
-      return backendValidity[index];
-    }
-    return oppositeFrame?.pressureChannelValid(index) == true;
-  }
-
   bool _pressureChannelAnalysisValid(int index) {
     final validity = pressureAnalysisValid;
     return validity == null || validity.length != 6 || validity[index];
@@ -171,10 +163,6 @@ class FootPressureView extends StatelessWidget {
     final allValidValues = <double>[
       for (var index = 0; index < 6; index++)
         if (_pressureChannelValid(index)) current[index],
-      if (oppositeFrame?.pressure.length == 6)
-        for (var index = 0; index < 6; index++)
-          if (_oppositePressureChannelValid(index))
-            oppositeFrame!.pressure[index],
     ];
     final maximum =
         allValidValues.isEmpty ? 0.0 : allValidValues.reduce(math.max);
@@ -471,9 +459,9 @@ class _LevelBadge extends StatelessWidget {
     final (label, color) = statusLabel != null
         ? (statusLabel!, const Color(0xFF718096))
         : switch (score) {
-            >= 0.75 => ('严重异常', const Color(0xFFD62F2F)),
-            >= 0.50 => ('明显异常', const Color(0xFFF06A24)),
-            >= 0.25 => ('需关注', const Color(0xFFE5A11B)),
+            >= 0.75 => ('区域变化高', const Color(0xFFD62F2F)),
+            >= 0.50 => ('区域变化明显', const Color(0xFFF06A24)),
+            >= 0.25 => ('区域变化', const Color(0xFFE5A11B)),
             _ => ('相对正常', const Color(0xFF168A70)),
           };
     return Container(

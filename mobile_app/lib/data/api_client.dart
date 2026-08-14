@@ -90,6 +90,7 @@ class RecoveryObservation {
     required this.deadlineAtMs,
     required this.remainingMs,
     this.effectLabel,
+    this.componentFeedback = const [],
   });
 
   final String eventId;
@@ -98,6 +99,7 @@ class RecoveryObservation {
   final int deadlineAtMs;
   final int remainingMs;
   final String? effectLabel;
+  final List<RiskComponentFeedbackRecord> componentFeedback;
 
   factory RecoveryObservation.fromJson(Map<String, dynamic> json) =>
       RecoveryObservation(
@@ -107,6 +109,11 @@ class RecoveryObservation {
         deadlineAtMs: json['deadline_at_ms'] as int,
         remainingMs: json['remaining_ms'] as int,
         effectLabel: json['effect_label'] as String?,
+        componentFeedback:
+            (json['component_feedback'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(RiskComponentFeedbackRecord.fromJson)
+                .toList(growable: false),
       );
 }
 
@@ -126,6 +133,8 @@ class RiskEventRecord {
     this.effectLabel,
     this.recoveryTimeMs,
     this.activeRisks = const [],
+    this.interventionStartedAtMs,
+    this.componentFeedback = const [],
   });
 
   final String eventId;
@@ -141,6 +150,8 @@ class RiskEventRecord {
   final String? effectLabel;
   final int? recoveryTimeMs;
   final List<RiskState> activeRisks;
+  final int? interventionStartedAtMs;
+  final List<RiskComponentFeedbackRecord> componentFeedback;
   final String status;
 
   bool get hasLoadDiffComparison =>
@@ -174,8 +185,116 @@ class RiskEventRecord {
                 .map(RiskState.fromJson)
                 .toList(growable: false) ??
             const [],
+        interventionStartedAtMs: json['intervention_started_at_ms'] as int?,
+        componentFeedback: (json['component_feedback'] as List<dynamic>?)
+                ?.whereType<Map<String, dynamic>>()
+                .map(RiskComponentFeedbackRecord.fromJson)
+                .toList(growable: false) ??
+            const [],
         status: json['status'] as String,
       );
+}
+
+class RiskComponentFeedbackRecord {
+  const RiskComponentFeedbackRecord({
+    required this.riskType,
+    required this.riskSide,
+    required this.effectLabel,
+    required this.pressureIntervention,
+    this.beforeValue,
+    this.afterValue,
+    this.improvementRatio,
+  });
+
+  final String riskType;
+  final String riskSide;
+  final double? beforeValue;
+  final double? afterValue;
+  final double? improvementRatio;
+  final String effectLabel;
+  final bool pressureIntervention;
+
+  factory RiskComponentFeedbackRecord.fromJson(Map<String, dynamic> json) =>
+      RiskComponentFeedbackRecord(
+        riskType: json['risk_type'] as String,
+        riskSide: json['risk_side'] as String,
+        beforeValue: (json['before_value'] as num?)?.toDouble(),
+        afterValue: (json['after_value'] as num?)?.toDouble(),
+        improvementRatio: (json['improvement_ratio'] as num?)?.toDouble(),
+        effectLabel: json['effect_label'] as String? ?? 'unknown',
+        pressureIntervention: json['pressure_intervention'] as bool? ?? true,
+      );
+}
+
+class AnalyticsFramePoint {
+  const AnalyticsFramePoint({
+    required this.timestampMs,
+    required this.syncId,
+    required this.packetSeq,
+    required this.side,
+    required this.totalPressure,
+    required this.forefootRatio,
+    required this.temperature,
+  });
+
+  final int timestampMs;
+  final int syncId;
+  final int packetSeq;
+  final String side;
+  final double totalPressure;
+  final double forefootRatio;
+  final List<double> temperature;
+
+  factory AnalyticsFramePoint.fromFootFrame(FootFrame frame) {
+    final validPressure = <double>[];
+    var forefoot = 0.0;
+    for (var index = 0; index < frame.pressure.length; index += 1) {
+      if (!frame.pressureChannelValid(index)) continue;
+      final value = frame.pressure[index].clamp(0.0, double.infinity);
+      validPressure.add(value);
+      if (index < 4) forefoot += value;
+    }
+    final total = validPressure.fold<double>(0, (sum, value) => sum + value);
+    return AnalyticsFramePoint(
+      timestampMs: frame.timestampMs,
+      syncId: frame.syncId,
+      packetSeq: frame.packetSeq,
+      side: frame.side,
+      totalPressure: total,
+      forefootRatio: total <= 0 ? 0 : forefoot / total,
+      temperature: List<double>.generate(
+        frame.temperature.length,
+        (index) => frame.temperatureChannelValid(index)
+            ? frame.temperature[index]
+            : double.nan,
+        growable: false,
+      ),
+    );
+  }
+
+  factory AnalyticsFramePoint.fromJson(Map<String, dynamic> json) =>
+      AnalyticsFramePoint(
+        timestampMs: json['timestamp_ms'] as int,
+        syncId: json['sync_id'] as int? ?? 0,
+        packetSeq: json['packet_seq'] as int? ?? 0,
+        side: json['side'] as String,
+        totalPressure: (json['total_pressure'] as num).toDouble(),
+        forefootRatio: (json['forefoot_ratio'] as num).toDouble(),
+        temperature: (json['temperature'] as List<dynamic>? ?? const [])
+            .whereType<num>()
+            .map((value) => value.toDouble())
+            .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'timestamp_ms': timestampMs,
+        'sync_id': syncId,
+        'packet_seq': packetSeq,
+        'side': side,
+        'total_pressure': totalPressure,
+        'forefoot_ratio': forefootRatio,
+        'temperature': temperature,
+      };
 }
 
 class ApiException implements Exception {
@@ -520,6 +639,18 @@ class FootGuardApiClient {
     return SessionAdvice.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
+  }
+
+  Future<List<AnalyticsFramePoint>> analyticsTimeseries(
+      {int limit = 600}) async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/analytics/timeseries?limit=$limit'))
+        .timeout(const Duration(seconds: 8));
+    final body = await _decode(response) as List<dynamic>;
+    return body
+        .whereType<Map<String, dynamic>>()
+        .map(AnalyticsFramePoint.fromJson)
+        .toList(growable: false);
   }
 
   void close() => _client.close();

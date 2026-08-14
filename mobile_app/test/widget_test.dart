@@ -36,7 +36,8 @@ void main() {
         ),
       ),
     ));
-    expect(find.text('检测到持续左偏'), findsOneWidget);
+    expect(find.text('双足负载分配异常'), findsOneWidget);
+    expect(find.textContaining('需要减负'), findsOneWidget);
   });
 
   testWidgets('risk banner distinguishes missing load from normal posture',
@@ -158,7 +159,7 @@ void main() {
     );
 
     expect(find.text('左脚压力与温度分布'), findsOneWidget);
-    expect(find.text('严重异常'), findsOneWidget);
+    expect(find.text('区域变化高'), findsOneWidget);
     expect(find.textContaining('拇趾区'), findsOneWidget);
     expect(find.textContaining('前掌外侧'), findsWidgets);
     expect(find.text('T1 前掌外侧'), findsOneWidget);

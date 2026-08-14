@@ -96,12 +96,12 @@ def test_normal_scenarios_do_not_create_alarm_or_motor_command(
 
 
 @pytest.mark.parametrize(
-    ("scenario", "risk_type", "side", "pattern", "duration_ms"),
+    ("scenario", "risk_type", "side", "pattern", "duration_ms", "expected_level"),
     [
-        ("left_load_bias", "left_load_bias", "left", "double", 800),
-        ("right_load_bias", "right_load_bias", "right", "double", 800),
-        ("left_forefoot_high", "forefoot_high", "left", "long", 1_500),
-        ("left_temperature_rise", "temperature_asymmetry", "left", "short", 500),
+        ("left_load_bias", "left_load_bias", "left", "double", 800, 3),
+        ("right_load_bias", "right_load_bias", "right", "double", 800, 3),
+        ("left_forefoot_high", "forefoot_high", "left", "long", 1_500, 3),
+        ("left_temperature_rise", "temperature_asymmetry", "left", "short", 500, 2),
     ],
 )
 def test_sustained_risk_creates_one_event_and_motor_vibration_command(
@@ -110,6 +110,7 @@ def test_sustained_risk_creates_one_event_and_motor_vibration_command(
     side: str,
     pattern: str,
     duration_ms: int,
+    expected_level: int,
     client: TestClient,
     app,
 ) -> None:
@@ -119,13 +120,33 @@ def test_sustained_risk_creates_one_event_and_motor_vibration_command(
     with app.state.session_factory() as session:
         event = session.scalar(select(RiskEvent))
         command = session.scalar(select(Command))
-        assert event.risk_level == 3
+        assert event.risk_level == expected_level
         assert event.risk_side == side
         assert command.event_id == event.event_id
         assert command.target == side
         assert command.pattern == pattern
         assert command.duration_ms == duration_ms
         assert command.reason_code == risk_type
+
+
+def test_pressure_observation_state_does_not_create_formal_event(
+    client: TestClient, app
+) -> None:
+    calibrate(client)
+    frames = scenario_frames("left_load_bias")
+    started_at_ms = min(frame["timestamp_ms"] for frame in frames)
+    observation_only = [
+        frame
+        for frame in frames
+        if frame["timestamp_ms"] - started_at_ms <= 8_000
+    ]
+
+    result = upload(client, observation_only)
+
+    assert result["latest_risk"] == "left_load_bias"
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(RiskEvent)) == 0
+        assert session.scalar(select(func.count()).select_from(Command)) == 0
 
 
 def test_disconnect_is_data_incomplete_and_never_vibrates(client: TestClient, app) -> None:

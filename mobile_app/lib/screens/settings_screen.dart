@@ -79,6 +79,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     value = value.copyWith(
       backendUrl: normalizeBackendUrl(backend.text),
+      dataMode:
+          diagnosticReplayEnabled && value.dataMode == FootDataMode.csvReplay
+              ? FootDataMode.csvReplay
+              : FootDataMode.ble,
     );
     widget.onChanged(value);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -294,25 +298,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         const SizedBox(height: 16),
-        DropdownButtonFormField<FootDataMode>(
-          key: ValueKey('data-mode-${value.dataMode.name}'),
-          initialValue: value.dataMode,
-          decoration: const InputDecoration(
-            labelText: '数据源',
-            border: OutlineInputBorder(),
+        if (diagnosticReplayEnabled)
+          DropdownButtonFormField<FootDataMode>(
+            key: ValueKey('data-mode-${value.dataMode.name}'),
+            initialValue: value.dataMode,
+            decoration: const InputDecoration(
+              labelText: '数据源',
+              border: OutlineInputBorder(),
+            ),
+            items: const [FootDataMode.ble, FootDataMode.csvReplay]
+                .map(
+                  (mode) => DropdownMenuItem(
+                    value: mode,
+                    child: Text(_modeLabel(mode)),
+                  ),
+                )
+                .toList(),
+            onChanged: (mode) =>
+                setState(() => value = value.copyWith(dataMode: mode)),
           ),
-          items: FootDataMode.values
-              .map(
-                (mode) => DropdownMenuItem(
-                  value: mode,
-                  child: Text(_modeLabel(mode)),
-                ),
-              )
-              .toList(),
-          onChanged: (mode) =>
-              setState(() => value = value.copyWith(dataMode: mode)),
-        ),
-        if (value.dataMode == FootDataMode.mock) ...[
+        if (diagnosticReplayEnabled && value.dataMode == FootDataMode.mock) ...[
           const SizedBox(height: 16),
           DropdownButtonFormField<String>(
             key: ValueKey('mock-scenario-${value.mockScenario}'),
@@ -340,8 +345,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             body: scenario.description,
           ),
         ],
-        if (value.dataMode == FootDataMode.csvReplay) ...[
+        if (diagnosticReplayEnabled &&
+            value.dataMode == FootDataMode.csvReplay) ...[
           const SizedBox(height: 16),
+          const _InfoPanel(
+            icon: Icons.warning_amber_rounded,
+            title: '诊断与应急回放',
+            body: '当前为历史真实数据回放，不是真机实时监测。',
+          ),
+          const SizedBox(height: 8),
           DropdownButtonFormField<String>(
             key: ValueKey('csv-asset-$csvAsset'),
             initialValue: csvAsset,
@@ -377,7 +389,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: Text('${value.replaySpeed}×'),
           ),
         ],
-        if (value.dataMode == FootDataMode.backend) ...[
+        if (diagnosticReplayEnabled &&
+            value.dataMode == FootDataMode.backend) ...[
           const SizedBox(height: 8),
           const _InfoPanel(
             icon: Icons.cloud_outlined,
@@ -385,7 +398,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             body: '只读取后端已接收的双足数据，不从本机上传传感器帧。',
           ),
         ],
-        if (value.dataMode == FootDataMode.ble) ...[
+        if (!diagnosticReplayEnabled || value.dataMode == FootDataMode.ble) ...[
           const SizedBox(height: 8),
           const _InfoPanel(
             icon: Icons.bluetooth_connected,
@@ -399,8 +412,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: '当前穿戴自适应规则',
           body: '每次更换体验者或重新穿鞋后，先采集 40 组稳定双足承重样本。'
               '偏载使用左右载荷对数比相对本次基线的变化，前掌使用足内占比变化，'
-              '并结合基线波动自动提高噪声较大场景的阈值。持续 3/6/10 秒分别进入关注、警告、持续风险；'
-              '等级 2 发送双振 800 ms，等级 3 发送长振 1500 ms。'
+              '并结合基线波动自动提高噪声较大场景的阈值。压力持续 5/10/20 秒分别进入趋势观察、需要减负、持续未改善；'
+              '温度趋势对应时间为 8/15/30 秒。趋势观察不弹窗、不震动。'
               '以上为工程原型规则，不是医疗诊断标准。',
         ),
         const SizedBox(height: 12),

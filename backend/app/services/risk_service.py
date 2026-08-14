@@ -62,6 +62,7 @@ from ..config import (
     REARFOOT_MIN_VALID_CHANNELS,
     RISK_MIN_TOTAL_PRESSURE,
     RISK_CONTINUITY_GAP_MS,
+    RISK_EVENT_CLEAR_HOLD_MS,
     TEMPERATURE_DELTA_C_THRESHOLD,
     TEMPERATURE_DELTA_C_EXIT_THRESHOLD,
     TEMPERATURE_ATTENTION_AFTER_MS,
@@ -1393,10 +1394,10 @@ def _current_risks(
         )
     }
     priority = {
-        "temperature_asymmetry": 0,
+        "forefoot_high": 0,
         "left_load_bias": 1,
         "right_load_bias": 1,
-        "forefoot_high": 2,
+        "temperature_asymmetry": 2,
     }
     risks = [
         state
@@ -2217,9 +2218,18 @@ def _record_combined_risks(
 ) -> None:
     event = active_event(session)
     if not risks:
+        if event is not None and metric is not None:
+            last_observed = event.started_at_ms + event.duration_ms
+            if metric.timestamp_ms - last_observed < RISK_EVENT_CLEAR_HOLD_MS:
+                return
         _record_risk(
             session,
-            fallback_risk,
+            RiskState(
+                risk_type="normal",
+                risk_side="none",
+                risk_level=0,
+                duration_ms=0,
+            ),
             metric,
             allow_motor_command=False,
             baseline=baseline,
@@ -2360,9 +2370,10 @@ def evaluate_risk(
     if active_risks:
         risk = active_risks[0]
     if record:
+        actionable_risks = [item for item in active_risks if item.risk_level >= 2]
         _record_combined_risks(
             session,
-            active_risks,
+            actionable_risks,
             metric,
             allow_motor_command=(
                 allow_motor_command

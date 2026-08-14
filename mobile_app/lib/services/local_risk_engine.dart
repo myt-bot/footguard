@@ -37,10 +37,17 @@ class LocalRiskResult {
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v2';
+  static const ruleVersion = 'local-rules-v3-5-10-20';
   static const requiredSamples = 40;
   static const _contactFloor = 0.01;
   static const _minimumFootLoad = 0.08;
+  static const _pressureAttentionMs = 5000;
+  static const _pressureWarningMs = 10000;
+  static const _pressurePersistentMs = 20000;
+  static const _temperatureAttentionMs = 8000;
+  static const _temperatureWarningMs = 15000;
+  static const _temperaturePersistentMs = 30000;
+  static const _episodeClearMs = 5000;
 
   final List<double> _loadRatios = [];
   final List<double> _leftForefootRatios = [];
@@ -49,6 +56,7 @@ class LocalRiskEngine {
   final Map<String, int> _signalStartedAt = {};
   final Set<String> _latchedSignals = {};
   String? _lastMotorSignature;
+  int? _motorClearStartedAt;
   double? _baselineLoadRatio;
   double? _baselineLeftForefoot;
   double? _baselineRightForefoot;
@@ -80,6 +88,7 @@ class LocalRiskEngine {
     _signalStartedAt.clear();
     _latchedSignals.clear();
     _lastMotorSignature = null;
+    _motorClearStartedAt = null;
     _baselineLoadRatio = null;
     _baselineLeftForefoot = null;
     _baselineRightForefoot = null;
@@ -349,10 +358,14 @@ class LocalRiskEngine {
         _signalStartedAt.putIfAbsent(key, () => timestamp);
         final duration = math.max(0, timestamp - _signalStartedAt[key]!);
         final temperatureRisk = signal.type == 'temperature_asymmetry';
-        final attention = temperatureRisk ? 3000 : 2000;
+        final attention =
+            temperatureRisk ? _temperatureAttentionMs : _pressureAttentionMs;
         if (duration >= attention) {
-          final warning = temperatureRisk ? 6000 : 4000;
-          final persistent = temperatureRisk ? 10000 : 7000;
+          final warning =
+              temperatureRisk ? _temperatureWarningMs : _pressureWarningMs;
+          final persistent = temperatureRisk
+              ? _temperaturePersistentMs
+              : _pressurePersistentMs;
           active.add(RiskState(
             riskType: signal.type,
             riskSide: signal.side,
@@ -366,7 +379,10 @@ class LocalRiskEngine {
       }
     }
 
-    active.sort((a, b) => b.riskLevel.compareTo(a.riskLevel));
+    active.sort((a, b) {
+      final priority = _riskPriority(b).compareTo(_riskPriority(a));
+      return priority != 0 ? priority : b.riskLevel.compareTo(a.riskLevel);
+    });
     final primary = active.isEmpty
         ? const RiskState(
             riskType: 'normal', riskSide: 'none', riskLevel: 0, durationMs: 0)
@@ -384,16 +400,21 @@ class LocalRiskEngine {
               ? 'double'
               : 'short';
       final signature = motorRisks
-          .map((item) => '${item.riskType}:${item.riskSide}:${item.riskLevel}')
+          .map((item) => '${item.riskType}:${item.riskSide}')
           .join('|');
-      if (_lastMotorSignature == signature) {
+      _motorClearStartedAt = null;
+      if (_lastMotorSignature != null) {
         target = null;
         pattern = null;
       } else {
         _lastMotorSignature = signature;
       }
     } else {
-      _lastMotorSignature = null;
+      _motorClearStartedAt ??= timestamp;
+      if (timestamp - _motorClearStartedAt! >= _episodeClearMs) {
+        _lastMotorSignature = null;
+        _motorClearStartedAt = null;
+      }
     }
     return LocalRiskResult(
       risk: primary,
@@ -411,6 +432,13 @@ class LocalRiskEngine {
           : 'fewer_than_two_trusted_channels',
     );
   }
+
+  static int _riskPriority(RiskState risk) => switch (risk.riskType) {
+        'forefoot_high' => 3,
+        'left_load_bias' || 'right_load_bias' => 2,
+        'temperature_asymmetry' => 1,
+        _ => 0,
+      };
 
   void _finishEmptyTemperatureReference() {
     _emptyTemperature = List.generate(4, (index) {

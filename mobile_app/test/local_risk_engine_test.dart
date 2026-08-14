@@ -103,7 +103,7 @@ void main() {
     expect(engine.baselineReady, isTrue);
 
     LocalRiskResult? result;
-    for (var sequence = 180; sequence < 200; sequence += 1) {
+    for (var sequence = 180; sequence < 230; sequence += 1) {
       result = engine.evaluate([
         frame('left', sequence, const [0, 0, 0, 0, 0, 0],
             temperature: [36, 24.2, 30.4, 32.4]),

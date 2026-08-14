@@ -54,6 +54,7 @@ class MonitoringController extends ChangeNotifier {
   DateTime? _lastSessionAdviceAt;
   LocalRiskResult? _localResult;
   String? _lastNoticeSignature;
+  int? _noticeClearStartedAt;
   String? _pendingLocalEventId;
   OfflineIntervention? _activeOfflineIntervention;
   int _noticeSequence = 0;
@@ -121,6 +122,10 @@ class MonitoringController extends ChangeNotifier {
     );
     _requiresOfflineReplay = savedPairs.isNotEmpty;
     _localRiskEngine.restoreBaseline(await _offlineStore.loadBaseline());
+    final cachedAdvice = await _offlineStore.loadSessionAdvice();
+    if (cachedAdvice != null) {
+      sessionAdvice = SessionAdvice.fromJson(cachedAdvice);
+    }
     _localBaselinePersisted = _localRiskEngine.baselineReady;
     _subscriptions.add(source.frames.listen(_onFrame));
     _subscriptions.add(source.connectionState.listen(_onConnections));
@@ -693,6 +698,7 @@ class MonitoringController extends ChangeNotifier {
   Future<void> _requestSessionAdvice() async {
     try {
       sessionAdvice = await api.sessionAdvice();
+      await _offlineStore.saveSessionAdvice(sessionAdvice!.toJson());
     } catch (_) {
       // Keep the most recent completed session advice visible while offline.
     } finally {
@@ -827,16 +833,24 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _updateRiskNotice() {
-    if (activeRisks.isEmpty) {
-      _lastNoticeSignature = null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final actionable = activeRisks
+        .where((item) => item.riskLevel >= 2)
+        .toList(growable: false);
+    if (actionable.isEmpty) {
+      _noticeClearStartedAt ??= now;
+      if (now - _noticeClearStartedAt! >= 5000) {
+        _lastNoticeSignature = null;
+        _noticeClearStartedAt = null;
+      }
       return;
     }
-    final signature = activeRisks
-        .map((item) => '${item.riskType}:${item.riskSide}:${item.riskLevel}')
-        .join('|');
-    if (_lastNoticeSignature == signature) return;
+    _noticeClearStartedAt = null;
+    final signature =
+        actionable.map((item) => '${item.riskType}:${item.riskSide}').join('|');
+    if (_lastNoticeSignature != null) return;
     _lastNoticeSignature = signature;
-    riskNoticeMessage = activeRisks.map(_riskNoticeLabel).join('；');
+    riskNoticeMessage = actionable.map(_riskNoticeLabel).join('；');
     _noticeSequence += 1;
   }
 
@@ -850,15 +864,29 @@ class MonitoringController extends ChangeNotifier {
         (backendOnline
             ? api.serverNowMs
             : DateTime.now().millisecondsSinceEpoch);
+    final componentResults = remaining > 0
+        ? observation.componentFeedback
+        : _localRecoveryComponents(observation);
+    final pressureEffects = componentResults
+        .where((item) => item.pressureIntervention)
+        .map((item) => item.effectLabel)
+        .toList(growable: false);
+    final localEffect =
+        pressureEffects.isEmpty || pressureEffects.contains('unknown')
+            ? (activeRisks.isEmpty ? 'effective' : 'ineffective')
+            : pressureEffects.every((item) => item == 'effective')
+                ? 'effective'
+                : pressureEffects.every((item) => item == 'ineffective')
+                    ? 'ineffective'
+                    : 'partial';
     recoveryObservation = RecoveryObservation(
       eventId: observation.eventId,
       status: remaining > 0 ? 'observing' : 'completed',
       startedAtMs: observation.startedAtMs,
       deadlineAtMs: observation.deadlineAtMs,
       remainingMs: remaining > 0 ? remaining : 0,
-      effectLabel: remaining > 0
-          ? null
-          : (activeRisks.isEmpty ? 'effective' : 'ineffective'),
+      effectLabel: remaining > 0 ? null : localEffect,
+      componentFeedback: componentResults,
     );
     if (remaining <= 0) {
       final intervention = _activeOfflineIntervention;
@@ -871,21 +899,44 @@ class MonitoringController extends ChangeNotifier {
           _offlineStore.saveInterventions(_pendingOfflineInterventions),
         );
       }
-      riskNoticeMessage = activeRisks.isEmpty
-          ? '15 秒干预观察完成：风险已恢复'
-          : '15 秒干预观察完成：风险仍持续，请调整姿势并复查';
-      _noticeSequence += 1;
     }
   }
 
+  List<RiskComponentFeedbackRecord> _localRecoveryComponents(
+    RecoveryObservation observation,
+  ) {
+    if (!observation.eventId.startsWith('local_evt_')) {
+      return observation.componentFeedback;
+    }
+    final original = _activeOfflineIntervention?.activeRisks ?? const [];
+    return original.map((item) {
+      final remains = activeRisks.any(
+        (current) =>
+            current.riskType == item.riskType &&
+            current.riskSide == item.riskSide &&
+            current.riskLevel >= 2,
+      );
+      return RiskComponentFeedbackRecord(
+        riskType: item.riskType,
+        riskSide: item.riskSide,
+        effectLabel: item.riskType == 'temperature_asymmetry'
+            ? 'observation_only'
+            : remains
+                ? 'ineffective'
+                : 'effective',
+        pressureIntervention: item.riskType != 'temperature_asymmetry',
+      );
+    }).toList(growable: false);
+  }
+
   static String _riskNoticeLabel(RiskState item) => switch (item.riskType) {
-        'left_load_bias' => '检测到持续左偏（等级 ${item.riskLevel}）',
-        'right_load_bias' => '检测到持续右偏（等级 ${item.riskLevel}）',
+        'left_load_bias' => '检测到左侧负载持续偏高，请适当减轻左侧负载',
+        'right_load_bias' => '检测到右侧负载持续偏高，请适当减轻右侧负载',
         'forefoot_high' =>
-          '${item.riskSide == 'left' ? '左脚' : '右脚'}前掌持续高载（等级 ${item.riskLevel}）',
+          '${item.riskSide == 'left' ? '左脚' : item.riskSide == 'right' ? '右脚' : '双脚'}前掌负荷持续集中，请调整受力',
         'temperature_asymmetry' =>
-          '${item.riskSide == 'left' ? '左脚' : '右脚'}同区温度较高（等级 ${item.riskLevel}）',
-        _ => '检测到持续风险（等级 ${item.riskLevel}）',
+          '${item.riskSide == 'left' ? '左脚' : '右脚'}同区温度趋势异常，请检查足部并继续观察',
+        _ => '检测到持续异常，请调整并复查',
       };
 
   String get _currentMonitoringSignature => [

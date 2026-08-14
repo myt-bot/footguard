@@ -100,11 +100,31 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
 
 def _session_fallback(summary: SessionSummary) -> str:
     risk_labels = {
-        "left_load_bias": "左脚偏载",
-        "right_load_bias": "右脚偏载",
-        "forefoot_high": "前掌高载",
-        "temperature_asymmetry": "同区温差",
+        "left_load_bias": "左侧双足负载分配异常",
+        "right_load_bias": "右侧双足负载分配异常",
+        "forefoot_high": "前掌持续负荷集中",
+        "temperature_asymmetry": "同区温度趋势异常",
     }
+    sensors = summary.sensor_summary
+    sensor_text = ""
+    if sensors:
+        left_total = sensors.get("left_total_mean")
+        right_total = sensors.get("right_total_mean")
+        left_forefoot = sensors.get("left_forefoot_ratio_mean")
+        right_forefoot = sensors.get("right_forefoot_ratio_mean")
+        temperature_peak = sensors.get("temperature_delta_max_c_peak")
+        parts: list[str] = []
+        if left_total is not None and right_total is not None:
+            parts.append(f"左右平均相对载荷约为 {left_total:.2f}:{right_total:.2f}")
+        if left_forefoot is not None and right_forefoot is not None:
+            parts.append(
+                f"左右前掌平均占比约为 {left_forefoot * 100:.0f}%:"
+                f"{right_forefoot * 100:.0f}%"
+            )
+        if temperature_peak is not None:
+            parts.append(f"同区温差峰值约 {temperature_peak:.1f}℃")
+        if parts:
+            sensor_text = "会话趋势统计显示" + "、".join(parts) + "。"
     if summary.session_status == "empty":
         text = "暂无有效监测会话。穿戴后先完成本次基线学习，再观察双脚压力、温度与风险趋势。"
     elif not summary.baseline_ready:
@@ -115,7 +135,7 @@ def _session_fallback(summary: SessionSummary) -> str:
             if not summary.temperature_available
             else "有效温度点未记录持续风险。"
         )
-        text = f"最近会话未记录持续压力风险。{temperature}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
+        text = f"最近会话未记录持续压力风险。{temperature}{sensor_text}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
     else:
         frequent = "、".join(
             f"{risk_labels.get(name, name)} {count} 次"
@@ -128,6 +148,7 @@ def _session_fallback(summary: SessionSummary) -> str:
             f"最近会话记录 {summary.event_count} 次风险事件，分布为{frequent}。"
             f"马达确认执行 {summary.motor_executed_count} 次；恢复评价中有效 {effective} 次、"
             f"部分有效 {partial} 次、未恢复 {ineffective} 次。"
+            f"{sensor_text}"
             "建议优先复查反复出现的一侧和区域，并结合皮肤外观与鞋内摩擦情况观察。"
         )
     if summary.session_status != "live" and summary.session_status != "empty":
