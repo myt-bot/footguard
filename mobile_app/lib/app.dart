@@ -11,6 +11,7 @@ import 'screens/realtime_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/app_settings_store.dart';
 import 'services/ble_connection_service.dart';
+import 'services/local_tts_service.dart';
 
 class FootGuardApp extends StatefulWidget {
   const FootGuardApp({super.key, this.settingsStore});
@@ -26,6 +27,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
   int selectedIndex = 0;
   late final BleConnectionService _bleConnectionService;
   late final AppSettingsStore _settingsStore;
+  late final TtsSpeaker _ttsSpeaker;
 
   @override
   void initState() {
@@ -33,6 +35,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
     _bleConnectionService = BleConnectionService(
       unixTimeProvider: _backendUnixTimeMs,
     );
+    _ttsSpeaker = AndroidTtsService();
     _settingsStore =
         widget.settingsStore ?? const SharedPreferencesAppSettingsStore();
     unawaited(_restoreSettings());
@@ -90,6 +93,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
   @override
   void dispose() {
     unawaited(_bleConnectionService.dispose());
+    unawaited(_ttsSpeaker.stop());
     super.dispose();
   }
 
@@ -100,21 +104,28 @@ class _FootGuardAppState extends State<FootGuardApp> {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xFF147D73), brightness: Brightness.light),
+          seedColor: const Color(0xFF147D73),
+          brightness: Brightness.light,
+        ),
         scaffoldBackgroundColor: const Color(0xFFF4F7F7),
         useMaterial3: true,
         cardTheme: const CardThemeData(color: Colors.white),
       ),
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('FootGuard 足安智垫',
-              style: TextStyle(fontWeight: FontWeight.w800)),
+          title: const Text(
+            'FootGuard 足安智垫',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
           actions: [
             Padding(
               padding: const EdgeInsets.only(right: 14),
               child: Chip(
-                avatar: const Icon(Icons.circle,
-                    color: Color(0xFF1A9B78), size: 12),
+                avatar: const Icon(
+                  Icons.circle,
+                  color: Color(0xFF1A9B78),
+                  size: 12,
+                ),
                 label: Text(_modeLabel(settings.dataMode)),
               ),
             ),
@@ -124,23 +135,29 @@ class _FootGuardAppState extends State<FootGuardApp> {
           index: selectedIndex,
           children: [
             HomeScreen(
-                onStartMonitoring: () => setState(() => selectedIndex = 1)),
+              onStartMonitoring: () => setState(() => selectedIndex = 1),
+            ),
             RealtimeScreen(
               key: ValueKey(
-                  '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.csvAsset}-${settings.replaySpeed}'),
+                '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.csvAsset}-${settings.replaySpeed}',
+              ),
               settings: settings,
               connectionService: _bleConnectionService,
+              ttsSpeaker: _ttsSpeaker,
             ),
             HistoryScreen(
-                key: ValueKey(settings.backendUrl),
-                backendUrl: settings.backendUrl),
+              key: ValueKey(settings.backendUrl),
+              backendUrl: settings.backendUrl,
+            ),
             DeviceScreen(
-                key: ValueKey('device-${settings.backendUrl}'),
-                backendUrl: settings.backendUrl,
-                connectionService: _bleConnectionService),
+              key: ValueKey('device-${settings.backendUrl}'),
+              backendUrl: settings.backendUrl,
+              connectionService: _bleConnectionService,
+            ),
             SettingsScreen(
               settings: settings,
               onChanged: _applySettings,
+              ttsSpeaker: _ttsSpeaker,
             ),
           ],
         ),
@@ -150,21 +167,28 @@ class _FootGuardAppState extends State<FootGuardApp> {
               setState(() => selectedIndex = index),
           destinations: const [
             NavigationDestination(
-                icon: Icon(Icons.home_outlined),
-                selectedIcon: Icon(Icons.home_rounded),
-                label: '首页'),
+              icon: Icon(Icons.home_outlined),
+              selectedIcon: Icon(Icons.home_rounded),
+              label: '首页',
+            ),
             NavigationDestination(
-                icon: Icon(Icons.monitor_heart_outlined),
-                selectedIcon: Icon(Icons.monitor_heart),
-                label: '实时'),
+              icon: Icon(Icons.monitor_heart_outlined),
+              selectedIcon: Icon(Icons.monitor_heart),
+              label: '实时',
+            ),
             NavigationDestination(
-                icon: Icon(Icons.history_rounded), label: '历史'),
+              icon: Icon(Icons.history_rounded),
+              label: '历史',
+            ),
             NavigationDestination(
-                icon: Icon(Icons.devices_other_rounded), label: '设备'),
+              icon: Icon(Icons.devices_other_rounded),
+              label: '设备',
+            ),
             NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings),
-                label: '设置'),
+              icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings),
+              label: '设置',
+            ),
           ],
         ),
       ),

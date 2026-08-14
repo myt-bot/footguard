@@ -24,12 +24,27 @@ class RiskBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final displayedRisks = activeRisks.isEmpty ? [risk] : activeRisks;
-    final ordered = List<RiskState>.of(displayedRisks)
+    final pressureRisks = displayedRisks
+        .where((item) => item.isPressure)
+        .toList(growable: false)
       ..sort((a, b) {
-        final priority = _priority(b).compareTo(_priority(a));
+        final priority = pressureRiskPriority(b.riskType)
+            .compareTo(pressureRiskPriority(a.riskType));
         return priority != 0 ? priority : b.riskLevel.compareTo(a.riskLevel);
       });
-    final primary = ordered.first;
+    final temperatureRisks = displayedRisks
+        .where((item) => item.isTemperature)
+        .toList(growable: false);
+    final primary = pressureRisks.isNotEmpty
+        ? pressureRisks.first
+        : risk.isIncomplete
+            ? risk
+            : const RiskState(
+                riskType: 'normal',
+                riskSide: 'none',
+                riskLevel: 0,
+                durationMs: 0,
+              );
     final (color, icon, title) = !baselineReady && risk.isNormal
         ? (const Color(0xFF39758C), Icons.tune_rounded, '本次穿戴基线学习中')
         : !pressureAvailable && risk.isNormal
@@ -38,32 +53,36 @@ class RiskBanner extends StatelessWidget {
                 'normal' => (
                     const Color(0xFF1A9B78),
                     Icons.verified_rounded,
-                    '双足状态正常'
+                    '双足状态正常',
                   ),
                 'left_load_bias' => (
                     const Color(0xFFF08A24),
                     Icons.keyboard_double_arrow_left,
-                    '双足负载分配异常'
+                    '双足负载分配异常',
                   ),
                 'right_load_bias' => (
                     const Color(0xFFF08A24),
                     Icons.keyboard_double_arrow_right,
-                    '双足负载分配异常'
+                    '双足负载分配异常',
                   ),
                 'forefoot_high' => (
                     const Color(0xFFDE5D52),
                     Icons.warning_amber_rounded,
-                    _riskLabel(primary)
+                    _riskLabel(primary),
                   ),
-                'temperature_asymmetry' => (
-                    const Color(0xFFD9534F),
-                    Icons.device_thermostat_rounded,
-                    '同区温度趋势异常'
+                'medial_load_concentration' || 'lateral_load_concentration' => (
+                    const Color(0xFFDE5D52),
+                    Icons.warning_amber_rounded,
+                    _riskLabel(primary),
                   ),
                 _ => (
-                    const Color(0xFF718096),
-                    Icons.sensors_off_rounded,
-                    '双足数据不完整'
+                    primary.isIncomplete
+                        ? const Color(0xFF718096)
+                        : const Color(0xFFDE5D52),
+                    primary.isIncomplete
+                        ? Icons.sensors_off_rounded
+                        : Icons.warning_amber_rounded,
+                    primary.isIncomplete ? '双足数据不完整' : _riskLabel(primary),
                   ),
               };
     final observation = recoveryObservation;
@@ -94,46 +113,55 @@ class RiskBanner extends StatelessWidget {
           Row(
             children: [
               CircleAvatar(
-                  backgroundColor: color,
-                  child: Icon(icon, color: Colors.white)),
+                backgroundColor: color,
+                child: Icon(icon, color: Colors.white),
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title,
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w700)),
+                    Text(
+                      title,
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 3),
-                    Text(!baselineReady && risk.isNormal
-                        ? '热力图继续显示，压力风险与马达暂未启用'
-                        : !pressureAvailable && risk.isNormal
-                            ? '压力风险已暂停；请确认已穿戴并检查压力采集连接'
-                            : primary.isNormal
-                                ? '当前未发现需要减负的持续异常'
-                                : '${_stateLabel(primary.riskLevel)} · '
-                                    '持续 ${(primary.durationMs / 1000).toStringAsFixed(1)} 秒'),
+                    Text(
+                      !baselineReady && risk.isNormal
+                          ? '热力图继续显示，压力风险与马达暂未启用'
+                          : !pressureAvailable && risk.isNormal
+                              ? '压力风险已暂停；请确认已穿戴并检查压力采集连接'
+                              : primary.isNormal
+                                  ? '当前未发现需要减负的持续异常'
+                                  : '${_stateLabel(primary.riskLevel)} · '
+                                      '持续 ${(primary.durationMs / 1000).toStringAsFixed(1)} 秒',
+                    ),
                   ],
                 ),
               ),
             ],
           ),
-          if (ordered.length > 1) ...[
+          if (pressureRisks.length > 1) ...[
             const SizedBox(height: 10),
-            const Text('同时存在',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+            const Text(
+              '同时存在',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
             const SizedBox(height: 6),
             Wrap(
               spacing: 6,
               runSpacing: 6,
-              children: ordered
+              children: pressureRisks
                   .skip(1)
-                  .map((item) => Chip(
-                        visualDensity: VisualDensity.compact,
-                        label: Text(_riskLabel(item)),
-                      ))
+                  .map(
+                    (item) => Chip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(_riskLabel(item)),
+                    ),
+                  )
                   .toList(growable: false),
             ),
           ],
@@ -143,9 +171,9 @@ class RiskBanner extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                Icon(observing
-                    ? Icons.timer_outlined
-                    : Icons.fact_check_outlined),
+                Icon(
+                  observing ? Icons.timer_outlined : Icons.fact_check_outlined,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -181,11 +209,30 @@ class RiskBanner extends StatelessWidget {
               ),
             ],
           ],
-          if (ordered
-              .any((item) => item.riskType == 'temperature_asymmetry')) ...[
+          if (temperatureRisks.isNotEmpty) ...[
             const SizedBox(height: 10),
+            const Divider(height: 1),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.device_thermostat_rounded,
+                  size: 18,
+                  color: Color(0xFFD9534F),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    temperatureRisks.map(_riskLabel).join('、'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 5),
             const Text(
-              '温度趋势用于足部检查与持续观察，不计入15秒压力改善结果。',
+              '温度趋势独立观察，不计入15秒压力改善结果。',
               style: TextStyle(fontSize: 11, color: Color(0xFF806119)),
             ),
           ],
@@ -194,13 +241,6 @@ class RiskBanner extends StatelessWidget {
     );
   }
 
-  static int _priority(RiskState risk) => switch (risk.riskType) {
-        'forefoot_high' => 3,
-        'left_load_bias' || 'right_load_bias' => 2,
-        'temperature_asymmetry' => 1,
-        _ => 0,
-      };
-
   static String _stateLabel(int level) => switch (level) {
         >= 3 => '持续未改善',
         2 => '需要减负',
@@ -208,19 +248,8 @@ class RiskBanner extends StatelessWidget {
         _ => '正常',
       };
 
-  static String _riskLabel(RiskState item) => switch (item.riskType) {
-        'left_load_bias' => '左侧负载持续偏高',
-        'right_load_bias' => '右侧负载持续偏高',
-        'forefoot_high' => item.riskSide == 'both'
-            ? '双脚前掌负荷持续集中'
-            : item.riskSide == 'left'
-                ? '左脚前掌负荷持续集中'
-                : '右脚前掌负荷持续集中',
-        'temperature_asymmetry' =>
-          item.riskSide == 'left' ? '左脚同区温度趋势异常' : '右脚同区温度趋势异常',
-        'normal' => '当前正常',
-        _ => '数据不完整',
-      };
+  static String _riskLabel(RiskState item) =>
+      riskDisplayLabel(item.riskType, item.riskSide);
 
   static String _componentLabel(RiskComponentFeedbackRecord item) =>
       switch (item.riskType) {

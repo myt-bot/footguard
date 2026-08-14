@@ -19,6 +19,7 @@ void main() {
     expect(settings.dataMode, FootDataMode.ble);
     expect(settings.mockScenario, 'normal_stand');
     expect(settings.replaySpeed, 1.0);
+    expect(settings.voiceEnabled, isTrue);
   });
 
   test('saves and restores all configurable settings', () async {
@@ -29,6 +30,7 @@ void main() {
       mockScenario: 'left_load_bias',
       csvAsset: 'assets/sample_data/normal_walk.csv',
       replaySpeed: 2.5,
+      voiceEnabled: false,
     );
 
     await store.save(expected);
@@ -39,6 +41,7 @@ void main() {
     expect(restored.mockScenario, expected.mockScenario);
     expect(restored.csvAsset, expected.csvAsset);
     expect(restored.replaySpeed, expected.replaySpeed);
+    expect(restored.voiceEnabled, isFalse);
   });
 
   test('rejects invalid saved enum, scenario, and replay speed', () async {

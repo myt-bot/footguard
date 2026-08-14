@@ -135,6 +135,9 @@ class RiskEventRecord {
     this.activeRisks = const [],
     this.interventionStartedAtMs,
     this.componentFeedback = const [],
+    this.motorTarget,
+    this.motorPattern,
+    this.ackCount = 0,
   });
 
   final String eventId;
@@ -152,6 +155,9 @@ class RiskEventRecord {
   final List<RiskState> activeRisks;
   final int? interventionStartedAtMs;
   final List<RiskComponentFeedbackRecord> componentFeedback;
+  final String? motorTarget;
+  final String? motorPattern;
+  final int ackCount;
   final String status;
 
   bool get hasLoadDiffComparison =>
@@ -191,8 +197,35 @@ class RiskEventRecord {
                 .map(RiskComponentFeedbackRecord.fromJson)
                 .toList(growable: false) ??
             const [],
+        motorTarget: json['motor_target'] as String?,
+        motorPattern: json['motor_pattern'] as String?,
+        ackCount: json['ack_count'] as int? ??
+            (json['intervention_started_at_ms'] == null ? 0 : 1),
         status: json['status'] as String,
       );
+
+  Map<String, dynamic> toJson() => {
+        'event_id': eventId,
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'risk_level': riskLevel,
+        'started_at_ms': startedAtMs,
+        'ended_at_ms': endedAtMs,
+        'duration_ms': durationMs,
+        'before_load_diff': beforeLoadDiff,
+        'after_load_diff': afterLoadDiff,
+        'intervention_action': interventionAction,
+        'effect_label': effectLabel,
+        'recovery_time_ms': recoveryTimeMs,
+        'active_risks': activeRisks.map((item) => item.toJson()).toList(),
+        'intervention_started_at_ms': interventionStartedAtMs,
+        'component_feedback':
+            componentFeedback.map((item) => item.toJson()).toList(),
+        'motor_target': motorTarget,
+        'motor_pattern': motorPattern,
+        'ack_count': ackCount,
+        'status': status,
+      };
 }
 
 class RiskComponentFeedbackRecord {
@@ -224,6 +257,56 @@ class RiskComponentFeedbackRecord {
         effectLabel: json['effect_label'] as String? ?? 'unknown',
         pressureIntervention: json['pressure_intervention'] as bool? ?? true,
       );
+
+  Map<String, dynamic> toJson() => {
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'before_value': beforeValue,
+        'after_value': afterValue,
+        'improvement_ratio': improvementRatio,
+        'effect_label': effectLabel,
+        'pressure_intervention': pressureIntervention,
+      };
+}
+
+class SessionSummary {
+  const SessionSummary({
+    required this.sessionStatus,
+    required this.eventCount,
+    required this.highestRiskLevel,
+    required this.motorCommandCount,
+    required this.motorExecutedCount,
+    required this.motorAckCount,
+    this.lastDataAtMs,
+  });
+
+  final String sessionStatus;
+  final int? lastDataAtMs;
+  final int eventCount;
+  final int highestRiskLevel;
+  final int motorCommandCount;
+  final int motorExecutedCount;
+  final int motorAckCount;
+
+  factory SessionSummary.fromJson(Map<String, dynamic> json) => SessionSummary(
+        sessionStatus: json['session_status'] as String? ?? 'empty',
+        lastDataAtMs: json['last_data_at_ms'] as int?,
+        eventCount: json['event_count'] as int? ?? 0,
+        highestRiskLevel: json['highest_risk_level'] as int? ?? 0,
+        motorCommandCount: json['motor_command_count'] as int? ?? 0,
+        motorExecutedCount: json['motor_executed_count'] as int? ?? 0,
+        motorAckCount: json['motor_ack_count'] as int? ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'session_status': sessionStatus,
+        'last_data_at_ms': lastDataAtMs,
+        'event_count': eventCount,
+        'highest_risk_level': highestRiskLevel,
+        'motor_command_count': motorCommandCount,
+        'motor_executed_count': motorExecutedCount,
+        'motor_ack_count': motorAckCount,
+      };
 }
 
 class AnalyticsFramePoint {
@@ -333,7 +416,9 @@ class CalibrationStatus {
       ? 0.0
       : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
 
-  factory CalibrationStatus.fromJson(Map<String, dynamic> json) =>
+  factory CalibrationStatus.fromJson(
+    Map<String, dynamic> json,
+  ) =>
       CalibrationStatus(
         baselineReady: json['baseline_ready'] as bool,
         sampleCount: json['sample_count'] as int,
@@ -449,7 +534,8 @@ class FootGuardApiClient {
         .get(Uri.parse('$baseUrl/api/v1/realtime'))
         .timeout(const Duration(seconds: 5));
     return RealtimeSnapshot.fromJson(
-        await _decode(response) as Map<String, dynamic>);
+      await _decode(response) as Map<String, dynamic>,
+    );
   }
 
   Future<List<RiskEventRecord>> events({int limit = 50}) async {
@@ -460,6 +546,15 @@ class FootGuardApiClient {
     return body
         .map((event) => RiskEventRecord.fromJson(event as Map<String, dynamic>))
         .toList(growable: false);
+  }
+
+  Future<SessionSummary> latestSession() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/session/latest'))
+        .timeout(const Duration(seconds: 5));
+    return SessionSummary.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
   }
 
   Future<CalibrationStatus> calibrationStatus() async {
@@ -551,9 +646,7 @@ class FootGuardApiClient {
           }),
         )
         .timeout(const Duration(seconds: 35));
-    return AiAdvice.fromJson(
-      await _decode(response) as Map<String, dynamic>,
-    );
+    return AiAdvice.fromJson(await _decode(response) as Map<String, dynamic>);
   }
 
   Future<AiQuestionAnswer> aiQuestion({
@@ -641,8 +734,9 @@ class FootGuardApiClient {
     );
   }
 
-  Future<List<AnalyticsFramePoint>> analyticsTimeseries(
-      {int limit = 600}) async {
+  Future<List<AnalyticsFramePoint>> analyticsTimeseries({
+    int limit = 600,
+  }) async {
     final response = await _client
         .get(Uri.parse('$baseUrl/api/v1/analytics/timeseries?limit=$limit'))
         .timeout(const Duration(seconds: 8));

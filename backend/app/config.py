@@ -47,6 +47,7 @@ REGIONAL_MIN_VISIBLE_SCORE = 0.12
 # bench press. These are prototype engineering limits, not diagnostic limits.
 BASELINE_MIN_SAMPLES = 40
 BASELINE_CALIBRATION_WINDOW_SAMPLES = 60
+CALIBRATION_SAMPLE_INTERVAL_MS = 200
 BASELINE_STABLE_GAP_MS = 1_500
 BASELINE_MIN_FOOT_PRESSURE = 0.08
 # Pressure risks require meaningful loading. Temperature becomes independent

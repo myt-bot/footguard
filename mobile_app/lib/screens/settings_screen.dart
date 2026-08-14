@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../config/app_config.dart';
 import '../data/api_client.dart';
+import '../services/local_tts_service.dart';
 
 typedef BackendHealthCheck = Future<bool> Function(String baseUrl);
 typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
@@ -19,6 +22,7 @@ class SettingsScreen extends StatefulWidget {
     this.healthCheck,
     this.calibrationStatusLoader,
     this.calibrationResetter,
+    this.ttsSpeaker,
   });
 
   final AppSettings settings;
@@ -26,6 +30,7 @@ class SettingsScreen extends StatefulWidget {
   final BackendHealthCheck? healthCheck;
   final CalibrationStatusLoader? calibrationStatusLoader;
   final CalibrationResetter? calibrationResetter;
+  final TtsSpeaker? ttsSpeaker;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -33,14 +38,16 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late AppSettings value = widget.settings;
-  late final TextEditingController backend =
-      TextEditingController(text: value.backendUrl);
+  late final TextEditingController backend = TextEditingController(
+    text: value.backendUrl,
+  );
   bool _testingBackend = false;
   String? _backendStatus;
   bool _backendOnline = false;
   bool _loadingCalibration = false;
   CalibrationStatus? _calibrationStatus;
   String? _calibrationError;
+  late final TtsSpeaker _ttsSpeaker = widget.ttsSpeaker ?? AndroidTtsService();
 
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
@@ -69,7 +76,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _save() {
-    final urlError = _backendUrlError();
+    final urlError = diagnosticReplayEnabled ? _backendUrlError() : null;
     if (urlError != null) {
       setState(() {
         _backendStatus = urlError;
@@ -85,8 +92,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               : FootDataMode.ble,
     );
     widget.onChanged(value);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('设置已保存，实时页数据源已更新')));
+  }
+
+  Future<void> _testVoice() async {
+    final available = await _ttsSpeaker.speak('语音提醒已开启。');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('设置已保存，实时页数据源已更新')),
+      SnackBar(content: Text(available ? '中文语音测试成功' : '中文语音不可用，文字提醒仍会保留')),
     );
   }
 
@@ -163,8 +177,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _calibrationError = null;
     });
     try {
-      final status = await (widget.calibrationStatusLoader ??
-          _defaultCalibrationStatus)(backend.text.trim());
+      final status =
+          await (widget.calibrationStatusLoader ?? _defaultCalibrationStatus)(
+        backend.text.trim(),
+      );
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
     } catch (error) {
@@ -205,13 +221,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _calibrationError = null;
     });
     try {
-      final status = await (widget.calibrationResetter ??
-          _defaultResetCalibration)(backend.text.trim());
+      final status =
+          await (widget.calibrationResetter ?? _defaultResetCalibration)(
+        backend.text.trim(),
+      );
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已开始新体验者标定，请双脚平行自然站立')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('已开始新体验者标定，请双脚平行自然站立')));
     } catch (error) {
       if (!mounted) return;
       setState(() => _calibrationError = '重新校准失败：$error');
@@ -246,58 +263,99 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final scenario = mockScenarioOption(value.mockScenario);
-    final csvAsset = csvReplayOptions.any(
-      (option) => option.assetPath == value.csvAsset,
-    )
-        ? value.csvAsset
-        : csvReplayOptions.first.assetPath;
+    final csvAsset =
+        csvReplayOptions.any((option) => option.assetPath == value.csvAsset)
+            ? value.csvAsset
+            : csvReplayOptions.first.assetPath;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        TextField(
-          controller: backend,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          onChanged: (_) => setState(() {
-            _backendStatus = null;
-            _backendOnline = false;
-            _calibrationStatus = null;
-            _calibrationError = null;
-          }),
-          decoration: InputDecoration(
-            labelText: 'FastAPI 后端地址',
-            helperText: '真机填写电脑局域网地址；模拟器可用 http://10.0.2.2:8000',
-            border: const OutlineInputBorder(),
-            suffixIcon: IconButton(
-              tooltip: '检测连接',
-              onPressed: _testingBackend ? null : _testBackend,
-              icon: _testingBackend
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.wifi_tethering_outlined),
-            ),
+        const Text(
+          '提醒与监测设置',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 0,
+          child: Column(
+            children: [
+              SwitchListTile(
+                secondary: const Icon(Icons.record_voice_over_rounded),
+                title: const Text('语音提醒'),
+                subtitle: const Text('使用 Android 本地语音；关闭后仍保留文字提醒'),
+                value: value.voiceEnabled,
+                onChanged: (enabled) {
+                  setState(() => value = value.copyWith(voiceEnabled: enabled));
+                  if (!enabled) unawaited(_ttsSpeaker.stop());
+                  widget.onChanged(value);
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: value.voiceEnabled ? _testVoice : null,
+                    icon: const Icon(Icons.volume_up_outlined),
+                    label: const Text('测试中文语音'),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-        if (_backendStatus != null) ...[
-          const SizedBox(height: 8),
-          Semantics(
-            liveRegion: true,
-            child: Text(
-              _backendStatus!,
-              key: const ValueKey('backend-status'),
-              style: TextStyle(
-                color: _backendOnline
-                    ? const Color(0xFF147D73)
-                    : Theme.of(context).colorScheme.error,
+        if (diagnosticReplayEnabled) ...[
+          const SizedBox(height: 12),
+          const _InfoPanel(
+            icon: Icons.build_circle_outlined,
+            title: '隐藏诊断入口',
+            body: '仅用于联调后端和真实 CSV 回放，不是正式用户功能。',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: backend,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            onChanged: (_) => setState(() {
+              _backendStatus = null;
+              _backendOnline = false;
+              _calibrationStatus = null;
+              _calibrationError = null;
+            }),
+            decoration: InputDecoration(
+              labelText: 'FastAPI 后端地址',
+              helperText: '真机填写电脑局域网地址；模拟器可用 http://10.0.2.2:8000',
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: '检测连接',
+                onPressed: _testingBackend ? null : _testBackend,
+                icon: _testingBackend
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering_outlined),
               ),
             ),
           ),
+          if (_backendStatus != null) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                _backendStatus!,
+                key: const ValueKey('backend-status'),
+                style: TextStyle(
+                  color: _backendOnline
+                      ? const Color(0xFF147D73)
+                      : Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
         ],
-        const SizedBox(height: 16),
         if (diagnosticReplayEnabled)
           DropdownButtonFormField<FootDataMode>(
             key: ValueKey('data-mode-${value.dataMode.name}'),
@@ -317,34 +375,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (mode) =>
                 setState(() => value = value.copyWith(dataMode: mode)),
           ),
-        if (diagnosticReplayEnabled && value.dataMode == FootDataMode.mock) ...[
-          const SizedBox(height: 16),
-          DropdownButtonFormField<String>(
-            key: ValueKey('mock-scenario-${value.mockScenario}'),
-            initialValue: value.mockScenario,
-            decoration: const InputDecoration(
-              labelText: '模拟场景',
-              border: OutlineInputBorder(),
-            ),
-            items: mockScenarioOptions
-                .map(
-                  (option) => DropdownMenuItem(
-                    value: option.id,
-                    child: Text(option.label),
-                  ),
-                )
-                .toList(),
-            onChanged: (scenarioId) => setState(
-              () => value = value.copyWith(mockScenario: scenarioId),
-            ),
-          ),
-          const SizedBox(height: 8),
-          _InfoPanel(
-            icon: Icons.movie_filter_outlined,
-            title: scenario.label,
-            body: scenario.description,
-          ),
-        ],
         if (diagnosticReplayEnabled &&
             value.dataMode == FootDataMode.csvReplay) ...[
           const SizedBox(height: 16),
@@ -369,9 +399,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 )
                 .toList(),
-            onChanged: (assetPath) => setState(
-              () => value = value.copyWith(csvAsset: assetPath),
-            ),
+            onChanged: (assetPath) =>
+                setState(() => value = value.copyWith(csvAsset: assetPath)),
           ),
           const SizedBox(height: 8),
           ListTile(
@@ -389,15 +418,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: Text('${value.replaySpeed}×'),
           ),
         ],
-        if (diagnosticReplayEnabled &&
-            value.dataMode == FootDataMode.backend) ...[
-          const SizedBox(height: 8),
-          const _InfoPanel(
-            icon: Icons.cloud_outlined,
-            title: '后端快照模式',
-            body: '只读取后端已接收的双足数据，不从本机上传传感器帧。',
-          ),
-        ],
         if (!diagnosticReplayEnabled || value.dataMode == FootDataMode.ble) ...[
           const SizedBox(height: 8),
           const _InfoPanel(
@@ -413,7 +433,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           body: '每次更换体验者或重新穿鞋后，先采集 40 组稳定双足承重样本。'
               '偏载使用左右载荷对数比相对本次基线的变化，前掌使用足内占比变化，'
               '并结合基线波动自动提高噪声较大场景的阈值。压力持续 5/10/20 秒分别进入趋势观察、需要减负、持续未改善；'
-              '温度趋势对应时间为 8/15/30 秒。趋势观察不弹窗、不震动。'
+              '压力 10 秒或温度 15 秒时文字与语音提醒一次，压力 20 秒或温度 30 秒仍未恢复时马达执行一次。'
+              '趋势观察不弹窗、不播报、不震动。'
               '以上为工程原型规则，不是医疗诊断标准。',
         ),
         const SizedBox(height: 12),
@@ -460,9 +481,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (_calibrationStatus != null &&
                     !_calibrationStatus!.baselineReady) ...[
                   const SizedBox(height: 8),
-                  LinearProgressIndicator(
-                    value: _calibrationStatus!.progress,
-                  ),
+                  LinearProgressIndicator(value: _calibrationStatus!.progress),
                   const SizedBox(height: 6),
                   Text(
                     _calibrationReason(_calibrationStatus!.statusReason),
@@ -476,8 +495,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 8),
                   Text(
                     _calibrationError!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ],
                 const SizedBox(height: 12),
@@ -552,10 +572,7 @@ class _InfoPanel extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+                    Text(title, style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 4),
                     Text(body),
                   ],

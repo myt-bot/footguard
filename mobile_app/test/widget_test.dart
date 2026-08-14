@@ -10,88 +10,170 @@ import 'package:footguard/widgets/foot_pressure_view.dart';
 import 'package:footguard/widgets/risk_banner.dart';
 
 void main() {
-  testWidgets('home shows project and motor reminder capability',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: HomeScreen(onStartMonitoring: () {}))));
+  testWidgets('home shows project and motor reminder capability', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: HomeScreen(onStartMonitoring: () {})),
+      ),
+    );
     expect(find.text('足安智垫'), findsOneWidget);
     expect(find.text('马达振动提醒'), findsOneWidget);
   });
 
   testWidgets('risk banner displays incomplete state', (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-        home: Scaffold(body: RiskBanner(risk: RiskState.incomplete()))));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: RiskBanner(risk: RiskState.incomplete())),
+      ),
+    );
     expect(find.text('双足数据不完整'), findsOneWidget);
   });
 
   testWidgets('risk banner displays left load warning', (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(
-        body: RiskBanner(
-          risk: RiskState(
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: RiskBanner(
+            risk: RiskState(
               riskType: 'left_load_bias',
               riskSide: 'left',
               riskLevel: 2,
-              durationMs: 6500),
+              durationMs: 6500,
+            ),
+          ),
         ),
       ),
-    ));
+    );
     expect(find.text('双足负载分配异常'), findsOneWidget);
     expect(find.textContaining('需要减负'), findsOneWidget);
   });
 
-  testWidgets('risk banner distinguishes missing load from normal posture',
-      (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(
-        body: RiskBanner(
-          risk: RiskState(
-              riskType: 'normal',
-              riskSide: 'none',
-              riskLevel: 0,
-              durationMs: 0),
-          pressureAvailable: false,
+  testWidgets(
+    'risk banner prioritizes local pressure and separates temperature',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: RiskBanner(
+              risk: RiskState(
+                riskType: 'left_load_bias',
+                riskSide: 'left',
+                riskLevel: 2,
+                durationMs: 12000,
+              ),
+              activeRisks: [
+                RiskState(
+                  riskType: 'left_load_bias',
+                  riskSide: 'left',
+                  riskLevel: 2,
+                  durationMs: 12000,
+                ),
+                RiskState(
+                  riskType: 'medial_load_concentration',
+                  riskSide: 'left',
+                  riskLevel: 2,
+                  durationMs: 11000,
+                ),
+                RiskState(
+                  riskType: 'temperature_asymmetry',
+                  riskSide: 'right',
+                  riskLevel: 2,
+                  durationMs: 16000,
+                ),
+              ],
+            ),
+          ),
         ),
-      ),
-    ));
+      );
 
-    expect(find.text('未检测到有效承重'), findsOneWidget);
-    expect(find.text('双足状态正常'), findsNothing);
-  });
+      expect(find.text('左脚内侧局部负荷集中'), findsOneWidget);
+      expect(find.text('同时存在'), findsOneWidget);
+      expect(find.text('左侧负载持续偏高'), findsOneWidget);
+      expect(find.text('右脚同区温度趋势异常'), findsOneWidget);
+      expect(find.textContaining('不计入15秒压力改善'), findsOneWidget);
+    },
+  );
 
-  testWidgets('AI advice card identifies DeepSeek as an auxiliary explanation',
-      (tester) async {
+  testWidgets('unknown string risk uses a safe generic label', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
-          body: AiAdviceCard(
-            advice: AiAdvice(
-              provider: 'openai-compatible:deepseek-v4-flash',
+          body: RiskBanner(
+            risk: RiskState(
+              riskType: 'future_pressure_region',
+              riskSide: 'both',
               riskLevel: 2,
-              explanation: '左脚负荷持续偏高。',
-              advice: '请短暂减轻左脚负荷并检查足部皮肤。',
-              target: 'left',
-              candidatePattern: 'double',
+              durationMs: 10000,
             ),
-            status: '辅助解释已更新',
-            loading: false,
           ),
         ),
       ),
     );
 
-    expect(find.text('AI 状态助手（辅助）'), findsOneWidget);
-    expect(find.text('DeepSeek 云端解释'), findsOneWidget);
-    expect(find.text('左脚负荷持续偏高。'), findsOneWidget);
-    expect(find.textContaining('不构成医疗诊断'), findsOneWidget);
-    expect(find.text('为什么出现风险？'), findsOneWidget);
-    expect(find.text('现在怎么做？'), findsOneWidget);
-    expect(find.text('怎样判断改善？'), findsOneWidget);
-    expect(find.text('何时进一步检查？'), findsOneWidget);
+    expect(find.text('双脚区域负荷集中'), findsOneWidget);
   });
 
-  testWidgets('AI advice card shows the selected fixed-question answer',
-      (tester) async {
+  testWidgets('risk banner distinguishes missing load from normal posture', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: RiskBanner(
+            risk: RiskState(
+              riskType: 'normal',
+              riskSide: 'none',
+              riskLevel: 0,
+              durationMs: 0,
+            ),
+            pressureAvailable: false,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('未检测到有效承重'), findsOneWidget);
+    expect(find.text('双足状态正常'), findsNothing);
+  });
+
+  testWidgets(
+    'AI advice card identifies DeepSeek as an auxiliary explanation',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: AiAdviceCard(
+              advice: AiAdvice(
+                provider: 'openai-compatible:deepseek-v4-flash',
+                riskLevel: 2,
+                explanation: '左脚负荷持续偏高。',
+                advice: '请短暂减轻左脚负荷并检查足部皮肤。',
+                target: 'left',
+                candidatePattern: 'double',
+              ),
+              status: '辅助解释已更新',
+              loading: false,
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('AI 状态助手（辅助）'), findsOneWidget);
+      expect(find.text('DeepSeek 云端解释'), findsOneWidget);
+      expect(find.text('左脚负荷持续偏高。'), findsOneWidget);
+      expect(find.textContaining('不构成医疗诊断'), findsOneWidget);
+      expect(find.text('为什么出现风险？'), findsOneWidget);
+      expect(find.text('现在怎么做？'), findsOneWidget);
+      expect(find.text('怎样判断改善？'), findsOneWidget);
+      expect(find.text('何时进一步检查？'), findsOneWidget);
+    },
+  );
+
+  testWidgets('AI advice card shows the selected fixed-question answer', (
+    tester,
+  ) async {
     String? selectedKey;
     await tester.pumpWidget(
       MaterialApp(
@@ -122,8 +204,9 @@ void main() {
     expect(selectedKey, 'immediate_action');
   });
 
-  testWidgets('pressure view names the abnormal anatomical regions',
-      (tester) async {
+  testWidgets('pressure view names the abnormal anatomical regions', (
+    tester,
+  ) async {
     const frame = FootFrame(
       protocolVersion: 1,
       sensorLayoutVersion: 'layout_6p4t_v1',
@@ -168,8 +251,9 @@ void main() {
     expect(find.textContaining('P1'), findsNothing);
   });
 
-  testWidgets('pressure view treats tiny unloaded readings as no contact',
-      (tester) async {
+  testWidgets('pressure view treats tiny unloaded readings as no contact', (
+    tester,
+  ) async {
     const frame = FootFrame(
       protocolVersion: 1,
       sensorLayoutVersion: 'layout_6p4t_v1',
@@ -190,10 +274,7 @@ void main() {
       const MaterialApp(
         home: Scaffold(
           body: SingleChildScrollView(
-            child: FootPressureView(
-              side: 'left',
-              frame: frame,
-            ),
+            child: FootPressureView(side: 'left', frame: frame),
           ),
         ),
       ),
@@ -204,8 +285,9 @@ void main() {
     expect(find.textContaining('相对异常区域'), findsNothing);
   });
 
-  testWidgets('unloaded frame ignores stale backend pressure scores',
-      (tester) async {
+  testWidgets('unloaded frame ignores stale backend pressure scores', (
+    tester,
+  ) async {
     const frame = FootFrame(
       protocolVersion: 1,
       sensorLayoutVersion: 'layout_6p4t_v1',
@@ -244,8 +326,9 @@ void main() {
     expect(find.textContaining('异常程度 100%'), findsNothing);
   });
 
-  testWidgets('single high residual pressure point is treated as unloaded',
-      (tester) async {
+  testWidgets('single high residual pressure point is treated as unloaded', (
+    tester,
+  ) async {
     const frame = FootFrame(
       protocolVersion: 1,
       sensorLayoutVersion: 'layout_6p4t_v1',
@@ -283,8 +366,9 @@ void main() {
     expect(find.textContaining('相对异常区域'), findsNothing);
   });
 
-  testWidgets('valid pressure regions stay visible when other channels fail',
-      (tester) async {
+  testWidgets('valid pressure regions stay visible when other channels fail', (
+    tester,
+  ) async {
     const frame = FootFrame(
       protocolVersion: 1,
       sensorLayoutVersion: 'layout_6p4t_v1',

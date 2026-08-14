@@ -16,6 +16,7 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
   static const _mockScenarioKey = 'settings.mock_scenario';
   static const _csvAssetKey = 'settings.csv_asset';
   static const _replaySpeedKey = 'settings.replay_speed';
+  static const _voiceEnabledKey = 'settings.voice_enabled';
 
   @override
   Future<AppSettings> load() async {
@@ -53,6 +54,8 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
       replaySpeed: savedReplaySpeed == null
           ? defaults.replaySpeed
           : savedReplaySpeed.clamp(0.5, 4.0).toDouble(),
+      voiceEnabled:
+          preferences.getBool(_voiceEnabledKey) ?? defaults.voiceEnabled,
     );
   }
 
@@ -69,6 +72,7 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
       preferences.setString(_mockScenarioKey, settings.mockScenario),
       preferences.setString(_csvAssetKey, settings.csvAsset),
       preferences.setDouble(_replaySpeedKey, settings.replaySpeed),
+      preferences.setBool(_voiceEnabledKey, settings.voiceEnabled),
     ]);
   }
 
