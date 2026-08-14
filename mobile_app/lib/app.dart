@@ -59,7 +59,13 @@ class _FootGuardAppState extends State<FootGuardApp> {
   Future<int> _backendUnixTimeMs() async {
     final api = FootGuardApiClient(baseUrl: settings.backendUrl);
     try {
-      return await api.serverTimeMs(refresh: true);
+      try {
+        return await api.serverTimeMs(refresh: true);
+      } catch (_) {
+        // Phone UTC keeps BLE frame durations usable in App-local mode when
+        // the computer backend is unavailable before the shoes connect.
+        return DateTime.now().millisecondsSinceEpoch;
+      }
     } finally {
       api.close();
     }

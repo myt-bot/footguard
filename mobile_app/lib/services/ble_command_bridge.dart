@@ -12,6 +12,7 @@ class BleCommandBridge {
   final FootGuardApiClient api;
   final BleCommandGateway gateway;
   final _statuses = StreamController<String>.broadcast();
+  final _localAcks = StreamController<DeviceAck>.broadcast();
   final _completedCommandIds = <String>{};
   final _receivedDeviceIds = <String>{};
   final _receivedAcks = <String, DeviceAck>{};
@@ -19,9 +20,11 @@ class BleCommandBridge {
   Timer? _expiryTimer;
   DeviceCommand? _active;
   Set<String> _expectedDeviceIds = const {};
+  bool _activeIsLocal = false;
   String status = '暂无真实马达命令';
 
   Stream<String> get statuses => _statuses.stream;
+  Stream<DeviceAck> get localAcknowledgements => _localAcks.stream;
   bool get hasActiveCommand => _active != null;
 
   void start() {
@@ -32,6 +35,17 @@ class BleCommandBridge {
   }
 
   Future<void> submit(DeviceCommand command) async {
+    await _submit(command, localOnly: false);
+  }
+
+  Future<void> submitLocal(DeviceCommand command) async {
+    await _submit(command, localOnly: true);
+  }
+
+  Future<void> _submit(
+    DeviceCommand command, {
+    required bool localOnly,
+  }) async {
     if (_completedCommandIds.contains(command.commandId) ||
         _active?.commandId == command.commandId ||
         _active != null) {
@@ -65,6 +79,7 @@ class BleCommandBridge {
     }
 
     _active = command;
+    _activeIsLocal = localOnly;
     _expectedDeviceIds = expectedIds;
     _receivedDeviceIds.clear();
     _receivedAcks.clear();
@@ -98,14 +113,18 @@ class BleCommandBridge {
         _receivedDeviceIds.contains(ack.deviceId)) {
       return;
     }
-    try {
-      await api.acknowledgeDevice(ack);
-    } catch (error) {
-      _finish(
-        command.commandId,
-        '收到设备AckEvent，但上传后端失败：$error',
-      );
-      return;
+    if (_activeIsLocal) {
+      _localAcks.add(ack);
+    } else {
+      try {
+        await api.acknowledgeDevice(ack);
+      } catch (error) {
+        _finish(
+          command.commandId,
+          '收到设备AckEvent，但上传后端失败：$error',
+        );
+        return;
+      }
     }
     _receivedDeviceIds.add(ack.deviceId);
     _receivedAcks[ack.deviceId] = ack;
@@ -113,9 +132,10 @@ class BleCommandBridge {
       final allExecuted = _receivedAcks.values.every(
         (value) => value.status == 'executed',
       );
+      final suffix = _activeIsLocal ? '，已保存为离线干预' : '，ACK已上传后端';
       final result = allExecuted
-          ? '设备返回executed，ACK已上传后端'
-          : '设备返回${_receivedAcks.values.map((value) => '${value.status}/${value.errorCode}').join('、')}，ACK已上传后端';
+          ? '设备返回executed$suffix'
+          : '设备返回${_receivedAcks.values.map((value) => '${value.status}/${value.errorCode}').join('、')}$suffix';
       _finish(command.commandId, result);
     } else {
       _setStatus(
@@ -129,6 +149,7 @@ class BleCommandBridge {
     _expiryTimer = null;
     _completedCommandIds.add(commandId);
     _active = null;
+    _activeIsLocal = false;
     _expectedDeviceIds = const {};
     _receivedDeviceIds.clear();
     _receivedAcks.clear();
@@ -153,6 +174,7 @@ class BleCommandBridge {
   Future<void> dispose() async {
     _expiryTimer?.cancel();
     await _ackSubscription?.cancel();
+    await _localAcks.close();
     await _statuses.close();
   }
 }

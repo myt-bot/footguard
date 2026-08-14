@@ -24,6 +24,7 @@
         android:maxSdkVersion="28" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="FootGuard 足安智垫"
         android:name="${applicationName}"

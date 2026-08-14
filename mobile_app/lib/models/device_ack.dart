@@ -15,6 +15,15 @@ class DeviceAck {
   final int? executedAtMs;
   final String errorCode;
 
+  factory DeviceAck.fromJson(Map<String, dynamic> json) => DeviceAck(
+        commandId: json['command_id'] as String,
+        deviceId: json['device_id'] as String,
+        status: json['status'] as String,
+        ackAtMs: json['ack_at_ms'] as int,
+        executedAtMs: json['executed_at_ms'] as int?,
+        errorCode: json['error_code'] as String,
+      );
+
   Map<String, dynamic> toJson() => {
         'protocol_version': 1,
         'command_id': commandId,

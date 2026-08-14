@@ -70,6 +70,29 @@ class SensorBatchResponse(StrictModel):
     latest_risk: str
 
 
+class OfflineInterventionRecord(StrictModel):
+    event_id: str = Field(pattern=r"^local_evt_[0-9]+$")
+    command: "DeviceCommand"
+    risk: "RiskState"
+    active_risks: list["RiskState"] = Field(default_factory=list)
+    started_at_ms: int = Field(ge=0)
+    acknowledgements: list["AckRequest"] = Field(default_factory=list)
+    before_load_diff: float | None = Field(default=None, ge=0)
+    after_load_diff: float | None = Field(default=None, ge=0)
+    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    recovery_time_ms: int | None = Field(default=None, ge=0)
+
+
+class OfflineInterventionBatch(StrictModel):
+    protocol_version: Literal[1]
+    records: list[OfflineInterventionRecord] = Field(max_length=200)
+
+
+class OfflineInterventionResponse(StrictModel):
+    accepted: int = Field(ge=0)
+    rejected: int = Field(ge=0)
+
+
 class RiskState(StrictModel):
     risk_type: Literal[
         "normal",
@@ -161,6 +184,16 @@ class RealtimeResponse(StrictModel):
     risk: RiskState
     active_risks: list[RiskState] = Field(default_factory=list)
     regional_analysis: "RegionalAnalysis | None" = None
+    recovery_observation: "RecoveryObservation | None" = None
+
+
+class RecoveryObservation(StrictModel):
+    event_id: str
+    status: Literal["observing", "completed"]
+    started_at_ms: int = Field(ge=0)
+    deadline_at_ms: int = Field(ge=0)
+    remaining_ms: int = Field(ge=0)
+    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
 
 
 class RegionalAnalysis(StrictModel):
@@ -290,6 +323,35 @@ class RiskEventOut(StrictModel):
     recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
     active_risks: list[RiskState] = Field(default_factory=list)
+
+
+class SessionSummary(StrictModel):
+    session_status: Literal["live", "recent", "empty"]
+    data_source: Literal["ble", "mock", "csv_replay", "none"] = "none"
+    last_data_at_ms: int | None = Field(default=None, ge=0)
+    baseline_ready: bool = False
+    pressure_available: bool = False
+    temperature_available: bool = False
+    left_device_id: str | None = None
+    right_device_id: str | None = None
+    left_valid_pressure_channels: int = Field(default=0, ge=0, le=6)
+    right_valid_pressure_channels: int = Field(default=0, ge=0, le=6)
+    event_count: int = Field(ge=0)
+    highest_risk_level: int = Field(ge=0, le=3)
+    risk_counts: dict[str, int] = Field(default_factory=dict)
+    longest_duration_ms: dict[str, int] = Field(default_factory=dict)
+    motor_command_count: int = Field(default=0, ge=0)
+    motor_executed_count: int = Field(default=0, ge=0)
+    motor_ack_count: int = Field(default=0, ge=0)
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+    latest_events: list[RiskEventOut] = Field(default_factory=list)
+
+
+class SessionAdviceResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    session_status: Literal["live", "recent", "empty"]
+    advice: str = Field(min_length=1, max_length=700)
 
 
 class InterventionFeedbackRequest(StrictModel):

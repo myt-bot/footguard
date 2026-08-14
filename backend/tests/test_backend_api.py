@@ -65,6 +65,122 @@ def test_duplicate_batch_is_idempotently_rejected(client: TestClient) -> None:
     assert result["rejected"] == 2
 
 
+def test_offline_sync_is_idempotent_and_replays_all_pairs(
+    client: TestClient, app
+) -> None:
+    payload = sensor_batch()
+    frames = []
+    for index in range(3):
+        for source in payload["frames"]:
+            frame = dict(source)
+            frame["packet_seq"] = source["packet_seq"] + index
+            frame["timestamp_ms"] = source["timestamp_ms"] + index * 200
+            frames.append(frame)
+    body = {
+        "protocol_version": 1,
+        "app_received_at_ms": frames[-1]["timestamp_ms"],
+        "frames": frames,
+    }
+    response = client.post("/api/v1/sensor/offline-sync", json=body)
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 6
+    duplicate = client.post("/api/v1/sensor/offline-sync", json=body).json()
+    assert duplicate["accepted"] == 0
+    assert duplicate["rejected"] == 6
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(SensorFrame)) == 6
+
+
+def test_session_summary_and_csv_exports_work_without_live_data(
+    client: TestClient,
+) -> None:
+    assert client.post("/api/v1/sensor/batch", json=sensor_batch()).status_code == 200
+    summary = client.get("/api/v1/session/latest")
+    assert summary.status_code == 200
+    assert summary.json()["session_status"] == "recent"
+    assert summary.json()["left_valid_pressure_channels"] == 6
+    assert summary.json()["right_valid_pressure_channels"] == 6
+
+    advice = client.post("/api/v1/ai/session-advice")
+    assert advice.status_code == 200
+    assert advice.json()["session_status"] == "recent"
+    assert "当前无实时数据" in advice.json()["advice"]
+
+    events_csv = client.get("/api/v1/export/events.csv")
+    session_csv = client.get("/api/v1/export/session.csv")
+    assert events_csv.status_code == 200
+    assert events_csv.text.startswith("event_id,risk_type")
+    assert session_csv.status_code == 200
+    assert session_csv.text.startswith(
+        "timestamp_ms,left_total_pressure,right_total_pressure"
+    )
+
+
+def test_offline_intervention_sync_is_idempotent(
+    client: TestClient, app
+) -> None:
+    payload = {
+        "protocol_version": 1,
+        "records": [{
+            "event_id": "local_evt_1760000000000",
+            "command": {
+                "protocol_version": 1,
+                "command_id": "cmd_local_1760000000000",
+                "target": "both",
+                "pattern": "long",
+                "duration_ms": 1500,
+                "expire_at_ms": 1760000030000,
+                "reason_code": "forefoot_high",
+            },
+            "risk": {
+                "risk_type": "forefoot_high",
+                "risk_side": "left",
+                "risk_level": 2,
+                "duration_ms": 4200,
+            },
+            "active_risks": [{
+                "risk_type": "forefoot_high",
+                "risk_side": "left",
+                "risk_level": 2,
+                "duration_ms": 4200,
+            }],
+            "started_at_ms": 1759999995800,
+            "acknowledgements": [
+                {
+                    "protocol_version": 1,
+                    "command_id": "cmd_local_1760000000000",
+                    "device_id": "foot_left_001",
+                    "status": "executed",
+                    "ack_at_ms": 1760000000100,
+                    "executed_at_ms": 1760000000050,
+                    "error_code": "none",
+                },
+                {
+                    "protocol_version": 1,
+                    "command_id": "cmd_local_1760000000000",
+                    "device_id": "foot_right_001",
+                    "status": "executed",
+                    "ack_at_ms": 1760000000120,
+                    "executed_at_ms": 1760000000060,
+                    "error_code": "none",
+                },
+            ],
+            "before_load_diff": 0.40,
+            "after_load_diff": 0.10,
+            "effect_label": "effective",
+            "recovery_time_ms": 15000,
+        }],
+    }
+    first = client.post("/api/v1/sensor/offline-interventions", json=payload)
+    assert first.status_code == 200
+    assert first.json() == {"accepted": 1, "rejected": 0}
+    second = client.post("/api/v1/sensor/offline-interventions", json=payload)
+    assert second.json() == {"accepted": 0, "rejected": 1}
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Command)) == 1
+        assert session.scalar(select(func.count()).select_from(InterventionFeedback)) == 1
+
+
 def test_invalid_frame_returns_422(client: TestClient) -> None:
     payload = sensor_batch()
     payload["frames"][0]["pressure"][0] = 1.5

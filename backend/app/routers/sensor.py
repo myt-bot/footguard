@@ -1,9 +1,17 @@
+import json
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..models import Command, CommandAck, InterventionFeedback, RiskEvent
 from ..repositories.sensor_repository import add_frames
-from ..schemas import SensorBatchRequest, SensorBatchResponse
+from ..schemas import (
+    OfflineInterventionBatch,
+    OfflineInterventionResponse,
+    SensorBatchRequest,
+    SensorBatchResponse,
+)
 from ..services.risk_service import evaluate_risk
 
 router = APIRouter(prefix="/api/v1/sensor", tags=["sensor"])
@@ -37,3 +45,111 @@ def ingest_batch(
         rejected=rejected,
         latest_risk=latest.risk.risk_type,
     )
+
+
+@router.post("/offline-sync", response_model=SensorBatchResponse)
+def ingest_offline_batch(
+    payload: SensorBatchRequest, session: Session = Depends(get_db)
+) -> SensorBatchResponse:
+    """Replay a disconnected App backlog in measurement order.
+
+    The regular batch endpoint evaluates only its newest pair. Offline replay
+    evaluates every pair so a risk that started and recovered while the phone
+    could not reach the backend is still reconstructed in history.
+    """
+    groups: dict[tuple[int, int], list] = {}
+    for frame in payload.frames:
+        groups.setdefault((frame.sync_id, frame.packet_seq), []).append(frame)
+    ordered_groups = sorted(
+        groups.values(), key=lambda frames: max(frame.timestamp_ms for frame in frames)
+    )
+    accepted = 0
+    rejected = 0
+    latest = None
+    for frames in ordered_groups:
+        pair_accepted, pair_rejected = add_frames(session, frames)
+        accepted += pair_accepted
+        rejected += pair_rejected
+        if pair_accepted:
+            latest = evaluate_risk(session, record=True, allow_motor_command=False)
+    latest = latest or evaluate_risk(session)
+    return SensorBatchResponse(
+        accepted=accepted,
+        rejected=rejected,
+        latest_risk=latest.risk.risk_type,
+    )
+
+
+@router.post("/offline-interventions", response_model=OfflineInterventionResponse)
+def ingest_offline_interventions(
+    payload: OfflineInterventionBatch,
+    session: Session = Depends(get_db),
+) -> OfflineInterventionResponse:
+    accepted = 0
+    rejected = 0
+    for record in payload.records:
+        if session.get(Command, record.command.command_id) is not None:
+            rejected += 1
+            continue
+        primary = record.risk
+        event = session.get(RiskEvent, record.event_id)
+        if event is None:
+            event = RiskEvent(
+                event_id=record.event_id,
+                risk_type=primary.risk_type,
+                risk_side=primary.risk_side,
+                risk_level=primary.risk_level,
+                started_at_ms=record.started_at_ms,
+                duration_ms=primary.duration_ms,
+                before_load_diff=None,
+                after_load_diff=None,
+                status="interrupted",
+                risk_components_json=json.dumps(
+                    [item.model_dump(mode="json") for item in record.active_risks],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            session.add(event)
+        command = Command(
+            command_id=record.command.command_id,
+            event_id=record.event_id,
+            protocol_version=1,
+            target=record.command.target,
+            pattern=record.command.pattern,
+            duration_ms=record.command.duration_ms,
+            expire_at_ms=record.command.expire_at_ms,
+            reason_code=record.command.reason_code,
+            status="executed" if any(ack.status == "executed" for ack in record.acknowledgements) else "failed",
+            created_at_ms=record.started_at_ms,
+            executed_at_ms=max((ack.executed_at_ms or 0 for ack in record.acknowledgements), default=0) or None,
+            ack_at_ms=max((ack.ack_at_ms for ack in record.acknowledgements), default=0) or None,
+            error_code="none" if record.acknowledgements else "command_expired",
+        )
+        session.add(command)
+        for ack in record.acknowledgements:
+            session.add(CommandAck(
+                command_id=ack.command_id,
+                device_id=ack.device_id,
+                status=ack.status,
+                ack_at_ms=ack.ack_at_ms,
+                executed_at_ms=ack.executed_at_ms,
+                error_code=ack.error_code,
+            ))
+        if (
+            record.effect_label is not None
+            and record.before_load_diff is not None
+            and record.after_load_diff is not None
+        ):
+            session.add(InterventionFeedback(
+                event_id=record.event_id,
+                user_action="offline_motor_vibration",
+                effect_label=record.effect_label,
+                before_load_diff=record.before_load_diff,
+                after_load_diff=record.after_load_diff,
+                recovery_time_ms=record.recovery_time_ms or 15_000,
+                created_at_ms=max((ack.ack_at_ms for ack in record.acknowledgements), default=record.started_at_ms),
+            ))
+        accepted += 1
+    session.commit()
+    return OfflineInterventionResponse(accepted=accepted, rejected=rejected)

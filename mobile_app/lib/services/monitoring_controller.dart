@@ -11,8 +11,12 @@ import '../models/device_command.dart';
 import '../models/foot_frame.dart';
 import '../models/risk_state.dart';
 import '../models/regional_analysis.dart';
+import '../models/session_advice.dart';
+import '../models/offline_intervention.dart';
 import 'frame_pairing_service.dart';
 import 'ble_command_bridge.dart';
+import 'local_risk_engine.dart';
+import 'offline_monitoring_store.dart';
 
 class MonitoringController extends ChangeNotifier {
   MonitoringController({
@@ -25,10 +29,16 @@ class MonitoringController extends ChangeNotifier {
   final FootGuardApiClient api;
   final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
+  final LocalRiskEngine _localRiskEngine = LocalRiskEngine();
+  final OfflineMonitoringStore _offlineStore = OfflineMonitoringStore();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<List<FootFrame>> _pendingUploadPairs = [];
+  final List<OfflineIntervention> _pendingOfflineInterventions = [];
   Timer? _refreshTimer;
+  Timer? _recoveryTimer;
   bool _uploading = false;
+  bool _requiresOfflineReplay = false;
+  bool _localBaselinePersisted = false;
   bool _refreshing = false;
   bool _disposed = false;
   final Map<String, List<double>> _displayPressureBySide = {};
@@ -39,6 +49,12 @@ class MonitoringController extends ChangeNotifier {
   String? _lastAdviceSignature;
   String? _aiQuestionSignature;
   DateTime? _lastAdviceAttemptAt;
+  DateTime? _lastSessionAdviceAt;
+  LocalRiskResult? _localResult;
+  String? _lastNoticeSignature;
+  String? _pendingLocalEventId;
+  OfflineIntervention? _activeOfflineIntervention;
+  int _noticeSequence = 0;
 
   FootFrame? left;
   FootFrame? right;
@@ -64,6 +80,10 @@ class MonitoringController extends ChangeNotifier {
   AiQuestionAnswer? aiQuestionAnswer;
   AiChatAnswer? aiChatAnswer;
   CalibrationStatus? calibrationStatus;
+  SessionAdvice? sessionAdvice;
+  bool sessionAdviceLoading = false;
+  RecoveryObservation? recoveryObservation;
+  String? riskNoticeMessage;
   String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
   String aiQuestionStatus = '请选择一个常见问题';
   String aiChatStatus = '可询问当前状态、设备检查或日常观察建议';
@@ -72,6 +92,9 @@ class MonitoringController extends ChangeNotifier {
   bool get aiQuestionLoading => _aiQuestionLoading;
   bool get aiChatLoading => _aiChatLoading;
   bool get calibrationResetting => _calibrationResetting;
+  int get noticeSequence => _noticeSequence;
+  int get offlinePairCount => _pendingUploadPairs.length;
+  String get ruleVersion => LocalRiskEngine.ruleVersion;
 
   String get motionStatusLabel => switch (motionState) {
         'stationary' => '静止/稳定',
@@ -87,6 +110,14 @@ class MonitoringController extends ChangeNotifier {
       };
 
   Future<void> start() async {
+    final savedPairs = await _offlineStore.loadPairs();
+    _pendingUploadPairs.addAll(savedPairs);
+    _pendingOfflineInterventions.addAll(
+      await _offlineStore.loadInterventions(),
+    );
+    _requiresOfflineReplay = savedPairs.isNotEmpty;
+    _localRiskEngine.restoreBaseline(await _offlineStore.loadBaseline());
+    _localBaselinePersisted = _localRiskEngine.baselineReady;
     _subscriptions.add(source.frames.listen(_onFrame));
     _subscriptions.add(source.connectionState.listen(_onConnections));
     _subscriptions.add(source.errorState.listen((value) {
@@ -98,12 +129,49 @@ class MonitoringController extends ChangeNotifier {
       commandBridge!.start();
       _subscriptions.add(commandBridge!.statuses.listen((value) {
         motorStatus = value;
+        if (value.startsWith('设备返回executed') &&
+            value.contains('已保存为离线干预') &&
+            _pendingLocalEventId != null) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          recoveryObservation = RecoveryObservation(
+            eventId: _pendingLocalEventId!,
+            status: 'observing',
+            startedAtMs: now,
+            deadlineAtMs: now + 15000,
+            remainingMs: 15000,
+          );
+          _pendingLocalEventId = null;
+        } else if (value.contains('已保存为离线干预') &&
+            _activeOfflineIntervention != null) {
+          _activeOfflineIntervention!.effectLabel = 'unknown';
+          _activeOfflineIntervention!.recoveryTimeMs = 0;
+          _pendingLocalEventId = null;
+          unawaited(
+            _offlineStore.saveInterventions(_pendingOfflineInterventions),
+          );
+        }
         notifyListeners();
+      }));
+      _subscriptions.add(commandBridge!.localAcknowledgements.listen((ack) {
+        final intervention = _activeOfflineIntervention;
+        if (intervention == null ||
+            intervention.command.commandId != ack.commandId) {
+          return;
+        }
+        intervention.acknowledgements.add(ack);
+        unawaited(
+          _offlineStore.saveInterventions(_pendingOfflineInterventions),
+        );
       }));
     }
     await refreshBackend();
+    _updateSessionAdviceIfNeeded();
     _refreshTimer =
         Timer.periodic(const Duration(seconds: 1), (_) => refreshBackend());
+    _recoveryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _tickRecoveryObservation();
+      if (!_disposed) notifyListeners();
+    });
   }
 
   bool get _bothFeetConnected =>
@@ -157,6 +225,18 @@ class MonitoringController extends ChangeNotifier {
     // calibration, risk decisions, event history or motor commands.
     final pair = _pairing.add(frame);
     if (pair != null && source.shouldUploadToBackend) {
+      _localResult = _localRiskEngine.evaluate(pair);
+      if (!_localResult!.baselineReady) {
+        _localBaselinePersisted = false;
+      } else if (!_localBaselinePersisted) {
+        _localBaselinePersisted = true;
+        unawaited(
+          _offlineStore.saveBaseline(_localRiskEngine.exportBaseline()),
+        );
+      }
+      if (!backendOnline) {
+        _applyLocalResult(_localResult!);
+      }
       _enqueuePair(pair);
     }
     notifyListeners();
@@ -206,9 +286,10 @@ class MonitoringController extends ChangeNotifier {
     // short movement episode before the backend sees it; an unbounded queue
     // would instead make risk decisions stale when the network is slow.
     _pendingUploadPairs.add(List<FootFrame>.of(pair, growable: false));
-    if (_pendingUploadPairs.length > 6) {
+    if (_pendingUploadPairs.length > OfflineMonitoringStore.maxPairs) {
       _pendingUploadPairs.removeAt(0);
     }
+    unawaited(_offlineStore.savePairs(_pendingUploadPairs));
     if (!_uploading) {
       unawaited(_drainUploadQueue());
     }
@@ -221,19 +302,30 @@ class MonitoringController extends ChangeNotifier {
     _uploading = true;
     try {
       while (_pendingUploadPairs.isNotEmpty) {
-        final queuedPairs = List<List<FootFrame>>.of(_pendingUploadPairs);
-        _pendingUploadPairs.clear();
+        final take =
+            _pendingUploadPairs.length > 100 ? 100 : _pendingUploadPairs.length;
+        final queuedPairs = _pendingUploadPairs.sublist(0, take);
         final batch = [
           for (final pair in queuedPairs) ...pair,
         ];
         try {
-          await api.uploadFrames(batch);
+          await api.uploadFrames(
+            batch,
+            offlineReplay: _requiresOfflineReplay,
+          );
+          _pendingUploadPairs.removeRange(0, take);
+          await _offlineStore.savePairs(_pendingUploadPairs);
           backendOnline = true;
           _backendError = null;
         } catch (error) {
           backendOnline = false;
+          _requiresOfflineReplay = true;
           _backendError = '数据上传失败：$error';
+          break;
         }
+      }
+      if (_pendingUploadPairs.isEmpty) {
+        _requiresOfflineReplay = false;
       }
     } finally {
       _uploading = false;
@@ -244,8 +336,13 @@ class MonitoringController extends ChangeNotifier {
   Future<void> refreshBackend() async {
     if (_refreshing) return;
     _refreshing = true;
+    _tickRecoveryObservation();
     try {
       backendOnline = await api.health();
+      if (_pendingUploadPairs.isNotEmpty && !_uploading) {
+        await _drainUploadQueue();
+      }
+      await _syncOfflineInterventions();
       final snapshot = await api.realtime();
       final backendIsFrameSource = !source.shouldUploadToBackend;
       if (backendIsFrameSource) {
@@ -262,6 +359,8 @@ class MonitoringController extends ChangeNotifier {
         risk = snapshot.risk;
         activeRisks = snapshot.activeRisks;
         regionalAnalysis = snapshot.regionalAnalysis;
+        recoveryObservation = snapshot.recoveryObservation;
+        _updateRiskNotice();
         try {
           calibrationStatus = await api.calibrationStatus();
         } catch (_) {
@@ -276,7 +375,16 @@ class MonitoringController extends ChangeNotifier {
             );
           }
         }
+        final backendResetAt = calibrationStatus?.resetAtMs;
+        if (backendResetAt != null &&
+            (_localRiskEngine.baselineCreatedAtMs ?? 0) < backendResetAt) {
+          _localRiskEngine.reset();
+          _localResult = null;
+          _localBaselinePersisted = false;
+          await _offlineStore.clearBaseline();
+        }
         _updateAiAdviceIfNeeded();
+        _updateSessionAdviceIfNeeded();
       } else {
         _resetBilateralState();
       }
@@ -299,16 +407,23 @@ class MonitoringController extends ChangeNotifier {
       _backendError = null;
     } catch (error) {
       backendOnline = false;
-      risk = const RiskState.incomplete();
-      activeRisks = const [];
-      regionalAnalysis = null;
-      loadBias = null;
-      loadDiff = null;
-      syncErrorMs = null;
       motorCommand = null;
-      motorStatus = '后端离线，风险闭环与马达提醒已暂停';
+      final local = _localResult;
+      if (source.shouldUploadToBackend && local != null && _bothFeetConnected) {
+        regionalAnalysis = null;
+        _applyLocalResult(local);
+        motorStatus = commandBridge?.status ?? '后端离线，本地风险闭环运行中';
+      } else {
+        risk = const RiskState.incomplete();
+        activeRisks = const [];
+        regionalAnalysis = null;
+        loadBias = null;
+        loadDiff = null;
+        syncErrorMs = null;
+        motorStatus = '双足数据不完整，暂停马达提醒';
+      }
       _backendError = source.shouldUploadToBackend
-          ? '后端离线：本地 BLE 压力图继续显示，风险判断与马达提醒已暂停'
+          ? '后端离线：本地规则、BLE 马达与离线缓存继续运行（待补传 ${_pendingUploadPairs.length} 对）'
           : '后端不可用：$error';
     } finally {
       _refreshing = false;
@@ -336,6 +451,21 @@ class MonitoringController extends ChangeNotifier {
       motorStatus = '马达 ACK 失败：$error';
     }
     notifyListeners();
+  }
+
+  Future<void> _syncOfflineInterventions() async {
+    final ready = _pendingOfflineInterventions.where((item) {
+      final expectedAcks = item.command.target == 'both' ? 2 : 1;
+      return item.acknowledgements.length >= expectedAcks &&
+          item.effectLabel != null;
+    }).toList();
+    if (ready.isEmpty) return;
+    await api.uploadOfflineInterventions(ready);
+    final syncedIds = ready.map((item) => item.command.commandId).toSet();
+    _pendingOfflineInterventions.removeWhere(
+      (item) => syncedIds.contains(item.command.commandId),
+    );
+    await _offlineStore.saveInterventions(_pendingOfflineInterventions);
   }
 
   void _updateAiAdviceIfNeeded() {
@@ -478,12 +608,52 @@ class MonitoringController extends ChangeNotifier {
     }
   }
 
+  void _updateSessionAdviceIfNeeded({bool force = false}) {
+    final now = DateTime.now();
+    if (sessionAdviceLoading ||
+        (!force &&
+            _lastSessionAdviceAt != null &&
+            now.difference(_lastSessionAdviceAt!) <
+                const Duration(seconds: 30))) {
+      return;
+    }
+    _lastSessionAdviceAt = now;
+    sessionAdviceLoading = true;
+    unawaited(_requestSessionAdvice());
+  }
+
+  Future<void> _requestSessionAdvice() async {
+    try {
+      sessionAdvice = await api.sessionAdvice();
+    } catch (_) {
+      // Keep the most recent completed session advice visible while offline.
+    } finally {
+      sessionAdviceLoading = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void refreshSessionAdvice() => _updateSessionAdviceIfNeeded(force: true);
+
   Future<void> restartWearingCalibration() async {
     if (_calibrationResetting) return;
     _calibrationResetting = true;
     notifyListeners();
+    _localRiskEngine.reset();
+    _localResult = null;
+    _localBaselinePersisted = false;
+    await _offlineStore.clearBaseline();
     try {
-      calibrationStatus = await api.resetCalibration();
+      if (backendOnline) {
+        calibrationStatus = await api.resetCalibration();
+      } else {
+        calibrationStatus = const CalibrationStatus(
+          baselineReady: false,
+          sampleCount: 0,
+          requiredSamples: LocalRiskEngine.requiredSamples,
+          statusReason: 'waiting_for_data',
+        );
+      }
       risk = const RiskState(
         riskType: 'normal',
         riskSide: 'none',
@@ -499,8 +669,14 @@ class MonitoringController extends ChangeNotifier {
       _aiQuestionSignature = null;
       _backendError = null;
     } catch (error) {
-      _backendError = '无法开始本次穿戴标定：$error';
-      rethrow;
+      backendOnline = false;
+      calibrationStatus = const CalibrationStatus(
+        baselineReady: false,
+        sampleCount: 0,
+        requiredSamples: LocalRiskEngine.requiredSamples,
+        statusReason: 'waiting_for_data',
+      );
+      _backendError = '后端离线，已开始 App 本地穿戴标定：$error';
     } finally {
       _calibrationResetting = false;
       if (!_disposed) notifyListeners();
@@ -512,6 +688,119 @@ class MonitoringController extends ChangeNotifier {
     aiQuestionStatus = '请选择一个常见问题';
     _aiQuestionSignature = null;
   }
+
+  void _applyLocalResult(LocalRiskResult result) {
+    risk = result.risk;
+    activeRisks = result.activeRisks;
+    loadBias = result.loadBias;
+    loadDiff = result.loadDiff;
+    syncErrorMs = left == null || right == null
+        ? null
+        : (left!.timestampMs - right!.timestampMs).abs();
+    calibrationStatus = CalibrationStatus(
+      baselineReady: result.baselineReady,
+      sampleCount: result.baselineSamples,
+      requiredSamples: LocalRiskEngine.requiredSamples,
+      statusReason: result.baselineReady ? 'ready' : 'waiting_for_data',
+    );
+    _updateRiskNotice();
+    if (result.motorTarget != null &&
+        result.motorPattern != null &&
+        commandBridge != null &&
+        !commandBridge!.hasActiveCommand) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final eventId = 'local_evt_$now';
+      final command = DeviceCommand(
+        commandId: 'cmd_local_$now',
+        target: result.motorTarget!,
+        pattern: result.motorPattern!,
+        durationMs: result.motorPattern == 'long'
+            ? 1500
+            : result.motorPattern == 'double'
+                ? 800
+                : 500,
+        expireAtMs: now + 30000,
+        reasonCode: result.risk.riskType,
+      );
+      _pendingLocalEventId = eventId;
+      _activeOfflineIntervention = OfflineIntervention(
+        eventId: eventId,
+        command: command,
+        risk: result.risk,
+        activeRisks: List<RiskState>.of(result.activeRisks),
+        startedAtMs: now - result.risk.durationMs,
+        beforeLoadDiff: result.loadDiff,
+      );
+      _pendingOfflineInterventions.add(_activeOfflineIntervention!);
+      unawaited(
+        _offlineStore.saveInterventions(_pendingOfflineInterventions),
+      );
+      motorCommand = command;
+      unawaited(commandBridge!.submitLocal(command));
+    }
+  }
+
+  void _updateRiskNotice() {
+    if (activeRisks.isEmpty) {
+      _lastNoticeSignature = null;
+      return;
+    }
+    final signature = activeRisks
+        .map((item) => '${item.riskType}:${item.riskSide}:${item.riskLevel}')
+        .join('|');
+    if (_lastNoticeSignature == signature) return;
+    _lastNoticeSignature = signature;
+    riskNoticeMessage = activeRisks.map(_riskNoticeLabel).join('；');
+    _noticeSequence += 1;
+  }
+
+  void _tickRecoveryObservation() {
+    final observation = recoveryObservation;
+    if (observation == null || observation.status != 'observing') return;
+    if (!backendOnline && !observation.eventId.startsWith('local_evt_')) {
+      return;
+    }
+    final remaining = observation.deadlineAtMs -
+        (backendOnline
+            ? api.serverNowMs
+            : DateTime.now().millisecondsSinceEpoch);
+    recoveryObservation = RecoveryObservation(
+      eventId: observation.eventId,
+      status: remaining > 0 ? 'observing' : 'completed',
+      startedAtMs: observation.startedAtMs,
+      deadlineAtMs: observation.deadlineAtMs,
+      remainingMs: remaining > 0 ? remaining : 0,
+      effectLabel: remaining > 0
+          ? null
+          : (activeRisks.isEmpty ? 'effective' : 'ineffective'),
+    );
+    if (remaining <= 0) {
+      final intervention = _activeOfflineIntervention;
+      if (intervention != null && intervention.effectLabel == null) {
+        intervention.afterLoadDiff = _localResult?.loadDiff;
+        intervention.effectLabel =
+            activeRisks.isEmpty ? 'effective' : 'ineffective';
+        intervention.recoveryTimeMs = 15000;
+        unawaited(
+          _offlineStore.saveInterventions(_pendingOfflineInterventions),
+        );
+      }
+      riskNoticeMessage = activeRisks.isEmpty
+          ? '15 秒干预观察完成：风险已恢复'
+          : '15 秒干预观察完成：风险仍持续，请调整姿势并复查';
+      _noticeSequence += 1;
+    }
+  }
+
+  static String _riskNoticeLabel(RiskState item) => switch (item.riskType) {
+        'left_load_bias' => '检测到持续左偏（等级 ${item.riskLevel}）',
+        'right_load_bias' => '检测到持续右偏（等级 ${item.riskLevel}）',
+        'forefoot_high' =>
+          '${item.riskSide == 'left' ? '左脚' : '右脚'}前掌持续高载（等级 ${item.riskLevel}）',
+        'temperature_asymmetry' =>
+          '${item.riskSide == 'left' ? '左脚' : '右脚'}同区温度较高（等级 ${item.riskLevel}）',
+        _ => '检测到持续风险（等级 ${item.riskLevel}）',
+      };
 
   String get _currentMonitoringSignature => [
         risk.riskType,
@@ -543,6 +832,7 @@ class MonitoringController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _refreshTimer?.cancel();
+    _recoveryTimer?.cancel();
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }

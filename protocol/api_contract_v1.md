@@ -70,6 +70,7 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
   "temperature_available": false,
   "active_risks": [],
   "regional_analysis": null,
+  "recovery_observation": null,
   "risk": {
     "risk_type": "data_incomplete",
     "risk_side": "none",
@@ -89,6 +90,16 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
 - `left/right_pressure_baseline_trusted`：本次标定是否覆盖该点。
 - `left/right_pressure_analysis_valid`：当前是否参与区域风险计算。
 - `left/right_pressure_channel_status`：值为 `ok`、`uncovered_in_baseline`、`raw_invalid` 或 `residual_suspect`。后两种可信度诊断不得阻止原始有效通道继续显示实时受力颜色。
+
+`recovery_observation` 在马达 ACK 确认执行后返回服务端计时的 15 秒观察窗口，包含 `event_id`、`status`、`started_at_ms`、`deadline_at_ms`、`remaining_ms` 和可选 `effect_label`。重新穿戴后不得返回上一会话的观察状态。
+
+## POST /api/v1/sensor/offline-sync
+
+请求结构与 `/sensor/batch` 相同。App 后端断联期间缓存的帧恢复连接后使用此接口按双足帧对逐对回放，后端重建风险开始、结束和组合事件，但 `allow_motor_command=false`，不得补发已经过期的马达命令。帧仍按 `(device_id, sync_id, packet_seq)` 幂等去重。
+
+## POST /api/v1/sensor/offline-interventions
+
+补传 App 本地闭环已执行的风险、命令、逐设备 ACK 与 15 秒恢复评价。后端按 `command_id` 幂等记录，仅用于历史和分析，不再次下发马达。
 
 ## GET /api/v1/calibration/status
 
@@ -144,6 +155,23 @@ frames 中每一项符合 field_dictionary.md，允许左右帧交错。
 ~~~
 
 云端失败时后端必须根据当前状态返回本地模板。AI 不得产生或修改风险等级、目标侧、马达模式和命令。
+
+## GET /api/v1/session/latest
+
+返回当前或最近穿戴会话的结构化摘要，包括数据来源、最后数据时间、基线和通道质量、最近 30 分钟风险次数/最长持续、马达命令/ACK、恢复评价与最近组合事件。会话窗口不得早于最近一次重新穿戴。
+
+## POST /api/v1/ai/session-advice
+
+云端模型或本地模板只接收 `/session/latest` 的结构化统计，不上传连续原始帧。脱鞋或设备断开时返回最近会话建议，并明确标注“当前无实时数据”，不得将历史风险描述成当前风险。
+
+## 分析、导出与 Web
+
+- `GET /dashboard/`：FastAPI 静态现场控制台。
+- `GET /api/v1/analytics/summary`：会话摘要与恢复观察。
+- `GET /api/v1/analytics/timeseries`：会话趋势数据。
+- `GET /api/v1/export/events.csv`：事件级 CSV。
+- `GET /api/v1/export/session.csv`：双足配对指标 CSV。
+- `POST /api/v1/demo/replay?scenario=...`：内置 CSV 故障兜底回放，来源必须标注为 `csv_replay`，不产生 BLE 命令。
 
 ## GET /api/v1/events
 

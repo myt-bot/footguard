@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .config import DATA_DIR, database_url
 from .database import create_database
 from .repositories.command_repository import expire_pending_commands
 from .routers import (
     ai_advice,
+    analytics,
     calibration,
     commands,
+    demo,
     events,
     feedback,
     health,
@@ -33,12 +38,20 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
     application.state.session_factory = session_factory
     application.include_router(health.router)
     application.include_router(ai_advice.router)
+    application.include_router(analytics.router)
     application.include_router(calibration.router)
     application.include_router(sensor.router)
     application.include_router(realtime.router)
     application.include_router(events.router)
     application.include_router(commands.router)
+    application.include_router(demo.router)
     application.include_router(feedback.router)
+    web_dir = Path(__file__).resolve().parents[1] / "web"
+    application.mount(
+        "/dashboard",
+        StaticFiles(directory=web_dir, html=True),
+        name="dashboard",
+    )
     return application
 
 

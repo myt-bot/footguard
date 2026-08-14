@@ -22,6 +22,8 @@ from ..schemas import (
     AiChatResponse,
     AiQuestionRequest,
     AiQuestionResponse,
+    SessionAdviceResponse,
+    SessionSummary,
 )
 from ..schemas import StrictModel
 
@@ -50,6 +52,10 @@ class _CloudNarrative(StrictModel):
 
 class _CloudQuestionAnswer(StrictModel):
     answer: str = Field(min_length=1, max_length=430)
+
+
+class _CloudSessionAdvice(StrictModel):
+    advice: str = Field(min_length=1, max_length=650)
 
 
 def _chat_fallback(payload: AiChatRequest) -> str:
@@ -85,6 +91,65 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
             "role": "user",
             "content": json.dumps(
                 payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+
+def _session_fallback(summary: SessionSummary) -> str:
+    risk_labels = {
+        "left_load_bias": "左脚偏载",
+        "right_load_bias": "右脚偏载",
+        "forefoot_high": "前掌高载",
+        "temperature_asymmetry": "同区温差",
+    }
+    if summary.session_status == "empty":
+        text = "暂无有效监测会话。穿戴后先完成本次基线学习，再观察双脚压力、温度与风险趋势。"
+    elif not summary.baseline_ready:
+        text = "最近会话尚未完成可靠基线，现有风险统计不宜单独解读。重新穿戴后请自然站稳完成基线学习。"
+    elif summary.event_count == 0:
+        temperature = (
+            "温度当前不可用，但压力观察仍可继续。"
+            if not summary.temperature_available
+            else "有效温度点未记录持续风险。"
+        )
+        text = f"最近会话未记录持续压力风险。{temperature}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
+    else:
+        frequent = "、".join(
+            f"{risk_labels.get(name, name)} {count} 次"
+            for name, count in summary.risk_counts.items()
+        )
+        effective = summary.recovery_counts.get("effective", 0)
+        partial = summary.recovery_counts.get("partial", 0)
+        ineffective = summary.recovery_counts.get("ineffective", 0)
+        text = (
+            f"最近会话记录 {summary.event_count} 次风险事件，分布为{frequent}。"
+            f"马达确认执行 {summary.motor_executed_count} 次；恢复评价中有效 {effective} 次、"
+            f"部分有效 {partial} 次、未恢复 {ineffective} 次。"
+            "建议优先复查反复出现的一侧和区域，并结合皮肤外观与鞋内摩擦情况观察。"
+        )
+    if summary.session_status != "live" and summary.session_status != "empty":
+        text = f"当前无实时数据，以下为最近会话辅助建议：{text}"
+    return f"{text}{MEDICAL_BOUNDARY}"
+
+
+def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是足安智垫的会话总结助手。仅依据结构化会话统计给出简洁中文辅助建议，"
+                "区分当前实时状态与最近历史，不得把历史风险描述为当前风险，不得诊断疾病、"
+                "预测溃疡、虚构数值或决定马达动作。输出 JSON 且只包含 advice 字符串，"
+                f"末尾必须说明：{MEDICAL_BOUNDARY}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                summary.model_dump(mode="json"),
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -441,6 +506,38 @@ def _request_cloud_chat_answer(
             active_client.close()
 
 
+def _request_cloud_session_advice(
+    summary: SessionSummary,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> _CloudSessionAdvice:
+    owns_client = client is None
+    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    try:
+        response = active_client.post(
+            f"{settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.model,
+                "messages": _cloud_session_prompt(summary),
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise CloudAdviceError("cloud response content is not text")
+        return _CloudSessionAdvice.model_validate_json(content)
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        raise CloudAdviceError("cloud provider returned an invalid response") from error
+    finally:
+        if owns_client:
+            active_client.close()
+
+
 def _cloud_provider_name(model: str) -> str:
     return f"openai-compatible:{model}"[:64]
 
@@ -538,4 +635,34 @@ def generate_chat_answer(
             provider=FALLBACK_PROVIDER,
             question=payload.question,
             answer=_chat_fallback(payload),
+        )
+
+
+def generate_session_advice(
+    summary: SessionSummary,
+    client: httpx.Client | None = None,
+) -> SessionAdviceResponse:
+    settings = _cloud_settings()
+    if settings is None:
+        return SessionAdviceResponse(
+            provider=f"{MOCK_PROVIDER}:session",
+            session_status=summary.session_status,
+            advice=_session_fallback(summary),
+        )
+    try:
+        narrative = _request_cloud_session_advice(summary, settings, client)
+        advice = narrative.advice.rstrip()
+        if MEDICAL_BOUNDARY not in advice:
+            advice = f"{advice}{MEDICAL_BOUNDARY}"
+        return SessionAdviceResponse(
+            provider=_cloud_provider_name(settings.model),
+            session_status=summary.session_status,
+            advice=advice,
+        )
+    except CloudAdviceError as error:
+        logger.warning("Cloud session advice unavailable; using fallback: %s", error)
+        return SessionAdviceResponse(
+            provider=f"{FALLBACK_PROVIDER}:session",
+            session_status=summary.session_status,
+            advice=_session_fallback(summary),
         )

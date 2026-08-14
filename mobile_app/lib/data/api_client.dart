@@ -10,6 +10,8 @@ import '../models/device_ack.dart';
 import '../models/foot_frame.dart';
 import '../models/regional_analysis.dart';
 import '../models/risk_state.dart';
+import '../models/session_advice.dart';
+import '../models/offline_intervention.dart';
 
 class RealtimeSnapshot {
   const RealtimeSnapshot({
@@ -26,6 +28,7 @@ class RealtimeSnapshot {
     required this.risk,
     this.activeRisks = const [],
     required this.regionalAnalysis,
+    this.recoveryObservation,
   });
 
   final FootFrame? left;
@@ -41,6 +44,7 @@ class RealtimeSnapshot {
   final RiskState risk;
   final List<RiskState> activeRisks;
   final RegionalAnalysis? regionalAnalysis;
+  final RecoveryObservation? recoveryObservation;
 
   factory RealtimeSnapshot.fromJson(Map<String, dynamic> json) =>
       RealtimeSnapshot(
@@ -70,6 +74,39 @@ class RealtimeSnapshot {
             : RegionalAnalysis.fromJson(
                 json['regional_analysis'] as Map<String, dynamic>,
               ),
+        recoveryObservation: json['recovery_observation'] == null
+            ? null
+            : RecoveryObservation.fromJson(
+                json['recovery_observation'] as Map<String, dynamic>,
+              ),
+      );
+}
+
+class RecoveryObservation {
+  const RecoveryObservation({
+    required this.eventId,
+    required this.status,
+    required this.startedAtMs,
+    required this.deadlineAtMs,
+    required this.remainingMs,
+    this.effectLabel,
+  });
+
+  final String eventId;
+  final String status;
+  final int startedAtMs;
+  final int deadlineAtMs;
+  final int remainingMs;
+  final String? effectLabel;
+
+  factory RecoveryObservation.fromJson(Map<String, dynamic> json) =>
+      RecoveryObservation(
+        eventId: json['event_id'] as String,
+        status: json['status'] as String,
+        startedAtMs: json['started_at_ms'] as int,
+        deadlineAtMs: json['deadline_at_ms'] as int,
+        remainingMs: json['remaining_ms'] as int,
+        effectLabel: json['effect_label'] as String?,
       );
 }
 
@@ -224,10 +261,15 @@ class FootGuardApiClient {
     return serverNowMs;
   }
 
-  Future<void> uploadFrames(List<FootFrame> frames) async {
+  Future<void> uploadFrames(
+    List<FootFrame> frames, {
+    bool offlineReplay = false,
+  }) async {
     final response = await _client
         .post(
-          Uri.parse('$baseUrl/api/v1/sensor/batch'),
+          Uri.parse(
+            '$baseUrl/api/v1/sensor/${offlineReplay ? 'offline-sync' : 'batch'}',
+          ),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'protocol_version': 1,
@@ -236,6 +278,23 @@ class FootGuardApiClient {
           }),
         )
         .timeout(const Duration(seconds: 5));
+    await _decode(response);
+  }
+
+  Future<void> uploadOfflineInterventions(
+    List<OfflineIntervention> records,
+  ) async {
+    if (records.isEmpty) return;
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/sensor/offline-interventions'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'protocol_version': 1,
+            'records': records.map((item) => item.toJson()).toList(),
+          }),
+        )
+        .timeout(const Duration(seconds: 8));
     await _decode(response);
   }
 
@@ -423,6 +482,15 @@ class FootGuardApiClient {
         )
         .timeout(const Duration(seconds: 35));
     return AiChatAnswer.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<SessionAdvice> sessionAdvice() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/ai/session-advice'))
+        .timeout(const Duration(seconds: 35));
+    return SessionAdvice.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
   }

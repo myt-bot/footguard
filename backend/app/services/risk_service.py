@@ -2207,6 +2207,7 @@ def evaluate_risk(
     record: bool = False,
     allow_motor_command: bool = True,
 ) -> RealtimeResponse:
+    from .session_service import recovery_observation
     left_latest = latest_frame(session, "left")
     right_latest = latest_frame(session, "right")
     latest_pair = _latest_complete_pair(session, left_latest, right_latest)
@@ -2236,6 +2237,7 @@ def evaluate_risk(
             risk=risk,
             active_risks=[],
             regional_analysis=None,
+            recovery_observation=recovery_observation(session),
         )
     left_model, right_model = latest_pair
     left = to_schema(left_model)
@@ -2305,4 +2307,5 @@ def evaluate_risk(
             baseline_trust=baseline_trust,
             residual_suspects=residual_suspects,
         ),
+        recovery_observation=recovery_observation(session),
     )
