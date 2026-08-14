@@ -29,10 +29,7 @@ class MockScenarioOption {
 }
 
 class CsvReplayOption {
-  const CsvReplayOption({
-    required this.assetPath,
-    required this.label,
-  });
+  const CsvReplayOption({required this.assetPath, required this.label});
 
   final String assetPath;
   final String label;
@@ -45,6 +42,7 @@ class AppSettings {
     this.mockScenario = 'normal_stand',
     this.csvAsset = 'assets/sample_data/intervention_recovery.csv',
     this.replaySpeed = 1.0,
+    this.voiceEnabled = true,
   });
 
   final String backendUrl;
@@ -52,6 +50,7 @@ class AppSettings {
   final String mockScenario;
   final String csvAsset;
   final double replaySpeed;
+  final bool voiceEnabled;
 
   AppSettings copyWith({
     String? backendUrl,
@@ -59,6 +58,7 @@ class AppSettings {
     String? mockScenario,
     String? csvAsset,
     double? replaySpeed,
+    bool? voiceEnabled,
   }) {
     return AppSettings(
       backendUrl: backendUrl ?? this.backendUrl,
@@ -66,6 +66,7 @@ class AppSettings {
       mockScenario: mockScenario ?? this.mockScenario,
       csvAsset: csvAsset ?? this.csvAsset,
       replaySpeed: replaySpeed ?? this.replaySpeed,
+      voiceEnabled: voiceEnabled ?? this.voiceEnabled,
     );
   }
 }

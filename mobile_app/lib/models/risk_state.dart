@@ -33,4 +33,35 @@ class RiskState {
 
   bool get isNormal => riskType == 'normal';
   bool get isIncomplete => riskType == 'data_incomplete';
+  bool get isTemperature => riskType == 'temperature_asymmetry';
+  bool get isPressure => !isNormal && !isIncomplete && !isTemperature;
+}
+
+int pressureRiskPriority(String riskType) => switch (riskType) {
+      'forefoot_high' ||
+      'medial_load_concentration' ||
+      'lateral_load_concentration' =>
+        3,
+      'left_load_bias' || 'right_load_bias' => 2,
+      _ => 1,
+    };
+
+String riskDisplayLabel(String riskType, String side) {
+  final sideLabel = switch (side) {
+    'left' => '左脚',
+    'right' => '右脚',
+    'both' => '双脚',
+    _ => '',
+  };
+  return switch (riskType) {
+    'left_load_bias' => '左侧负载持续偏高',
+    'right_load_bias' => '右侧负载持续偏高',
+    'forefoot_high' => '$sideLabel前掌负荷持续集中',
+    'medial_load_concentration' => '$sideLabel内侧局部负荷集中',
+    'lateral_load_concentration' => '$sideLabel外侧局部负荷集中',
+    'temperature_asymmetry' => '$sideLabel同区温度趋势异常',
+    'normal' => '正常',
+    'data_incomplete' => '数据不完整',
+    _ => '$sideLabel区域负荷集中',
+  };
 }

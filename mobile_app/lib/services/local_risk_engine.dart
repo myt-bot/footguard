@@ -11,13 +11,14 @@ class LocalRiskResult {
     required this.baselineSamples,
     required this.loadBias,
     required this.loadDiff,
+    required this.calibrationStage,
     this.motorTarget,
     this.motorPattern,
     this.temperatureOffsetStatus = const [
       'unstable',
       'unstable',
       'unstable',
-      'unstable'
+      'unstable',
     ],
     this.temperatureRiskEnabled = false,
     this.temperatureRiskReason = 'baseline_not_ready',
@@ -29,6 +30,7 @@ class LocalRiskResult {
   final int baselineSamples;
   final double? loadBias;
   final double? loadDiff;
+  final String calibrationStage;
   final String? motorTarget;
   final String? motorPattern;
   final List<String> temperatureOffsetStatus;
@@ -37,7 +39,7 @@ class LocalRiskResult {
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v3-5-10-20';
+  static const ruleVersion = 'local-rules-v4-10-20-15-30';
   static const requiredSamples = 40;
   static const _contactFloor = 0.01;
   static const _minimumFootLoad = 0.08;
@@ -79,6 +81,12 @@ class LocalRiskEngine {
       ? math.max(requiredSamples, _loadRatios.length)
       : _loadRatios.length;
   int? get baselineCreatedAtMs => _createdAtMs;
+  String get calibrationStage {
+    if (baselineReady) return 'complete';
+    if (_wearingSeen) return 'standing_baseline';
+    if (_emptyTemperatureReferenceReady) return 'put_on';
+    return 'empty_reference';
+  }
 
   void reset() {
     _loadRatios.clear();
@@ -147,22 +155,22 @@ class LocalRiskEngine {
       (
         'empty_temperature_delta',
         (List<double> target, num value, int index) =>
-            target[index] = value.toDouble()
+            target[index] = value.toDouble(),
       ),
       (
         'empty_temperature_mad',
         (List<double> target, num value, int index) =>
-            target[index] = value.toDouble()
+            target[index] = value.toDouble(),
       ),
       (
         'empty_temperature_slope',
         (List<double> target, num value, int index) =>
-            target[index] = value.toDouble()
+            target[index] = value.toDouble(),
       ),
       (
         'wearing_temperature_mad',
         (List<double> target, num value, int index) =>
-            target[index] = value.toDouble()
+            target[index] = value.toDouble(),
       ),
     ]) {
       final raw = value[item.$1];
@@ -187,8 +195,9 @@ class LocalRiskEngine {
     if (statuses is List && statuses.length == 4) {
       _temperatureOffsetStatus =
           statuses.map((item) => item.toString()).toList(growable: false);
-      _emptyTemperatureReferenceReady = _temperatureOffsetStatus
-          .any((item) => item != 'unstable' && item != 'raw_invalid');
+      _emptyTemperatureReferenceReady = _temperatureOffsetStatus.any(
+        (item) => item != 'unstable' && item != 'raw_invalid',
+      );
     }
   }
 
@@ -282,6 +291,7 @@ class LocalRiskEngine {
         baselineSamples: baselineSamples,
         loadBias: baselineReady ? loadRatio - _baselineLoadRatio! : null,
         loadDiff: (leftTotal - rightTotal).abs(),
+        calibrationStage: calibrationStage,
         temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
         temperatureRiskEnabled: false,
         temperatureRiskReason: 'baseline_not_ready',
@@ -366,12 +376,15 @@ class LocalRiskEngine {
           final persistent = temperatureRisk
               ? _temperaturePersistentMs
               : _pressurePersistentMs;
-          active.add(RiskState(
-            riskType: signal.type,
-            riskSide: signal.side,
-            riskLevel: duration < warning ? 1 : (duration < persistent ? 2 : 3),
-            durationMs: duration,
-          ));
+          active.add(
+            RiskState(
+              riskType: signal.type,
+              riskSide: signal.side,
+              riskLevel:
+                  duration < warning ? 1 : (duration < persistent ? 2 : 3),
+              durationMs: duration,
+            ),
+          );
         }
       } else {
         _latchedSignals.remove(key);
@@ -385,11 +398,15 @@ class LocalRiskEngine {
     });
     final primary = active.isEmpty
         ? const RiskState(
-            riskType: 'normal', riskSide: 'none', riskLevel: 0, durationMs: 0)
+            riskType: 'normal',
+            riskSide: 'none',
+            riskLevel: 0,
+            durationMs: 0,
+          )
         : active.first;
     String? target;
     String? pattern;
-    final motorRisks = active.where((item) => item.riskLevel >= 2).toList();
+    final motorRisks = active.where((item) => item.riskLevel >= 3).toList();
     if (motorRisks.isNotEmpty) {
       final sides = motorRisks.map((item) => item.riskSide).toSet();
       target =
@@ -423,6 +440,7 @@ class LocalRiskEngine {
       baselineSamples: baselineSamples,
       loadBias: adjustedBias,
       loadDiff: (leftTotal - rightTotal).abs(),
+      calibrationStage: calibrationStage,
       motorTarget: target,
       motorPattern: pattern,
       temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
@@ -433,12 +451,11 @@ class LocalRiskEngine {
     );
   }
 
-  static int _riskPriority(RiskState risk) => switch (risk.riskType) {
-        'forefoot_high' => 3,
-        'left_load_bias' || 'right_load_bias' => 2,
-        'temperature_asymmetry' => 1,
-        _ => 0,
-      };
+  static int _riskPriority(RiskState risk) => risk.isPressure
+      ? pressureRiskPriority(risk.riskType)
+      : risk.isTemperature
+          ? 0
+          : -1;
 
   void _finishEmptyTemperatureReference() {
     _emptyTemperature = List.generate(4, (index) {
@@ -482,12 +499,11 @@ class LocalRiskEngine {
 
   static int _validCount(FootFrame frame, int count, bool temperature) =>
       List.generate(
-              count,
-              (index) => temperature
-                  ? frame.temperatureChannelValid(index)
-                  : frame.pressureChannelValid(index))
-          .where((value) => value)
-          .length;
+        count,
+        (index) => temperature
+            ? frame.temperatureChannelValid(index)
+            : frame.pressureChannelValid(index),
+      ).where((value) => value).length;
 
   static double _validTotal(FootFrame frame) => List.generate(
         6,
@@ -498,36 +514,36 @@ class LocalRiskEngine {
   static bool _hasContact(FootFrame frame) =>
       _validTotal(frame) >= _minimumFootLoad &&
       List.generate(
-                  6,
-                  (index) =>
-                      frame.pressureChannelValid(index) &&
-                      frame.pressure[index] >= _contactFloor)
-              .where((value) => value)
-              .length >=
+            6,
+            (index) =>
+                frame.pressureChannelValid(index) &&
+                frame.pressure[index] >= _contactFloor,
+          ).where((value) => value).length >=
           2;
 
   static double _forefootRatio(FootFrame frame) {
     final total = _validTotal(frame);
     if (total <= 1e-9) return 0;
     return List.generate(
-            4,
-            (index) => frame.pressureChannelValid(index)
-                ? frame.pressure[index]
-                : 0.0).fold(0.0, (sum, value) => sum + value) /
+          4,
+          (index) =>
+              frame.pressureChannelValid(index) ? frame.pressure[index] : 0.0,
+        ).fold(0.0, (sum, value) => sum + value) /
         total;
   }
 
   static bool _forefootSupported(FootFrame frame) =>
       List.generate(
-                  4,
-                  (index) =>
-                      frame.pressureChannelValid(index) &&
-                      frame.pressure[index] >= _contactFloor)
-              .where((value) => value)
-              .length >=
+            4,
+            (index) =>
+                frame.pressureChannelValid(index) &&
+                frame.pressure[index] >= _contactFloor,
+          ).where((value) => value).length >=
           2 &&
-      List.generate(2, (index) => frame.pressureChannelValid(index + 4))
-          .any((value) => value);
+      List.generate(
+        2,
+        (index) => frame.pressureChannelValid(index + 4),
+      ).any((value) => value);
 
   static List<double?> _temperatureDelta(FootFrame left, FootFrame right) =>
       List.generate(4, (index) {
@@ -558,9 +574,11 @@ class LocalRiskEngine {
           frame.imu.ay * frame.imu.ay +
           frame.imu.az * frame.imu.az,
     );
-    final gyroMaximum = [frame.imu.gx, frame.imu.gy, frame.imu.gz]
-        .map((value) => value.abs())
-        .reduce(math.max);
+    final gyroMaximum = [
+      frame.imu.gx,
+      frame.imu.gy,
+      frame.imu.gz,
+    ].map((value) => value.abs()).reduce(math.max);
     return (acceleration - 9.80665).abs() <= 3.0 && gyroMaximum <= 12.0;
   }
 }

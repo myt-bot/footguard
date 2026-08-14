@@ -1,16 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../data/api_client.dart';
+import '../models/offline_intervention.dart';
 import '../models/session_advice.dart';
 import '../services/offline_monitoring_store.dart';
-import '../widgets/session_analysis_view.dart';
 
 class HistoryScreen extends StatefulWidget {
-  const HistoryScreen({
-    super.key,
-    required this.backendUrl,
-    this.apiClient,
-  });
+  const HistoryScreen({super.key, required this.backendUrl, this.apiClient});
 
   final String backendUrl;
   final FootGuardApiClient? apiClient;
@@ -21,18 +19,16 @@ class HistoryScreen extends StatefulWidget {
 
 enum _HistoryFilter { all, active, finished }
 
-enum _HistoryView { analysis, events }
-
 class _HistoryPayload {
   const _HistoryPayload({
     required this.events,
-    required this.points,
     required this.advice,
+    required this.summary,
     this.cached = false,
   });
   final List<RiskEventRecord> events;
-  final List<AnalyticsFramePoint> points;
   final SessionAdvice? advice;
+  final SessionSummary? summary;
   final bool cached;
 }
 
@@ -40,9 +36,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
   late final FootGuardApiClient api =
       widget.apiClient ?? FootGuardApiClient(baseUrl: widget.backendUrl);
   final OfflineMonitoringStore _store = OfflineMonitoringStore();
-  late Future<_HistoryPayload> payload = _load();
+  late Future<_HistoryPayload> payload;
   _HistoryFilter filter = _HistoryFilter.all;
-  _HistoryView view = _HistoryView.analysis;
+
+  @override
+  void initState() {
+    super.initState();
+    payload = _loadInitial();
+  }
 
   @override
   void dispose() {
@@ -59,12 +60,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
           }
           if (snapshot.hasError) {
             return _Message(
-                icon: Icons.cloud_off,
-                text: '无法读取历史事件\n${snapshot.error}',
-                onRetry: _reload);
+              icon: Icons.cloud_off,
+              text: '无法读取历史事件\n${snapshot.error}',
+              onRetry: _reload,
+            );
           }
           final result = snapshot.data ??
-              const _HistoryPayload(events: [], points: [], advice: null);
+              const _HistoryPayload(events: [], advice: null, summary: null);
           final data = result.events;
 
           final filtered = data.where((event) {
@@ -74,15 +76,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               _HistoryFilter.finished => event.status != 'active',
             };
           }).toList(growable: false);
-          final highRiskCount =
-              data.where((event) => event.riskLevel >= 2).length;
-          final improvedCount = data.where((event) {
-            if (!_isLoadBiasRisk(event.riskType)) {
-              return false;
-            }
-            final ratio = event.loadDiffImprovementRatio;
-            return ratio != null && ratio >= 0.2;
-          }).length;
+          final improvedCount = data.where(_pressureEventImproved).length;
 
           return RefreshIndicator(
             onRefresh: _reload,
@@ -90,87 +84,70 @@ class _HistoryScreenState extends State<HistoryScreen> {
               padding: const EdgeInsets.all(16),
               children: [
                 const Text(
-                  '会话分析与风险记录',
+                  '历史事件与会话建议',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '查看压力、温度、提醒与负载改善结果。记录仅用于辅助监测，不替代医疗诊断。',
+                  '只保留事件、组成风险、持续时间、马达/ACK、干预前后数值和恢复结果。',
                   style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
                 ),
                 const SizedBox(height: 16),
-                SegmentedButton<_HistoryView>(
-                  segments: const [
-                    ButtonSegment(
-                        value: _HistoryView.analysis,
-                        label: Text('会话分析'),
-                        icon: Icon(Icons.insights_outlined)),
-                    ButtonSegment(
-                        value: _HistoryView.events,
-                        label: Text('风险事件'),
-                        icon: Icon(Icons.history_rounded)),
-                  ],
-                  selected: {view},
-                  onSelectionChanged: (selected) =>
-                      setState(() => view = selected.first),
+                _SessionAdvicePanel(
+                  advice: result.advice,
+                  cached: result.cached,
+                  onRefresh: _reload,
                 ),
                 const SizedBox(height: 14),
-                if (view == _HistoryView.analysis)
-                  SessionAnalysisView(
-                    points: result.points,
-                    events: data,
-                    advice: result.advice,
-                    cached: result.cached,
-                  )
-                else ...[
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _SummaryTile(
-                          label: '风险事件',
-                          value: '${data.length} 条',
-                          icon: Icons.event_note_rounded,
-                          color: const Color(0xFF147D73),
-                        ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _SummaryTile(
+                        label: '风险事件',
+                        value: '${result.summary?.eventCount ?? data.length} 条',
+                        icon: Icons.event_note_rounded,
+                        color: const Color(0xFF147D73),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _SummaryTile(
-                          label: '需要减负事件',
-                          value: '$highRiskCount 条',
-                          icon: Icons.warning_amber_rounded,
-                          color: const Color(0xFFE07A36),
-                        ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _SummaryTile(
+                        label: '马达 / ACK',
+                        value: result.summary == null
+                            ? '${data.where((event) => event.interventionStartedAtMs != null).length} / ${data.fold<int>(0, (sum, event) => sum + event.ackCount)}'
+                            : '${result.summary!.motorExecutedCount} / ${result.summary!.motorAckCount}',
+                        icon: Icons.warning_amber_rounded,
+                        color: const Color(0xFFE07A36),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _SummaryTile(
-                          label: '负载有改善',
-                          value: '$improvedCount 条',
-                          icon: Icons.trending_down_rounded,
-                          color: const Color(0xFF1A9B78),
-                        ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _SummaryTile(
+                        label: '负载有改善',
+                        value: '$improvedCount 条',
+                        icon: Icons.trending_down_rounded,
+                        color: const Color(0xFF1A9B78),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      _filterChip(_HistoryFilter.all, '全部'),
-                      _filterChip(_HistoryFilter.active, '进行中'),
-                      _filterChip(_HistoryFilter.finished, '已结束'),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  if (filtered.isEmpty)
-                    const _EmptyFilter()
-                  else
-                    for (final event in filtered) ...[
-                      _HistoryEventCard(event: event),
-                      const SizedBox(height: 10),
-                    ],
-                ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    _filterChip(_HistoryFilter.all, '全部'),
+                    _filterChip(_HistoryFilter.active, '进行中'),
+                    _filterChip(_HistoryFilter.finished, '已结束'),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (filtered.isEmpty)
+                  const _EmptyFilter()
+                else
+                  for (final event in filtered) ...[
+                    _HistoryEventCard(event: event),
+                    const SizedBox(height: 10),
+                  ],
               ],
             ),
           );
@@ -187,31 +164,35 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<_HistoryPayload> _load() async {
     List<RiskEventRecord> events = const [];
-    List<AnalyticsFramePoint> points = const [];
     SessionAdvice? advice;
-    Object? primaryError;
-    try {
-      events = await api.events();
-    } catch (error) {
-      primaryError = error;
-    }
+    SessionSummary? summary;
     var cached = false;
     try {
-      points = await api.analyticsTimeseries();
-      await _store.saveAnalytics(
-          points.map((item) => item.toJson()).toList(growable: false));
+      events = await api.events();
+      await _store.saveHistoryEvents(
+        events.map((item) => item.toJson()).toList(growable: false),
+      );
     } catch (_) {
-      points = (await _store.loadAnalytics())
-          .map(AnalyticsFramePoint.fromJson)
+      events = (await _store.loadHistoryEvents())
+          .map(RiskEventRecord.fromJson)
           .toList(growable: false);
-      if (points.isEmpty) {
-        final pairs = await _store.loadPairs();
-        points = pairs
-            .expand((pair) => pair)
-            .map(AnalyticsFramePoint.fromFootFrame)
-            .toList(growable: false);
-      }
-      cached = points.isNotEmpty;
+      cached = events.isNotEmpty;
+    }
+    final offlineEvents = _eventsFromOfflineInterventions(
+      await _store.loadInterventions(),
+    );
+    final knownIds = events.map((item) => item.eventId).toSet();
+    events = [
+      ...offlineEvents.where((item) => !knownIds.contains(item.eventId)),
+      ...events,
+    ]..sort((a, b) => b.startedAtMs.compareTo(a.startedAtMs));
+    try {
+      summary = await api.latestSession();
+      await _store.saveSessionSummary(summary.toJson());
+    } catch (_) {
+      final raw = await _store.loadSessionSummary();
+      summary = raw == null ? null : SessionSummary.fromJson(raw);
+      cached = cached || summary != null;
     }
     try {
       advice = await api.sessionAdvice();
@@ -219,44 +200,68 @@ class _HistoryScreenState extends State<HistoryScreen> {
     } catch (_) {
       final raw = await _store.loadSessionAdvice();
       advice = raw == null ? null : SessionAdvice.fromJson(raw);
-      advice ??= _localSessionAdvice(events, points);
+      advice ??= _localSessionAdvice(events);
       cached = cached || advice != null;
     }
-    if (primaryError != null && points.isEmpty && advice == null) {
-      throw primaryError;
-    }
     return _HistoryPayload(
-        events: events, points: points, advice: advice, cached: cached);
+      events: events,
+      advice: advice,
+      summary: summary,
+      cached: cached,
+    );
   }
 
-  SessionAdvice? _localSessionAdvice(
-    List<RiskEventRecord> events,
-    List<AnalyticsFramePoint> points,
-  ) {
-    if (events.isEmpty && points.isEmpty) return null;
+  Future<_HistoryPayload> _loadInitial() async {
+    final cached = await _loadCached();
+    if (cached.events.isNotEmpty ||
+        cached.advice != null ||
+        cached.summary != null) {
+      unawaited(_refreshAfterCache());
+      return cached;
+    }
+    return _load();
+  }
+
+  Future<_HistoryPayload> _loadCached() async {
+    final rawEvents = await _store.loadHistoryEvents();
+    final events = rawEvents.map(RiskEventRecord.fromJson).toList();
+    final knownIds = events.map((item) => item.eventId).toSet();
+    events.addAll(
+      _eventsFromOfflineInterventions(await _store.loadInterventions())
+          .where((item) => !knownIds.contains(item.eventId)),
+    );
+    events.sort((a, b) => b.startedAtMs.compareTo(a.startedAtMs));
+    final rawAdvice = await _store.loadSessionAdvice();
+    final rawSummary = await _store.loadSessionSummary();
+    return _HistoryPayload(
+      events: events,
+      advice: rawAdvice == null
+          ? _localSessionAdvice(events)
+          : SessionAdvice.fromJson(rawAdvice),
+      summary: rawSummary == null ? null : SessionSummary.fromJson(rawSummary),
+      cached: true,
+    );
+  }
+
+  Future<void> _refreshAfterCache() async {
+    final refreshed = await _load();
+    if (!mounted) return;
+    setState(() {
+      payload = Future.value(refreshed);
+    });
+  }
+
+  SessionAdvice? _localSessionAdvice(List<RiskEventRecord> events) {
+    if (events.isEmpty) return null;
     final pressureEvents = events.where(
       (event) => event.riskType != 'temperature_asymmetry',
     );
-    final recovered = events.where(
-      (event) => const {'effective', 'partial'}.contains(event.effectLabel),
-    );
-    final left = points.where((point) => point.side == 'left').toList();
-    final right = points.where((point) => point.side == 'right').toList();
-    double averageLoad(List<AnalyticsFramePoint> rows) => rows.isEmpty
-        ? 0
-        : rows.fold<double>(0, (sum, row) => sum + row.totalPressure) /
-            rows.length;
-    final leftLoad = averageLoad(left);
-    final rightLoad = averageLoad(right);
-    final loadNote = leftLoad <= 0 && rightLoad <= 0
-        ? '本地缓存中没有足够的承重数据。'
-        : '最近缓存的左右平均载荷比约为 '
-            '${leftLoad.toStringAsFixed(2)}:${rightLoad.toStringAsFixed(2)}。';
+    final recovered = events.where(_pressureEventImproved);
     return SessionAdvice(
       provider: 'local-session-template',
       sessionStatus: 'recent',
       advice: '当前无实时后端数据，以下为最近会话辅助建议：'
-          '$loadNote本地记录 ${pressureEvents.length} 次压力减负事件，'
+          '本地记录 ${pressureEvents.length} 次压力减负事件，'
           '其中 ${recovered.length} 次在观察期内有改善。'
           '建议优先核对反复出现的一侧和前掌区域，并结合皮肤外观、鞋内异物与鞋垫贴合情况观察。'
           '本建议仅用于辅助监测，不替代医疗诊断。',
@@ -268,6 +273,103 @@ class _HistoryScreenState extends State<HistoryScreen> {
     await payload;
   }
 }
+
+class _SessionAdvicePanel extends StatelessWidget {
+  const _SessionAdvicePanel({
+    required this.advice,
+    required this.cached,
+    required this.onRefresh,
+  });
+
+  final SessionAdvice? advice;
+  final bool cached;
+  final Future<void> Function() onRefresh;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.auto_awesome_outlined),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '最近会话 AI 建议',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '刷新会话建议',
+                    onPressed: onRefresh,
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
+                ],
+              ),
+              if (advice == null)
+                const Text('暂无可用的最近会话建议。')
+              else ...[
+                Text(
+                  cached || advice!.isHistorical
+                      ? '当前无实时数据；以下是最近会话，不是当前风险。'
+                      : '当前会话综合建议',
+                  style: const TextStyle(
+                    color: Color(0xFF087F72),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(advice!.advice),
+                const SizedBox(height: 6),
+                Text(
+                  advice!.provider,
+                  style:
+                      const TextStyle(color: Color(0xFF718096), fontSize: 11),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+}
+
+List<RiskEventRecord> _eventsFromOfflineInterventions(
+  List<OfflineIntervention> records,
+) =>
+    records.map((item) {
+      final executedAcks = item.acknowledgements
+          .where((ack) => ack.status == 'executed')
+          .toList(growable: false);
+      final interventionAt =
+          executedAcks.map((ack) => ack.executedAtMs ?? ack.ackAtMs).fold<int?>(
+                null,
+                (earliest, value) =>
+                    earliest == null || value < earliest ? value : earliest,
+              );
+      return RiskEventRecord(
+        eventId: item.eventId,
+        riskType: item.risk.riskType,
+        riskSide: item.risk.riskSide,
+        riskLevel: item.risk.riskLevel,
+        startedAtMs: item.startedAtMs,
+        durationMs: item.risk.durationMs,
+        status: item.effectLabel == null ? 'active' : 'resolved',
+        beforeLoadDiff: item.beforeLoadDiff,
+        afterLoadDiff: item.afterLoadDiff,
+        interventionAction: executedAcks.isEmpty ? null : 'motor_vibration',
+        effectLabel: item.effectLabel,
+        recoveryTimeMs: item.recoveryTimeMs,
+        activeRisks: item.activeRisks,
+        interventionStartedAtMs: interventionAt,
+        motorTarget: item.command.target,
+        motorPattern: item.command.pattern,
+        ackCount: executedAcks.length,
+      );
+    }).toList(growable: false);
 
 class _SummaryTile extends StatelessWidget {
   const _SummaryTile({
@@ -369,8 +471,11 @@ class _HistoryEventCard extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Row(
                   children: [
-                    Icon(_riskIcon(risk.riskType),
-                        size: 17, color: severityColor),
+                    Icon(
+                      _riskIcon(risk.riskType),
+                      size: 17,
+                      color: severityColor,
+                    ),
                     const SizedBox(width: 7),
                     Expanded(
                       child: Text(
@@ -380,7 +485,9 @@ class _HistoryEventCard extends StatelessWidget {
                     Text(
                       '${_levelLabel(risk.riskLevel)} · ${_formatDuration(risk.durationMs)}',
                       style: const TextStyle(
-                          fontSize: 12, color: Color(0xFF60706F)),
+                        fontSize: 12,
+                        color: Color(0xFF60706F),
+                      ),
                     ),
                   ],
                 ),
@@ -412,6 +519,29 @@ class _HistoryEventCard extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF2F5F5),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Wrap(
+              spacing: 18,
+              runSpacing: 8,
+              children: [
+                Text(
+                  event.interventionStartedAtMs == null
+                      ? '马达：未执行'
+                      : '马达：已执行一次${event.motorTarget == null ? '' : '（${_sideLabel(event.motorTarget!)}）'}',
+                ),
+                Text('设备 ACK：${event.ackCount} 条'),
+                if (event.interventionStartedAtMs != null)
+                  Text('干预时间：${_formatClock(event.interventionStartedAtMs!)}'),
+              ],
+            ),
+          ),
           const SizedBox(height: 14),
           _RecoveryPanel(event: event),
           const SizedBox(height: 10),
@@ -419,10 +549,7 @@ class _HistoryEventCard extends StatelessWidget {
             alignment: Alignment.centerLeft,
             child: Text(
               '事件编号 ${event.eventId}',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF879291),
-              ),
+              style: const TextStyle(fontSize: 11, color: Color(0xFF879291)),
             ),
           ),
         ],
@@ -590,9 +717,13 @@ class _ComponentRecoveryPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('提醒后的压力重新分配观察',
-                style: TextStyle(
-                    color: Color(0xFF147D73), fontWeight: FontWeight.w800)),
+            const Text(
+              '提醒后的压力重新分配观察',
+              style: TextStyle(
+                color: Color(0xFF147D73),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
             const SizedBox(height: 8),
             for (final item in feedback)
               Padding(
@@ -600,10 +731,22 @@ class _ComponentRecoveryPanel extends StatelessWidget {
                 child: Row(
                   children: [
                     Expanded(
-                        child: Text(
-                            '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}')),
-                    Text(_componentEffectLabel(item.effectLabel),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                      child: Text(
+                        '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}',
+                      ),
+                    ),
+                    Text(
+                      _componentEffectLabel(item.effectLabel),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    if (item.beforeValue != null &&
+                        item.afterValue != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '${_formatPercent(item.beforeValue!)} → ${_formatPercent(item.afterValue!)}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
                     if (item.improvementRatio != null) ...[
                       const SizedBox(width: 6),
                       Text('${(item.improvementRatio! * 100).round()}%'),
@@ -691,13 +834,18 @@ String _riskLabel(String riskType) => switch (riskType) {
       'left_load_bias' => '左侧负载持续偏高',
       'right_load_bias' => '右侧负载持续偏高',
       'forefoot_high' => '前掌负荷持续集中',
+      'medial_load_concentration' => '内侧局部负荷集中',
+      'lateral_load_concentration' => '外侧局部负荷集中',
       'temperature_asymmetry' => '同区温度趋势异常',
-      _ => riskType,
+      _ => '区域负荷集中',
     };
 
 IconData _riskIcon(String riskType) => switch (riskType) {
       'temperature_asymmetry' => Icons.device_thermostat_rounded,
       'forefoot_high' => Icons.directions_walk_rounded,
+      'medial_load_concentration' ||
+      'lateral_load_concentration' =>
+        Icons.warning_amber_rounded,
       _ => Icons.balance_rounded,
     };
 
@@ -713,6 +861,19 @@ String _recoveryResult(double? ratio) {
 
 bool _isLoadBiasRisk(String riskType) =>
     riskType == 'left_load_bias' || riskType == 'right_load_bias';
+
+bool _pressureEventImproved(RiskEventRecord event) {
+  final pressureFeedback = event.componentFeedback
+      .where((item) => item.pressureIntervention)
+      .toList(growable: false);
+  if (pressureFeedback.isNotEmpty) {
+    return pressureFeedback.any(
+      (item) => const {'effective', 'partial'}.contains(item.effectLabel),
+    );
+  }
+  return event.riskType != 'temperature_asymmetry' &&
+      const {'effective', 'partial'}.contains(event.effectLabel);
+}
 
 String _actionLabel(String action) => switch (action) {
       'motor_vibration' => '马达提醒后调整姿势',
@@ -774,19 +935,25 @@ String _formatDuration(int durationMs) {
 String _formatPercent(double value) => '${(value * 100).toStringAsFixed(1)}%';
 
 class _Message extends StatelessWidget {
-  const _Message(
-      {required this.icon, required this.text, required this.onRetry});
+  const _Message({
+    required this.icon,
+    required this.text,
+    required this.onRetry,
+  });
   final IconData icon;
   final String text;
   final Future<void> Function() onRetry;
   @override
   Widget build(BuildContext context) => Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 52, color: const Color(0xFF78909C)),
-          const SizedBox(height: 12),
-          Text(text, textAlign: TextAlign.center),
-          const SizedBox(height: 12),
-          OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
-        ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 52, color: const Color(0xFF78909C)),
+            const SizedBox(height: 12),
+            Text(text, textAlign: TextAlign.center),
+            const SizedBox(height: 12),
+            OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
+          ],
+        ),
       );
 }

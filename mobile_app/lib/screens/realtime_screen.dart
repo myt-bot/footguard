@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../config/app_config.dart';
@@ -11,6 +13,7 @@ import '../services/ble_connection_service.dart';
 import '../services/ble_command_bridge.dart';
 import '../services/monitoring_controller.dart';
 import '../services/risk_notification_service.dart';
+import '../services/local_tts_service.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/foot_pressure_view.dart';
 import '../widgets/risk_banner.dart';
@@ -20,9 +23,11 @@ class RealtimeScreen extends StatefulWidget {
     super.key,
     required this.settings,
     required this.connectionService,
+    required this.ttsSpeaker,
   });
   final AppSettings settings;
   final BleConnectionService connectionService;
+  final TtsSpeaker ttsSpeaker;
 
   @override
   State<RealtimeScreen> createState() => _RealtimeScreenState();
@@ -34,14 +39,17 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   final RiskNotificationService _notifications = RiskNotificationService();
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   int _handledNoticeSequence = 0;
+  String? _spokenCalibrationStage;
 
   FootDataSource _source(FootGuardApiClient api) =>
       switch (widget.settings.dataMode) {
-        FootDataMode.mock =>
-          MockFootDataSource(scenario: widget.settings.mockScenario),
+        FootDataMode.mock => MockFootDataSource(
+            scenario: widget.settings.mockScenario,
+          ),
         FootDataMode.csvReplay => CsvReplayDataSource(
             assetPath: widget.settings.csvAsset,
-            speed: widget.settings.replaySpeed),
+            speed: widget.settings.replaySpeed,
+          ),
         FootDataMode.backend => BackendFootDataSource(api),
         FootDataMode.ble => BleFootDataSource(widget.connectionService),
       };
@@ -60,13 +68,33 @@ class _RealtimeScreenState extends State<RealtimeScreen>
       api: api,
       commandBridge: commandBridge,
     );
-    controller.addListener(_handleNotice);
+    controller.addListener(_handleControllerChanges);
     controller.start();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
+  }
+
+  void _handleControllerChanges() {
+    _handleCalibrationSpeech();
+    _handleNotice();
+  }
+
+  void _handleCalibrationSpeech() {
+    if (!widget.settings.voiceEnabled || !controller.bothFeetConnected) return;
+    final stage = controller.calibrationStage;
+    if (_spokenCalibrationStage == stage) return;
+    _spokenCalibrationStage = stage;
+    final message = switch (stage) {
+      'empty_reference' => '请保持双脚离开鞋垫，开始空载参考采集。',
+      'put_on' => '空载参考完成，请穿好双脚。',
+      'standing_baseline' => '请开始自然站立，采集本次穿戴基线。',
+      'complete' => '本次穿戴基线已完成。',
+      _ => null,
+    };
+    if (message != null) unawaited(widget.ttsSpeaker.speak(message));
   }
 
   void _handleNotice() {
@@ -76,6 +104,9 @@ class _RealtimeScreenState extends State<RealtimeScreen>
     }
     _handledNoticeSequence = controller.noticeSequence;
     final message = controller.riskNoticeMessage!;
+    if (widget.settings.voiceEnabled) {
+      unawaited(widget.ttsSpeaker.speak(message));
+    }
     if (_lifecycleState != AppLifecycleState.resumed) {
       _notifications.show(title: 'FootGuard 风险与干预提醒', body: message);
       return;
@@ -102,7 +133,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    controller.removeListener(_handleNotice);
+    controller.removeListener(_handleControllerChanges);
     controller.dispose();
     super.dispose();
   }
@@ -140,15 +171,12 @@ class _RealtimeScreenState extends State<RealtimeScreen>
       await controller.restartWearingCalibration();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('已开始本次穿戴标定，请双脚平行自然站稳约 8–12 秒'),
-        ),
+        const SnackBar(content: Text('已开始本次穿戴标定，请双脚平行自然站稳约 8–12 秒')),
       );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('标定启动失败，请确认后端已连接')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('标定启动失败，请确认后端已连接')));
     }
   }
 
@@ -164,10 +192,14 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             Row(
               children: [
                 ConnectionStatusCard(
-                    label: '左脚设备', status: controller.connections.left),
+                  label: '左脚设备',
+                  status: controller.connections.left,
+                ),
                 const SizedBox(width: 10),
                 ConnectionStatusCard(
-                    label: '右脚设备', status: controller.connections.right),
+                  label: '右脚设备',
+                  status: controller.connections.right,
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -203,8 +235,10 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             ),
             if (controller.errorMessage != null) ...[
               const SizedBox(height: 10),
-              Text(controller.errorMessage!,
-                  style: const TextStyle(color: Color(0xFFB54A42))),
+              Text(
+                controller.errorMessage!,
+                style: const TextStyle(color: Color(0xFFB54A42)),
+              ),
             ],
             if (controller.backendOnline &&
                 controller.syncWarningMessage != null) ...[
@@ -215,197 +249,146 @@ class _RealtimeScreenState extends State<RealtimeScreen>
               ),
             ],
             const SizedBox(height: 12),
-            LayoutBuilder(builder: (context, constraints) {
-              final wide = constraints.maxWidth >= 680;
-              final analysis = controller.regionalAnalysis;
-              final feet = [
-                Expanded(
-                  child: FootPressureView(
-                    side: 'left',
-                    showPressureAbnormality: _showPressureAbnormality('left'),
-                    showTemperatureAbnormality:
-                        _showTemperatureAbnormality('left'),
-                    frame: controller.left,
-                    oppositeFrame: controller.right,
-                    pressureScores: analysis?.leftPressureScores,
-                    pressureValid: analysis?.leftPressureValid,
-                    oppositePressureValid: analysis?.rightPressureValid,
-                    pressureAnalysisValid: analysis?.leftPressureAnalysisValid,
-                    pressureChannelStatus: analysis?.leftPressureChannelStatus,
-                    temperatureScores: analysis?.leftTemperatureScores,
-                    temperatureDeltaC: analysis?.temperatureDeltaC,
-                    baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
-                    baselineRequiredSamples:
-                        analysis?.baselineRequiredSamples ?? 40,
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= 680;
+                final analysis = controller.regionalAnalysis;
+                final feet = [
+                  Expanded(
+                    child: FootPressureView(
+                      side: 'left',
+                      showPressureAbnormality: _showPressureAbnormality('left'),
+                      showTemperatureAbnormality: _showTemperatureAbnormality(
+                        'left',
+                      ),
+                      frame: controller.left,
+                      oppositeFrame: controller.right,
+                      pressureScores: analysis?.leftPressureScores,
+                      pressureValid: analysis?.leftPressureValid,
+                      oppositePressureValid: analysis?.rightPressureValid,
+                      pressureAnalysisValid:
+                          analysis?.leftPressureAnalysisValid,
+                      pressureChannelStatus:
+                          analysis?.leftPressureChannelStatus,
+                      temperatureScores: analysis?.leftTemperatureScores,
+                      temperatureDeltaC: analysis?.temperatureDeltaC,
+                      baselineReady: analysis?.baselineReady ?? false,
+                      baselineSampleCount: analysis?.baselineSampleCount ?? 0,
+                      baselineRequiredSamples:
+                          analysis?.baselineRequiredSamples ?? 40,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12, height: 12),
-                Expanded(
-                  child: FootPressureView(
-                    side: 'right',
-                    showPressureAbnormality: _showPressureAbnormality('right'),
-                    showTemperatureAbnormality:
-                        _showTemperatureAbnormality('right'),
-                    frame: controller.right,
-                    oppositeFrame: controller.left,
-                    pressureScores: analysis?.rightPressureScores,
-                    pressureValid: analysis?.rightPressureValid,
-                    oppositePressureValid: analysis?.leftPressureValid,
-                    pressureAnalysisValid: analysis?.rightPressureAnalysisValid,
-                    pressureChannelStatus: analysis?.rightPressureChannelStatus,
-                    temperatureScores: analysis?.rightTemperatureScores,
-                    temperatureDeltaC: analysis?.temperatureDeltaC,
-                    baselineReady: analysis?.baselineReady ?? false,
-                    baselineSampleCount: analysis?.baselineSampleCount ?? 0,
-                    baselineRequiredSamples:
-                        analysis?.baselineRequiredSamples ?? 40,
+                  const SizedBox(width: 12, height: 12),
+                  Expanded(
+                    child: FootPressureView(
+                      side: 'right',
+                      showPressureAbnormality: _showPressureAbnormality(
+                        'right',
+                      ),
+                      showTemperatureAbnormality: _showTemperatureAbnormality(
+                        'right',
+                      ),
+                      frame: controller.right,
+                      oppositeFrame: controller.left,
+                      pressureScores: analysis?.rightPressureScores,
+                      pressureValid: analysis?.rightPressureValid,
+                      oppositePressureValid: analysis?.leftPressureValid,
+                      pressureAnalysisValid:
+                          analysis?.rightPressureAnalysisValid,
+                      pressureChannelStatus:
+                          analysis?.rightPressureChannelStatus,
+                      temperatureScores: analysis?.rightTemperatureScores,
+                      temperatureDeltaC: analysis?.temperatureDeltaC,
+                      baselineReady: analysis?.baselineReady ?? false,
+                      baselineSampleCount: analysis?.baselineSampleCount ?? 0,
+                      baselineRequiredSamples:
+                          analysis?.baselineRequiredSamples ?? 40,
+                    ),
                   ),
-                ),
-              ];
-              return wide
-                  ? Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: feet)
-                  : Column(
-                      children: [
-                        FootPressureView(
-                          side: 'left',
-                          showPressureAbnormality:
-                              _showPressureAbnormality('left'),
-                          showTemperatureAbnormality:
-                              _showTemperatureAbnormality('left'),
-                          frame: controller.left,
-                          oppositeFrame: controller.right,
-                          pressureScores: analysis?.leftPressureScores,
-                          pressureValid: analysis?.leftPressureValid,
-                          oppositePressureValid: analysis?.rightPressureValid,
-                          pressureAnalysisValid:
-                              analysis?.leftPressureAnalysisValid,
-                          pressureChannelStatus:
-                              analysis?.leftPressureChannelStatus,
-                          temperatureScores: analysis?.leftTemperatureScores,
-                          temperatureDeltaC: analysis?.temperatureDeltaC,
-                          baselineReady: analysis?.baselineReady ?? false,
-                          baselineSampleCount:
-                              analysis?.baselineSampleCount ?? 0,
-                          baselineRequiredSamples:
-                              analysis?.baselineRequiredSamples ?? 40,
-                        ),
-                        const SizedBox(height: 12),
-                        FootPressureView(
-                          side: 'right',
-                          showPressureAbnormality:
-                              _showPressureAbnormality('right'),
-                          showTemperatureAbnormality:
-                              _showTemperatureAbnormality('right'),
-                          frame: controller.right,
-                          oppositeFrame: controller.left,
-                          pressureScores: analysis?.rightPressureScores,
-                          pressureValid: analysis?.rightPressureValid,
-                          oppositePressureValid: analysis?.leftPressureValid,
-                          pressureAnalysisValid:
-                              analysis?.rightPressureAnalysisValid,
-                          pressureChannelStatus:
-                              analysis?.rightPressureChannelStatus,
-                          temperatureScores: analysis?.rightTemperatureScores,
-                          temperatureDeltaC: analysis?.temperatureDeltaC,
-                          baselineReady: analysis?.baselineReady ?? false,
-                          baselineSampleCount:
-                              analysis?.baselineSampleCount ?? 0,
-                          baselineRequiredSamples:
-                              analysis?.baselineRequiredSamples ?? 40,
-                        ),
-                      ],
-                    );
-            }),
+                ];
+                return wide
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: feet,
+                      )
+                    : Column(
+                        children: [
+                          FootPressureView(
+                            side: 'left',
+                            showPressureAbnormality: _showPressureAbnormality(
+                              'left',
+                            ),
+                            showTemperatureAbnormality:
+                                _showTemperatureAbnormality('left'),
+                            frame: controller.left,
+                            oppositeFrame: controller.right,
+                            pressureScores: analysis?.leftPressureScores,
+                            pressureValid: analysis?.leftPressureValid,
+                            oppositePressureValid: analysis?.rightPressureValid,
+                            pressureAnalysisValid:
+                                analysis?.leftPressureAnalysisValid,
+                            pressureChannelStatus:
+                                analysis?.leftPressureChannelStatus,
+                            temperatureScores: analysis?.leftTemperatureScores,
+                            temperatureDeltaC: analysis?.temperatureDeltaC,
+                            baselineReady: analysis?.baselineReady ?? false,
+                            baselineSampleCount:
+                                analysis?.baselineSampleCount ?? 0,
+                            baselineRequiredSamples:
+                                analysis?.baselineRequiredSamples ?? 40,
+                          ),
+                          const SizedBox(height: 12),
+                          FootPressureView(
+                            side: 'right',
+                            showPressureAbnormality: _showPressureAbnormality(
+                              'right',
+                            ),
+                            showTemperatureAbnormality:
+                                _showTemperatureAbnormality('right'),
+                            frame: controller.right,
+                            oppositeFrame: controller.left,
+                            pressureScores: analysis?.rightPressureScores,
+                            pressureValid: analysis?.rightPressureValid,
+                            oppositePressureValid: analysis?.leftPressureValid,
+                            pressureAnalysisValid:
+                                analysis?.rightPressureAnalysisValid,
+                            pressureChannelStatus:
+                                analysis?.rightPressureChannelStatus,
+                            temperatureScores: analysis?.rightTemperatureScores,
+                            temperatureDeltaC: analysis?.temperatureDeltaC,
+                            baselineReady: analysis?.baselineReady ?? false,
+                            baselineSampleCount:
+                                analysis?.baselineSampleCount ?? 0,
+                            baselineRequiredSamples:
+                                analysis?.baselineRequiredSamples ?? 40,
+                          ),
+                        ],
+                      );
+              },
+            ),
             const SizedBox(height: 12),
             _MetricsCard(controller: controller),
-            const SizedBox(height: 12),
-            _SessionAdviceCard(controller: controller),
             const SizedBox(height: 12),
             Card(
               elevation: 0,
               child: ListTile(
-                leading:
-                    const CircleAvatar(child: Icon(Icons.vibration_rounded)),
-                title: const Text('马达提醒状态',
-                    style: TextStyle(fontWeight: FontWeight.w700)),
+                leading: const CircleAvatar(
+                  child: Icon(Icons.vibration_rounded),
+                ),
+                title: const Text(
+                  '马达提醒状态',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
                 subtitle: Text(controller.motorStatus),
                 trailing: controller.motorCommand == null ||
                         controller.usesRealBleCommands
                     ? null
                     : FilledButton(
                         onPressed: controller.executeMotorCommand,
-                        child: const Text('模拟执行')),
+                        child: const Text('模拟执行'),
+                      ),
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SessionAdviceCard extends StatelessWidget {
-  const _SessionAdviceCard({required this.controller});
-
-  final MonitoringController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final advice = controller.sessionAdvice;
-    return Card(
-      elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.summarize_outlined),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    '当前 / 最近会话综合建议',
-                    style: TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '刷新会话建议',
-                  onPressed: controller.sessionAdviceLoading
-                      ? null
-                      : controller.refreshSessionAdvice,
-                  icon: controller.sessionAdviceLoading
-                      ? const SizedBox.square(
-                          dimension: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh_rounded),
-                ),
-              ],
-            ),
-            if (advice == null)
-              Text(controller.backendOnline
-                  ? '正在汇总本次穿戴与最近风险记录'
-                  : '后端离线，保留上次会话建议；本地风险闭环继续运行')
-            else ...[
-              Text(
-                advice.isHistorical ? '当前无实时数据 · 最近会话' : '当前会话',
-                style: const TextStyle(
-                  color: Color(0xFF087F72),
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(advice.advice),
-              const SizedBox(height: 6),
-              Text(
-                advice.provider,
-                style: const TextStyle(color: Color(0xFF718096), fontSize: 11),
-              ),
-            ],
           ],
         ),
       ),
@@ -542,23 +525,28 @@ class _MetricsCard extends StatelessWidget {
             runSpacing: 12,
             children: [
               _Metric(
-                  label: '载荷偏向',
-                  value: controller.loadBias?.toStringAsFixed(3) ?? '--'),
+                label: '载荷偏向',
+                value: controller.loadBias?.toStringAsFixed(3) ?? '--',
+              ),
               _Metric(
-                  label: '左右差值',
-                  value: controller.loadDiff?.toStringAsFixed(3) ?? '--'),
+                label: '左右差值',
+                value: controller.loadDiff?.toStringAsFixed(3) ?? '--',
+              ),
               _Metric(
-                  label: '同步误差',
-                  value: controller.syncErrorMs == null
-                      ? '--'
-                      : '${controller.syncErrorMs} ms'),
+                label: '同步误差',
+                value: controller.syncErrorMs == null
+                    ? '--'
+                    : '${controller.syncErrorMs} ms',
+              ),
               _Metric(label: '活动状态', value: controller.motionStatusLabel),
               _Metric(
-                  label: '左脚运动',
-                  value: controller.footMotionStatusLabel('left')),
+                label: '左脚运动',
+                value: controller.footMotionStatusLabel('left'),
+              ),
               _Metric(
-                  label: '右脚运动',
-                  value: controller.footMotionStatusLabel('right')),
+                label: '右脚运动',
+                value: controller.footMotionStatusLabel('right'),
+              ),
               _Metric(
                   label: '后端', value: controller.backendOnline ? '在线' : '离线'),
               _Metric(label: '数据源', value: controller.source.label),
@@ -575,11 +563,16 @@ class _Metric extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SizedBox(
         width: 105,
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label,
-              style: const TextStyle(color: Color(0xFF718096), fontSize: 12)),
-          const SizedBox(height: 3),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
-        ]),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(color: Color(0xFF718096), fontSize: 12),
+            ),
+            const SizedBox(height: 3),
+            Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
+          ],
+        ),
       );
 }
