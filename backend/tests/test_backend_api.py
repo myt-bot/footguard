@@ -65,7 +65,7 @@ def test_duplicate_batch_is_idempotently_rejected(client: TestClient) -> None:
     assert result["rejected"] == 2
 
 
-def test_offline_sync_is_idempotent_and_replays_all_pairs(
+def test_offline_sync_is_idempotent_and_archives_all_pairs(
     client: TestClient, app
 ) -> None:
     payload = sensor_batch()
@@ -89,6 +89,55 @@ def test_offline_sync_is_idempotent_and_replays_all_pairs(
     assert duplicate["rejected"] == 6
     with app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(SensorFrame)) == 6
+
+
+def test_offline_sync_rejects_duplicates_inside_one_request(
+    client: TestClient, app
+) -> None:
+    payload = sensor_batch()
+    payload["frames"] = payload["frames"] + payload["frames"]
+
+    response = client.post("/api/v1/sensor/offline-sync", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 2
+    assert response.json()["rejected"] == 2
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(SensorFrame)) == 2
+
+
+def test_offline_sync_does_not_rewrite_existing_risk_events(
+    client: TestClient, app
+) -> None:
+    event = RiskEvent(
+        event_id="evt_existing",
+        risk_type="left_load_bias",
+        risk_side="left",
+        risk_level=2,
+        started_at_ms=1760000005000,
+        ended_at_ms=1760000015000,
+        duration_ms=10000,
+        status="recovered",
+        risk_components_json="[]",
+    )
+    with app.state.session_factory() as session:
+        session.add(event)
+        session.commit()
+
+    payload = sensor_batch()
+    for frame in payload["frames"]:
+        frame["timestamp_ms"] -= 60_000
+    response = client.post("/api/v1/sensor/offline-sync", json=payload)
+
+    assert response.status_code == 200
+    with app.state.session_factory() as session:
+        stored = session.get(RiskEvent, "evt_existing")
+        assert stored is not None
+        assert stored.started_at_ms == 1760000005000
+        assert stored.ended_at_ms == 1760000015000
+        assert stored.duration_ms == 10000
+        assert stored.status == "recovered"
+        assert session.scalar(select(func.count()).select_from(RiskEvent)) == 1
 
 
 def test_session_summary_and_csv_exports_work_without_live_data(

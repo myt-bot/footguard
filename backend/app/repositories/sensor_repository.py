@@ -49,7 +49,13 @@ def to_schema(frame: SensorFrame) -> FootFrame:
 def add_frames(session: Session, frames: list[FootFrame]) -> tuple[int, int]:
     accepted = 0
     rejected = 0
+    seen: set[tuple[str, int, int]] = set()
     for frame in frames:
+        key = (frame.device_id, frame.sync_id, frame.packet_seq)
+        if key in seen:
+            rejected += 1
+            continue
+        seen.add(key)
         duplicate = session.scalar(
             select(SensorFrame.id).where(
                 SensorFrame.device_id == frame.device_id,

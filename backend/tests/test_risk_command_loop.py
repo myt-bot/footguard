@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 from time import time
@@ -14,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app.main import create_app
-from backend.app.models import Command, CommandAck, InterventionFeedback, RiskEvent
+from backend.app.models import CalibrationProfile, Command, CommandAck, InterventionFeedback, RiskEvent
 from backend.app.schemas import RiskState
 from backend.app.services.command_service import ensure_combined_motor_command
 
@@ -74,6 +75,13 @@ def upload(client: TestClient, frames: list[dict]) -> dict:
 def calibrate(client: TestClient) -> None:
     result = upload(client, scenario_frames("normal_stand"))
     assert result["latest_risk"] == "normal"
+    # This fixture starts with the wearer already standing, so explicitly
+    # provide the legacy normal-offset reference for its temperature scenario.
+    with client.app.state.session_factory() as session:
+        profile = session.get(CalibrationProfile, "active_wearing")
+        assert profile is not None
+        profile.temperature_offset_status_json = json.dumps(["normal_offset"] * 4)
+        session.commit()
 
 
 @pytest.mark.parametrize("scenario", ["normal_stand", "normal_walk"])

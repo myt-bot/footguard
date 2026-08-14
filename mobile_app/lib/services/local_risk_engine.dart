@@ -13,6 +13,14 @@ class LocalRiskResult {
     required this.loadDiff,
     this.motorTarget,
     this.motorPattern,
+    this.temperatureOffsetStatus = const [
+      'unstable',
+      'unstable',
+      'unstable',
+      'unstable'
+    ],
+    this.temperatureRiskEnabled = false,
+    this.temperatureRiskReason = 'baseline_not_ready',
   });
 
   final RiskState risk;
@@ -23,10 +31,13 @@ class LocalRiskResult {
   final double? loadDiff;
   final String? motorTarget;
   final String? motorPattern;
+  final List<String> temperatureOffsetStatus;
+  final bool temperatureRiskEnabled;
+  final String temperatureRiskReason;
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v1';
+  static const ruleVersion = 'local-rules-v2';
   static const requiredSamples = 40;
   static const _contactFloor = 0.01;
   static const _minimumFootLoad = 0.08;
@@ -42,6 +53,15 @@ class LocalRiskEngine {
   double? _baselineLeftForefoot;
   double? _baselineRightForefoot;
   List<double?> _baselineTemperature = List.filled(4, null);
+  final List<List<double?>> _emptyTemperatureDeltas = [];
+  int? _emptyStartedAtMs;
+  bool _wearingSeen = false;
+  bool _emptyTemperatureReferenceReady = false;
+  List<double> _emptyTemperature = List.filled(4, 0.0);
+  List<double> _emptyTemperatureMad = List.filled(4, 0.0);
+  List<double> _emptyTemperatureSlope = List.filled(4, 0.0);
+  List<String> _temperatureOffsetStatus = List.filled(4, 'unstable');
+  List<double> _wearingTemperatureMad = List.filled(4, 0.0);
   String? _leftDeviceId;
   String? _rightDeviceId;
   int? _createdAtMs;
@@ -64,6 +84,15 @@ class LocalRiskEngine {
     _baselineLeftForefoot = null;
     _baselineRightForefoot = null;
     _baselineTemperature = List.filled(4, null);
+    _emptyTemperatureDeltas.clear();
+    _emptyStartedAtMs = null;
+    _wearingSeen = false;
+    _emptyTemperatureReferenceReady = false;
+    _emptyTemperature = List.filled(4, 0.0);
+    _emptyTemperatureMad = List.filled(4, 0.0);
+    _emptyTemperatureSlope = List.filled(4, 0.0);
+    _temperatureOffsetStatus = List.filled(4, 'unstable');
+    _wearingTemperatureMad = List.filled(4, 0.0);
     _leftDeviceId = null;
     _rightDeviceId = null;
     _createdAtMs = null;
@@ -77,6 +106,11 @@ class LocalRiskEngine {
         'left_forefoot': _baselineLeftForefoot,
         'right_forefoot': _baselineRightForefoot,
         'temperature_delta': _baselineTemperature,
+        'empty_temperature_delta': _emptyTemperature,
+        'empty_temperature_mad': _emptyTemperatureMad,
+        'empty_temperature_slope': _emptyTemperatureSlope,
+        'temperature_offset_status': _temperatureOffsetStatus,
+        'wearing_temperature_mad': _wearingTemperatureMad,
         'left_device_id': _leftDeviceId,
         'right_device_id': _rightDeviceId,
         'created_at_ms': _createdAtMs,
@@ -100,6 +134,53 @@ class LocalRiskEngine {
           .map((item) => (item as num?)?.toDouble())
           .toList(growable: false);
     }
+    for (final item in [
+      (
+        'empty_temperature_delta',
+        (List<double> target, num value, int index) =>
+            target[index] = value.toDouble()
+      ),
+      (
+        'empty_temperature_mad',
+        (List<double> target, num value, int index) =>
+            target[index] = value.toDouble()
+      ),
+      (
+        'empty_temperature_slope',
+        (List<double> target, num value, int index) =>
+            target[index] = value.toDouble()
+      ),
+      (
+        'wearing_temperature_mad',
+        (List<double> target, num value, int index) =>
+            target[index] = value.toDouble()
+      ),
+    ]) {
+      final raw = value[item.$1];
+      if (raw is List && raw.length == 4) {
+        final target = List<double>.filled(4, 0.0);
+        for (var index = 0; index < 4; index += 1) {
+          if (raw[index] is num) item.$2(target, raw[index] as num, index);
+        }
+        switch (item.$1) {
+          case 'empty_temperature_delta':
+            _emptyTemperature = target;
+          case 'empty_temperature_mad':
+            _emptyTemperatureMad = target;
+          case 'empty_temperature_slope':
+            _emptyTemperatureSlope = target;
+          case 'wearing_temperature_mad':
+            _wearingTemperatureMad = target;
+        }
+      }
+    }
+    final statuses = value['temperature_offset_status'];
+    if (statuses is List && statuses.length == 4) {
+      _temperatureOffsetStatus =
+          statuses.map((item) => item.toString()).toList(growable: false);
+      _emptyTemperatureReferenceReady = _temperatureOffsetStatus
+          .any((item) => item != 'unstable' && item != 'raw_invalid');
+    }
   }
 
   LocalRiskResult evaluate(List<FootFrame> pair) {
@@ -119,6 +200,19 @@ class LocalRiskEngine {
     final loadRatio = math.log((leftTotal + 1e-6) / (rightTotal + 1e-6));
     final leftForefoot = _forefootRatio(left);
     final rightForefoot = _forefootRatio(right);
+
+    if (!_emptyTemperatureReferenceReady && !_wearingSeen && !contact) {
+      _emptyStartedAtMs ??= timestamp;
+      if (timestamp - _emptyStartedAtMs! >= 15000) {
+        _emptyTemperatureDeltas.add(_temperatureDelta(left, right));
+        if (_emptyTemperatureDeltas.length >= 60) {
+          _finishEmptyTemperatureReference();
+        }
+      }
+    }
+    if (contact) {
+      _wearingSeen = true;
+    }
 
     if (!baselineReady &&
         left.pressureChannelsValid &&
@@ -147,6 +241,13 @@ class LocalRiskEngine {
                 .toList();
             return values.isEmpty ? null : _median(values);
           }, growable: false);
+          _wearingTemperatureMad = List.generate(4, (index) {
+            final values = _temperatureDeltas
+                .map((row) => row[index])
+                .whereType<double>()
+                .toList();
+            return values.isEmpty ? 0.0 : _mad(values);
+          }, growable: false);
         } else if (_loadRatios.length >= 60) {
           _loadRatios.removeAt(0);
           _leftForefootRatios.removeAt(0);
@@ -156,7 +257,7 @@ class LocalRiskEngine {
       }
     }
 
-    if (!baselineReady || !pressureAvailable || !contact) {
+    if (!baselineReady) {
       _signalStartedAt.clear();
       _latchedSignals.clear();
       _lastMotorSignature = null;
@@ -172,43 +273,69 @@ class LocalRiskEngine {
         baselineSamples: baselineSamples,
         loadBias: baselineReady ? loadRatio - _baselineLoadRatio! : null,
         loadDiff: (leftTotal - rightTotal).abs(),
+        temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
+        temperatureRiskEnabled: false,
+        temperatureRiskReason: 'baseline_not_ready',
       );
     }
 
     final candidates =
         <String, ({String type, String side, bool enter, bool stay})>{};
-    final adjustedBias = loadRatio - _baselineLoadRatio!;
-    candidates['bias'] = (
-      type: adjustedBias >= 0 ? 'left_load_bias' : 'right_load_bias',
-      side: adjustedBias >= 0 ? 'left' : 'right',
-      enter: adjustedBias.abs() >= 0.405,
-      stay: adjustedBias.abs() >= 0.323,
-    );
-    final leftDelta = leftForefoot - _baselineLeftForefoot!;
-    final rightDelta = rightForefoot - _baselineRightForefoot!;
-    candidates['forefoot_left'] = (
-      type: 'forefoot_high',
-      side: 'left',
-      enter: leftDelta >= 0.08 && _forefootSupported(left),
-      stay: leftDelta >= 0.05 && _forefootSupported(left),
-    );
-    candidates['forefoot_right'] = (
-      type: 'forefoot_high',
-      side: 'right',
-      enter: rightDelta >= 0.08 && _forefootSupported(right),
-      stay: rightDelta >= 0.05 && _forefootSupported(right),
-    );
     final temperature = _temperatureDelta(left, right);
+    final validTemperatureZones = [
+      for (var index = 0; index < 4; index += 1)
+        if (temperature[index] != null &&
+            _baselineTemperature[index] != null &&
+            _temperatureOffsetStatus[index] != 'unstable' &&
+            _temperatureOffsetStatus[index] != 'raw_invalid')
+          index,
+    ];
     for (var index = 0; index < 4; index += 1) {
       final current = temperature[index];
       final baseline = _baselineTemperature[index];
-      if (current == null || baseline == null) continue;
+      final status = _temperatureOffsetStatus[index];
+      if (current == null ||
+          baseline == null ||
+          status == 'unstable' ||
+          status == 'raw_invalid') {
+        continue;
+      }
       final corrected = current - baseline;
+      final enterThreshold = math.max(2.5, 3 * _wearingTemperatureMad[index]);
+      final stayThreshold = math.max(2.0, 2 * _wearingTemperatureMad[index]);
+      final absoluteEnter = status == 'normal_offset' && current.abs() >= 2.5;
+      final absoluteStay = status == 'normal_offset' && current.abs() >= 2.0;
+      final relativeEvidence = corrected.abs() >= stayThreshold;
       candidates['temperature_$index'] = (
         type: 'temperature_asymmetry',
-        side: current >= 0 ? 'left' : 'right',
-        enter: corrected.abs() >= 2.5 && current.abs() >= 1.0,
-        stay: corrected.abs() >= 2.0 && current.abs() >= 1.0,
+        side: (relativeEvidence ? corrected : current) >= 0 ? 'left' : 'right',
+        enter: validTemperatureZones.length >= 2 &&
+            (corrected.abs() >= enterThreshold || absoluteEnter),
+        stay: validTemperatureZones.length >= 2 &&
+            (corrected.abs() >= stayThreshold || absoluteStay),
+      );
+    }
+    final adjustedBias = loadRatio - _baselineLoadRatio!;
+    if (pressureAvailable && contact) {
+      candidates['bias'] = (
+        type: adjustedBias >= 0 ? 'left_load_bias' : 'right_load_bias',
+        side: adjustedBias >= 0 ? 'left' : 'right',
+        enter: adjustedBias.abs() >= 0.405,
+        stay: adjustedBias.abs() >= 0.323,
+      );
+      final leftDelta = leftForefoot - _baselineLeftForefoot!;
+      final rightDelta = rightForefoot - _baselineRightForefoot!;
+      candidates['forefoot_left'] = (
+        type: 'forefoot_high',
+        side: 'left',
+        enter: leftDelta >= 0.08 && _forefootSupported(left),
+        stay: leftDelta >= 0.05 && _forefootSupported(left),
+      );
+      candidates['forefoot_right'] = (
+        type: 'forefoot_high',
+        side: 'right',
+        enter: rightDelta >= 0.08 && _forefootSupported(right),
+        stay: rightDelta >= 0.05 && _forefootSupported(right),
       );
     }
 
@@ -277,7 +404,52 @@ class LocalRiskEngine {
       loadDiff: (leftTotal - rightTotal).abs(),
       motorTarget: target,
       motorPattern: pattern,
+      temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
+      temperatureRiskEnabled: validTemperatureZones.length >= 2,
+      temperatureRiskReason: validTemperatureZones.length >= 2
+          ? 'ready'
+          : 'fewer_than_two_trusted_channels',
     );
+  }
+
+  void _finishEmptyTemperatureReference() {
+    _emptyTemperature = List.generate(4, (index) {
+      final values = _emptyTemperatureDeltas
+          .map((row) => row[index])
+          .whereType<double>()
+          .toList();
+      return values.isEmpty ? 0.0 : _median(values);
+    }, growable: false);
+    _emptyTemperatureMad = List.generate(4, (index) {
+      final values = _emptyTemperatureDeltas
+          .map((row) => row[index])
+          .whereType<double>()
+          .toList();
+      return values.isEmpty ? 0.0 : _mad(values);
+    }, growable: false);
+    _emptyTemperatureSlope = List.generate(4, (index) {
+      final values = _emptyTemperatureDeltas
+          .map((row) => row[index])
+          .whereType<double>()
+          .toList();
+      return values.length < requiredSamples
+          ? 0.0
+          : (values.last - values.first) / 12.0;
+    }, growable: false);
+    _temperatureOffsetStatus = List.generate(4, (index) {
+      final values = _emptyTemperatureDeltas
+          .map((row) => row[index])
+          .whereType<double>()
+          .toList();
+      if (values.length < requiredSamples) return 'raw_invalid';
+      final stable = _emptyTemperatureMad[index] <= 0.6 &&
+          _emptyTemperatureSlope[index].abs() <= 0.05;
+      if (!stable) return 'unstable';
+      return _emptyTemperature[index].abs() >= 2.2
+          ? 'assembly_offset'
+          : 'normal_offset';
+    }, growable: false);
+    _emptyTemperatureReferenceReady = true;
   }
 
   static int _validCount(FootFrame frame, int count, bool temperature) =>

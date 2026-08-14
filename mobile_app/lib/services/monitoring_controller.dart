@@ -38,6 +38,8 @@ class MonitoringController extends ChangeNotifier {
   Timer? _recoveryTimer;
   bool _uploading = false;
   bool _requiresOfflineReplay = false;
+  int _syncFailureCount = 0;
+  DateTime? _nextSyncAttemptAt;
   bool _localBaselinePersisted = false;
   bool _refreshing = false;
   bool _disposed = false;
@@ -66,7 +68,9 @@ class MonitoringController extends ChangeNotifier {
   bool backendOnline = false;
   String? _sourceError;
   String? _backendError;
+  String? _syncWarning;
   String? get errorMessage => _sourceError ?? _backendError;
+  String? get syncWarningMessage => _syncWarning;
   String motorStatus = '暂无马达提醒';
   DateTime? lastUpdated;
   double? loadBias;
@@ -234,7 +238,7 @@ class MonitoringController extends ChangeNotifier {
           _offlineStore.saveBaseline(_localRiskEngine.exportBaseline()),
         );
       }
-      if (!backendOnline) {
+      if (_usingLocalMonitoringFallback) {
         _applyLocalResult(_localResult!);
       }
       _enqueuePair(pair);
@@ -295,8 +299,45 @@ class MonitoringController extends ChangeNotifier {
     }
   }
 
+  bool get _syncRetryReady =>
+      _nextSyncAttemptAt == null ||
+      !DateTime.now().isBefore(_nextSyncAttemptAt!);
+
+  bool get _usingLocalMonitoringFallback =>
+      source.shouldUploadToBackend &&
+      _localResult != null &&
+      _bothFeetConnected &&
+      (!backendOnline || _syncWarning != null);
+
+  void _recordSyncFailure(Object error) {
+    _syncFailureCount += 1;
+    const retryDelays = [2, 5, 10, 20, 30];
+    final delayIndex = _syncFailureCount > retryDelays.length
+        ? retryDelays.length - 1
+        : _syncFailureCount - 1;
+    final retrySeconds = retryDelays[delayIndex];
+    _nextSyncAttemptAt = DateTime.now().add(Duration(seconds: retrySeconds));
+    _syncWarning = '后端在线，但离线数据补传失败；将在 $retrySeconds 秒后重试'
+        '（待补传 ${_pendingUploadPairs.length} 对，'
+        '${_pendingOfflineInterventions.length} 条干预记录）：$error';
+  }
+
+  void _clearSyncFailureIfIdle() {
+    if (_pendingUploadPairs.isNotEmpty ||
+        _pendingOfflineInterventions.any((item) {
+          final expectedAcks = item.command.target == 'both' ? 2 : 1;
+          return item.acknowledgements.length >= expectedAcks &&
+              item.effectLabel != null;
+        })) {
+      return;
+    }
+    _syncFailureCount = 0;
+    _nextSyncAttemptAt = null;
+    _syncWarning = null;
+  }
+
   Future<void> _drainUploadQueue() async {
-    if (_uploading) {
+    if (_uploading || !_syncRetryReady) {
       return;
     }
     _uploading = true;
@@ -315,17 +356,17 @@ class MonitoringController extends ChangeNotifier {
           );
           _pendingUploadPairs.removeRange(0, take);
           await _offlineStore.savePairs(_pendingUploadPairs);
-          backendOnline = true;
-          _backendError = null;
+          _syncFailureCount = 0;
+          _nextSyncAttemptAt = null;
         } catch (error) {
-          backendOnline = false;
           _requiresOfflineReplay = true;
-          _backendError = '数据上传失败：$error';
+          _recordSyncFailure(error);
           break;
         }
       }
       if (_pendingUploadPairs.isEmpty) {
         _requiresOfflineReplay = false;
+        _clearSyncFailureIfIdle();
       }
     } finally {
       _uploading = false;
@@ -350,45 +391,64 @@ class MonitoringController extends ChangeNotifier {
         right = snapshot.right ?? right;
       }
       if (backendIsFrameSource || _bothFeetConnected) {
-        loadBias = snapshot.loadBias;
-        loadDiff = snapshot.loadDiff;
-        syncErrorMs = snapshot.syncErrorMs;
-        motionState = snapshot.motionState;
-        leftMotionState = snapshot.leftMotionState;
-        rightMotionState = snapshot.rightMotionState;
-        risk = snapshot.risk;
-        activeRisks = snapshot.activeRisks;
-        regionalAnalysis = snapshot.regionalAnalysis;
-        recoveryObservation = snapshot.recoveryObservation;
-        _updateRiskNotice();
-        try {
-          calibrationStatus = await api.calibrationStatus();
-        } catch (_) {
-          final analysis = regionalAnalysis;
-          if (analysis != null) {
-            calibrationStatus = CalibrationStatus(
-              baselineReady: analysis.baselineReady,
-              sampleCount: analysis.baselineSampleCount,
-              requiredSamples: analysis.baselineRequiredSamples,
-              statusReason:
-                  analysis.baselineReady ? 'ready' : 'waiting_for_data',
-            );
-          }
+        if (_usingLocalMonitoringFallback) {
+          motorCommand = null;
+          regionalAnalysis = null;
+          _applyLocalResult(_localResult!);
+        } else {
+          loadBias = snapshot.loadBias;
+          loadDiff = snapshot.loadDiff;
+          syncErrorMs = snapshot.syncErrorMs;
+          motionState = snapshot.motionState;
+          leftMotionState = snapshot.leftMotionState;
+          rightMotionState = snapshot.rightMotionState;
+          risk = snapshot.risk;
+          activeRisks = snapshot.activeRisks;
+          regionalAnalysis = snapshot.regionalAnalysis;
+          recoveryObservation = snapshot.recoveryObservation;
+          _updateRiskNotice();
         }
-        final backendResetAt = calibrationStatus?.resetAtMs;
-        if (backendResetAt != null &&
-            (_localRiskEngine.baselineCreatedAtMs ?? 0) < backendResetAt) {
-          _localRiskEngine.reset();
-          _localResult = null;
-          _localBaselinePersisted = false;
-          await _offlineStore.clearBaseline();
+        if (!_usingLocalMonitoringFallback) {
+          try {
+            calibrationStatus = await api.calibrationStatus();
+          } catch (_) {
+            final analysis = regionalAnalysis;
+            if (analysis != null) {
+              calibrationStatus = CalibrationStatus(
+                baselineReady: analysis.baselineReady,
+                sampleCount: analysis.baselineSampleCount,
+                requiredSamples: analysis.baselineRequiredSamples,
+                statusReason:
+                    analysis.baselineReady ? 'ready' : 'waiting_for_data',
+                emptyTemperatureReferenceReady: analysis.temperatureOffsetStatus
+                    .any((item) => item != 'unstable' && item != 'raw_invalid'),
+                temperatureRiskEnabled: analysis.temperatureRiskEnabled,
+                temperatureOffsetChannels: analysis.temperatureOffsetChannels,
+                temperatureUntrustedChannels:
+                    analysis.temperatureUntrustedChannels,
+                temperatureRiskReason: analysis.temperatureRiskReason,
+              );
+            }
+          }
+          final backendResetAt = calibrationStatus?.resetAtMs;
+          if (backendResetAt != null &&
+              (_localRiskEngine.baselineCreatedAtMs ?? 0) < backendResetAt) {
+            _localRiskEngine.reset();
+            _localResult = null;
+            _localBaselinePersisted = false;
+            await _offlineStore.clearBaseline();
+          }
         }
         _updateAiAdviceIfNeeded();
         _updateSessionAdviceIfNeeded();
       } else {
         _resetBilateralState();
       }
-      if (commandBridge != null || backendIsFrameSource || _bothFeetConnected) {
+      if (_usingLocalMonitoringFallback) {
+        motorStatus = commandBridge?.status ?? '数据补传异常，本地风险闭环运行中';
+      } else if (commandBridge != null ||
+          backendIsFrameSource ||
+          _bothFeetConnected) {
         motorCommand = await api.pendingCommand();
         if (motorCommand != null) {
           if (commandBridge != null) {
@@ -454,18 +514,26 @@ class MonitoringController extends ChangeNotifier {
   }
 
   Future<void> _syncOfflineInterventions() async {
+    if (!_syncRetryReady) return;
     final ready = _pendingOfflineInterventions.where((item) {
       final expectedAcks = item.command.target == 'both' ? 2 : 1;
       return item.acknowledgements.length >= expectedAcks &&
           item.effectLabel != null;
     }).toList();
     if (ready.isEmpty) return;
-    await api.uploadOfflineInterventions(ready);
-    final syncedIds = ready.map((item) => item.command.commandId).toSet();
-    _pendingOfflineInterventions.removeWhere(
-      (item) => syncedIds.contains(item.command.commandId),
-    );
-    await _offlineStore.saveInterventions(_pendingOfflineInterventions);
+    try {
+      await api.uploadOfflineInterventions(ready);
+      final syncedIds = ready.map((item) => item.command.commandId).toSet();
+      _pendingOfflineInterventions.removeWhere(
+        (item) => syncedIds.contains(item.command.commandId),
+      );
+      await _offlineStore.saveInterventions(_pendingOfflineInterventions);
+      _syncFailureCount = 0;
+      _nextSyncAttemptAt = null;
+      _clearSyncFailureIfIdle();
+    } catch (error) {
+      _recordSyncFailure(error);
+    }
   }
 
   void _updateAiAdviceIfNeeded() {
@@ -702,6 +770,24 @@ class MonitoringController extends ChangeNotifier {
       sampleCount: result.baselineSamples,
       requiredSamples: LocalRiskEngine.requiredSamples,
       statusReason: result.baselineReady ? 'ready' : 'waiting_for_data',
+      emptyTemperatureReferenceReady: result.temperatureOffsetStatus
+          .any((item) => item != 'unstable' && item != 'raw_invalid'),
+      temperatureRiskEnabled: result.temperatureRiskEnabled,
+      temperatureOffsetChannels: [
+        for (var index = 0;
+            index < result.temperatureOffsetStatus.length;
+            index += 1)
+          if (result.temperatureOffsetStatus[index] == 'assembly_offset') index,
+      ],
+      temperatureUntrustedChannels: [
+        for (var index = 0;
+            index < result.temperatureOffsetStatus.length;
+            index += 1)
+          if (result.temperatureOffsetStatus[index] == 'unstable' ||
+              result.temperatureOffsetStatus[index] == 'raw_invalid')
+            index,
+      ],
+      temperatureRiskReason: result.temperatureRiskReason,
     );
     _updateRiskNotice();
     if (result.motorTarget != null &&

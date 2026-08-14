@@ -183,6 +183,16 @@ class _RealtimeScreenState extends State<RealtimeScreen>
                       (controller.left?.pressureChannelsValid == true &&
                           controller.right?.pressureChannelsValid == true),
             ),
+            if (controller.activeRisks.any(
+                  (risk) => risk.riskType == 'temperature_asymmetry',
+                ) &&
+                controller.regionalAnalysis?.pressureAvailable == false) ...[
+              const SizedBox(height: 8),
+              const Text(
+                '当前无承重，温度变化仅用于演示或辅助观察，不表示真实穿鞋状态下的医学风险。',
+                style: TextStyle(color: Color(0xFFA86612), fontSize: 12),
+              ),
+            ],
             if (controller.recoveryObservation != null) ...[
               const SizedBox(height: 10),
               _RecoveryObservationCard(
@@ -201,6 +211,14 @@ class _RealtimeScreenState extends State<RealtimeScreen>
               const SizedBox(height: 10),
               Text(controller.errorMessage!,
                   style: const TextStyle(color: Color(0xFFB54A42))),
+            ],
+            if (controller.backendOnline &&
+                controller.syncWarningMessage != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                controller.syncWarningMessage!,
+                style: const TextStyle(color: Color(0xFFA86612)),
+              ),
             ],
             const SizedBox(height: 12),
             LayoutBuilder(builder: (context, constraints) {
@@ -497,6 +515,26 @@ class _WearingCalibrationCard extends StatelessWidget {
         _ => '等待双脚有效压力数据',
       };
 
+  String get _temperatureReason {
+    final current = status;
+    if (current == null || !current.emptyTemperatureReferenceReady) {
+      return '温度参考学习中：双脚先离开鞋垫，保持约 27 秒；此阶段温差只显示、不报警。';
+    }
+    if (!current.baselineReady) {
+      return '空载温度参考已完成，请穿鞋自然站立完成本次穿戴基线。';
+    }
+    if (!current.temperatureRiskEnabled) {
+      return '温度风险暂停：当前可信温区少于 2 个，压力监测不受影响。';
+    }
+    if (current.temperatureOffsetChannels.isNotEmpty) {
+      final labels = current.temperatureOffsetChannels
+          .map((index) => 'T${index + 1}')
+          .join('、');
+      return '温度偏置补偿已启用：$labels 使用相对本次穿戴基线的变化判断。';
+    }
+    return '温度基线已就绪：按相对变化判断，并保留普通温区绝对温差兜底。';
+  }
+
   @override
   Widget build(BuildContext context) {
     final ready = status?.baselineReady ?? false;
@@ -532,7 +570,7 @@ class _WearingCalibrationCard extends StatelessWidget {
                   ],
                 ),
                 FilledButton.icon(
-                  onPressed: !backendOnline || resetting ? null : onRestart,
+                  onPressed: resetting ? null : onRestart,
                   icon: resetting
                       ? const SizedBox.square(
                           dimension: 16,
@@ -554,6 +592,11 @@ class _WearingCalibrationCard extends StatelessWidget {
             Text(
               _reason,
               style: const TextStyle(color: Color(0xFF63757B), fontSize: 12),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              _temperatureReason,
+              style: const TextStyle(color: Color(0xFF39758C), fontSize: 12),
             ),
           ],
         ),

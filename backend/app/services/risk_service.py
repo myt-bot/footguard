@@ -19,12 +19,10 @@ from ..config import (
     BASELINE_DISTRIBUTION_INLIER_TOLERANCE,
     BASELINE_LOAD_BIAS_INLIER_TOLERANCE,
     BASELINE_MAD_SCALE,
-    BASELINE_MAX_TEMPERATURE_DELTA_C,
     BASELINE_MIN_ACTIVE_CHANNELS,
     BASELINE_MIN_FOOT_PRESSURE,
     BASELINE_MIN_SAMPLES,
     BASELINE_STABLE_GAP_MS,
-    BASELINE_TEMPERATURE_INLIER_TOLERANCE_C,
     CALIBRATION_INVALID_MASK,
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
@@ -71,7 +69,6 @@ from ..config import (
     TEMPERATURE_DROPOUT_GRACE_MS,
     TEMPERATURE_PERSISTENT_AFTER_MS,
     TEMPERATURE_RAW_DELTA_C_THRESHOLD,
-    TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD,
     TEMPERATURE_WARNING_AFTER_MS,
     WARNING_AFTER_MS,
 )
@@ -139,6 +136,11 @@ class BaselineProfile:
     pressure_channel_trust: tuple[bool, ...]
     temperature_valid: tuple[bool, ...]
     pressure_channel_contact_trust: tuple[bool, ...] = (True,) * 12
+    empty_temperature_delta_c: tuple[float, ...] = (0.0,) * 4
+    empty_temperature_mad_c: tuple[float, ...] = (0.0,) * 4
+    empty_temperature_slope_c_per_s: tuple[float, ...] = (0.0,) * 4
+    temperature_offset_status: tuple[str, ...] = ("unstable",) * 4
+    wearing_temperature_mad_c: tuple[float, ...] = (0.0,) * 4
 
 
 def _valid_pair(left: SensorFrame, right: SensorFrame) -> bool:
@@ -287,10 +289,19 @@ def _pair_history(
     right_device: SensorFrame | None = None,
 ) -> list[PairMetric]:
     pairs: dict[tuple[int, int], dict[str, SensorFrame]] = {}
+    state = calibration_state(session)
     for frame in recent_frames(
         session,
         after_id=calibration_frame_cutoff(session),
     ):
+        # An offline replay inserted after reset can have a new database id
+        # while still belonging to the previous wearing session.
+        if (
+            state is not None
+            and state.reset_at_ms is not None
+            and frame.timestamp_ms < state.reset_at_ms
+        ):
+            continue
         expected = left_device if frame.side == "left" else right_device
         if expected is not None and (
             frame.device_id != expected.device_id
@@ -531,6 +542,69 @@ def _empty_baseline(sample_count: int = 0) -> BaselineProfile:
     )
 
 
+def _empty_temperature_reference(
+    metrics: list[PairMetric],
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[str, ...]]:
+    """Extract the initial no-load temperature run after a re-wear reset."""
+    run: list[PairMetric] = []
+    for metric in metrics:
+        left_contact_points = sum(
+            valid and value >= PRESSURE_CONTACT_ACTIVE_FLOOR
+            for valid, value in zip(
+                metric.left_pressure_valid, metric.left_pressure, strict=True
+            )
+        )
+        right_contact_points = sum(
+            valid and value >= PRESSURE_CONTACT_ACTIVE_FLOOR
+            for valid, value in zip(
+                metric.right_pressure_valid, metric.right_pressure, strict=True
+            )
+        )
+        no_load = (
+            left_contact_points < PRESSURE_CONTACT_MIN_ACTIVE_CHANNELS
+            and right_contact_points < PRESSURE_CONTACT_MIN_ACTIVE_CHANNELS
+        )
+        if not no_load:
+            if run:
+                break
+            continue
+        if run and metric.timestamp_ms - run[-1].timestamp_ms > CONTINUITY_GAP_MS:
+            break
+        run.append(metric)
+    if not run:
+        return (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, ("unstable",) * 4
+    # The warm-up period is deliberately discarded so glue/contact drift is
+    # not mistaken for an assembly offset.
+    warmup_end = run[0].timestamp_ms + 15_000
+    stable = [metric for metric in run if metric.timestamp_ms >= warmup_end]
+    if len(stable) < 60:
+        return (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, ("unstable",) * 4
+    stable = stable[:60]
+    deltas: list[list[float]] = [
+        [metric.temperature_delta_c[index] for metric in stable if metric.temperature_delta_c[index] is not None]
+        for index in range(4)
+    ]
+    centers = tuple(median(values) if values else 0.0 for values in deltas)
+    mads = tuple(_mad(values, centers[index]) for index, values in enumerate(deltas))
+    elapsed = max((stable[-1].timestamp_ms - stable[0].timestamp_ms) / 1000.0, 1.0)
+    slopes = tuple(
+        ((next((m.temperature_delta_c[index] for m in reversed(stable) if m.temperature_delta_c[index] is not None), centers[index]) -
+          next((m.temperature_delta_c[index] for m in stable if m.temperature_delta_c[index] is not None), centers[index])) / elapsed)
+        for index in range(4)
+    )
+    statuses = tuple(
+        "raw_invalid"
+        if len(deltas[index]) < BASELINE_MIN_SAMPLES
+        else "assembly_offset"
+        if abs(centers[index]) >= 2.2 and mads[index] <= 0.6 and abs(slopes[index]) <= 0.05
+        else "normal_offset"
+        if mads[index] <= 0.6 and abs(slopes[index]) <= 0.05
+        else "unstable"
+        for index in range(4)
+    )
+    return centers, mads, slopes, statuses
+
+
 def _active_channel_count(values: tuple[float, ...]) -> int:
     return sum(value >= BASELINE_ACTIVE_PRESSURE_FLOOR for value in values)
 
@@ -612,8 +686,6 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
             metric.temperature_delta_c[index]
             for metric in inliers
             if metric.temperature_delta_c[index] is not None
-            and abs(metric.temperature_delta_c[index])
-            <= BASELINE_MAX_TEMPERATURE_DELTA_C
         ]
         for index in range(4)
     ]
@@ -641,6 +713,11 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         or sum(channel_trust[6:]) < PRESSURE_MIN_VALID_CHANNELS_PER_FOOT
     ):
         return _empty_baseline(len(inliers))
+    empty_delta, empty_mad, empty_slope, offset_status = _empty_temperature_reference(metrics)
+    wearing_mad = tuple(
+        _mad(values, median(values)) if values else 0.0
+        for values in temperature_values
+    )
     return BaselineProfile(
         ready=True,
         sample_count=len(inliers),
@@ -662,6 +739,11 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         pressure_channel_trust=channel_trust,
         temperature_valid=temperature_valid,
         pressure_channel_contact_trust=channel_trust,
+        empty_temperature_delta_c=empty_delta,
+        empty_temperature_mad_c=empty_mad,
+        empty_temperature_slope_c_per_s=empty_slope,
+        temperature_offset_status=offset_status,
+        wearing_temperature_mad_c=wearing_mad,
     )
 
 
@@ -688,6 +770,11 @@ def _profile_to_model(
         pressure_channel_trust_json=json.dumps(profile.pressure_channel_trust),
         temperature_delta_json=json.dumps(profile.temperature_delta_c),
         temperature_valid_json=json.dumps(profile.temperature_valid),
+        empty_temperature_delta_json=json.dumps(profile.empty_temperature_delta_c),
+        empty_temperature_mad_json=json.dumps(profile.empty_temperature_mad_c),
+        empty_temperature_slope_json=json.dumps(profile.empty_temperature_slope_c_per_s),
+        temperature_offset_status_json=json.dumps(profile.temperature_offset_status),
+        wearing_temperature_mad_json=json.dumps(profile.wearing_temperature_mad_c),
     )
 
 
@@ -697,6 +784,14 @@ def _profile_from_model(model: CalibrationProfile) -> BaselineProfile:
     )
     if len(pressure_channel_trust) == 6:
         pressure_channel_trust = pressure_channel_trust * 2
+    def _json_tuple(name: str, default: tuple) -> tuple:
+        raw = getattr(model, name, None)
+        try:
+            values = tuple(json.loads(raw)) if raw else default
+        except (TypeError, ValueError, json.JSONDecodeError):
+            values = default
+        return values if len(values) == len(default) else default
+
     return BaselineProfile(
         ready=True,
         sample_count=model.sample_count,
@@ -712,6 +807,11 @@ def _profile_from_model(model: CalibrationProfile) -> BaselineProfile:
         pressure_channel_trust=pressure_channel_trust,
         temperature_valid=tuple(json.loads(model.temperature_valid_json)),
         pressure_channel_contact_trust=pressure_channel_trust,
+        empty_temperature_delta_c=_json_tuple("empty_temperature_delta_json", (0.0,) * 4),
+        empty_temperature_mad_c=_json_tuple("empty_temperature_mad_json", (0.0,) * 4),
+        empty_temperature_slope_c_per_s=_json_tuple("empty_temperature_slope_json", (0.0,) * 4),
+        temperature_offset_status=_json_tuple("temperature_offset_status_json", ("unstable",) * 4),
+        wearing_temperature_mad_c=_json_tuple("wearing_temperature_mad_json", (0.0,) * 4),
     )
 
 
@@ -1106,76 +1206,42 @@ def _temperature_delta_from_baseline(
     )
 
 
-def _raw_temperature_signal_side(
-    metric: PairMetric,
-    *,
-    use_exit_threshold: bool = False,
-) -> str | None:
-    if _temperature_pair_count(metric) < 2:
-        return None
-    raw_threshold = (
-        TEMPERATURE_RAW_DELTA_C_EXIT_THRESHOLD
-        if use_exit_threshold
-        else TEMPERATURE_RAW_DELTA_C_THRESHOLD
-    )
-    raw_candidates = [
-        (abs(delta) / raw_threshold, delta)
-        for delta in metric.temperature_delta_c
-        if delta is not None and abs(delta) >= raw_threshold
-    ]
-    if not raw_candidates:
-        return None
-    _, strongest_delta = max(
-        raw_candidates,
-        key=lambda candidate: candidate[0],
-    )
-    return "left" if strongest_delta > 0 else "right"
-
-
 def _temperature_signal_side(
     metric: PairMetric,
     baseline: BaselineProfile,
     *,
     use_exit_threshold: bool = False,
 ) -> str | None:
-    """Return the side supported by stable, App-visible temperature evidence."""
-    if _temperature_pair_count(metric) < 2:
+    """Return the side supported by compensated, stable temperature evidence."""
+    if not baseline.ready or _temperature_pair_count(metric) < 2:
         return None
-    # If an App-visible raw same-region delta crosses the threshold, it is the
-    # authoritative evidence. Do not let a baseline-corrected channel on the
-    # opposite side make the selected side alternate from frame to frame.
-    raw_side = _raw_temperature_signal_side(
-        metric,
-        use_exit_threshold=use_exit_threshold,
-    )
-    if raw_side is not None:
-        return raw_side
-
-    if not baseline.ready:
+    threshold = TEMPERATURE_DELTA_C_EXIT_THRESHOLD if use_exit_threshold else TEMPERATURE_DELTA_C_THRESHOLD
+    valid_zones = 0
+    candidates: list[tuple[float, float]] = []
+    for index, (raw, corrected, status, mad) in enumerate(zip(
+        metric.temperature_delta_c,
+        _temperature_delta_from_baseline(metric, baseline),
+        baseline.temperature_offset_status,
+        baseline.wearing_temperature_mad_c,
+        strict=True,
+    )):
+        if raw is None or corrected is None or status in {"raw_invalid", "unstable"}:
+            continue
+        valid_zones += 1
+        zone_threshold = max(threshold, (3.0 if not use_exit_threshold else 2.0) * mad)
+        if abs(corrected) >= zone_threshold and abs(raw) >= TEMPERATURE_CORRECTED_RAW_SUPPORT_C:
+            candidates.append((abs(corrected) / zone_threshold, corrected))
+        # Normal-offset zones retain an absolute safety fallback. Assembly
+        # offsets are intentionally relative-only to avoid persistent alarms.
+        if status == "normal_offset":
+            # A raw value below the enter threshold must not keep an event
+            # alive after the actual heated region has recovered.
+            raw_threshold = TEMPERATURE_RAW_DELTA_C_THRESHOLD
+            if abs(raw) >= raw_threshold:
+                candidates.append((abs(raw) / raw_threshold, raw))
+    if valid_zones < 2 or not candidates:
         return None
-    corrected_threshold = (
-        TEMPERATURE_DELTA_C_EXIT_THRESHOLD
-        if use_exit_threshold
-        else TEMPERATURE_DELTA_C_THRESHOLD
-    )
-    corrected_candidates = [
-        (abs(corrected) / corrected_threshold, corrected)
-        for raw, corrected in zip(
-            metric.temperature_delta_c,
-            _temperature_delta_from_baseline(metric, baseline),
-            strict=True,
-        )
-        if raw is not None
-        and corrected is not None
-        and abs(raw) >= TEMPERATURE_CORRECTED_RAW_SUPPORT_C
-        and abs(corrected) >= corrected_threshold
-    ]
-    if not corrected_candidates:
-        return None
-    _, strongest_delta = max(
-        corrected_candidates,
-        key=lambda candidate: candidate[0],
-    )
+    _, strongest_delta = max(candidates, key=lambda candidate: candidate[0])
     return "left" if strongest_delta > 0 else "right"
 
 
@@ -1183,9 +1249,7 @@ def _signal(
     metric: PairMetric,
     baseline: BaselineProfile,
 ) -> tuple[str, str] | None:
-    # Temperature remains meaningful while footwear is unloaded. Raw evidence
-    # keeps the alarm consistent with the App's displayed same-region delta;
-    # corrected evidence preserves sensitivity after personal calibration.
+    # Temperature is display-only until a complete wearing baseline exists.
     temperature_side = _temperature_signal_side(metric, baseline)
     if temperature_side is not None:
         return "temperature_asymmetry", temperature_side
@@ -1337,7 +1401,11 @@ def _current_risks(
     risks = [
         state
         for signal in sorted(candidates, key=lambda item: (priority[item[0]], item[1]))
-        if (state := _risk_state_for_signal(recent_metrics, baseline, signal)) is not None
+        # Candidate discovery is bounded for responsiveness, but duration is
+        # evaluated against the full post-reset history. Using only the last
+        # 100 pairs caps a sustained risk at about 19.8 seconds and can make
+        # the displayed duration move backwards as the window slides.
+        if (state := _risk_state_for_signal(metrics, baseline, signal)) is not None
     ]
     return risks, latest
 
@@ -1350,38 +1418,7 @@ def _signal_is_active(
     """Apply lower exit thresholds so one noisy sample cannot reset a risk."""
     risk_type, risk_side = signal
     if risk_type == "temperature_asymmetry":
-        # Use the raw *enter* threshold for App-visible evidence. A user's
-        # normal same-region offset can legitimately sit between the raw enter
-        # and exit thresholds (for example 2.4 C); using the raw exit threshold
-        # here would keep an old episode alive forever after the heated channel
-        # had recovered. Brief sub-threshold NTC/contact dips are handled by the
-        # bounded dropout grace in _current_risk instead.
-        raw_side = _raw_temperature_signal_side(metric)
-        if raw_side == risk_side:
-            return True
-        if not baseline.ready:
-            return False
-
-        corrected_candidates = [
-            (abs(corrected) / TEMPERATURE_DELTA_C_EXIT_THRESHOLD, corrected)
-            for raw, corrected in zip(
-                metric.temperature_delta_c,
-                _temperature_delta_from_baseline(metric, baseline),
-                strict=True,
-            )
-            if raw is not None
-            and corrected is not None
-            and abs(raw) >= TEMPERATURE_CORRECTED_RAW_SUPPORT_C
-            and abs(corrected) >= TEMPERATURE_DELTA_C_EXIT_THRESHOLD
-        ]
-        if not corrected_candidates:
-            return False
-        _, strongest_delta = max(
-            corrected_candidates,
-            key=lambda candidate: candidate[0],
-        )
-        corrected_side = "left" if strongest_delta > 0 else "right"
-        return corrected_side == risk_side
+        return _temperature_signal_side(metric, baseline, use_exit_threshold=True) == risk_side
 
     if (
         not metric.pressure_valid
@@ -1426,12 +1463,6 @@ def _recent_temperature_side(
             break
         recent_metrics.append(metric)
 
-    # App-visible raw evidence is authoritative across the whole grace window.
-    # A one-frame corrected residual must not flip an established raw side.
-    for metric in recent_metrics:
-        side = _raw_temperature_signal_side(metric)
-        if side is not None:
-            return side
     for metric in recent_metrics:
         side = _temperature_signal_side(metric, baseline)
         if side is not None:
@@ -1646,6 +1677,11 @@ def _regional_analysis(
             ],
             left_temperature_scores=[0.0] * 4,
             right_temperature_scores=[0.0] * 4,
+            temperature_offset_status=["unstable"] * 4,
+            temperature_offset_channels=[],
+            temperature_untrusted_channels=list(range(4)),
+            temperature_risk_enabled=False,
+            temperature_risk_reason="baseline_not_ready",
         )
 
     resolved_baseline_trust = baseline_trust or baseline.pressure_channel_trust
@@ -1717,6 +1753,22 @@ def _regional_analysis(
         else None
         for index, value in enumerate(metric.temperature_delta_c)
     ]
+    temperature_status = list(baseline.temperature_offset_status)
+    temperature_valid_count = sum(
+        value is not None
+        and metric.left_temperature_valid[index]
+        and metric.right_temperature_valid[index]
+        and temperature_status[index] not in {"raw_invalid", "unstable"}
+        for index, value in enumerate(metric.temperature_delta_c)
+    )
+    offset_channels = [
+        index for index, status in enumerate(temperature_status)
+        if status == "assembly_offset"
+    ]
+    untrusted_channels = [
+        index for index, status in enumerate(temperature_status)
+        if status in {"raw_invalid", "unstable"}
+    ]
     return RegionalAnalysis(
         baseline_ready=baseline.ready,
         baseline_source="personal" if baseline.ready else "layout_default",
@@ -1773,6 +1825,15 @@ def _regional_analysis(
             else 0.0
             for value in corrected_temperature
         ],
+        temperature_offset_status=temperature_status,
+        temperature_offset_channels=offset_channels,
+        temperature_untrusted_channels=untrusted_channels,
+        temperature_risk_enabled=temperature_valid_count >= 2,
+        temperature_risk_reason=(
+            "ready"
+            if temperature_valid_count >= 2
+            else "fewer_than_two_trusted_channels"
+        ),
     )
 
 
@@ -1852,12 +1913,42 @@ def calibration_status(session: Session) -> CalibrationStatus:
         else _prebaseline_residual_suspect_channels(metrics)
     )
     state = calibration_state(session)
+    _, _, _, empty_status = _empty_temperature_reference(metrics)
+    temperature_status = (
+        resolved.temperature_offset_status
+        if resolved.ready
+        else empty_status if metrics else ("unstable",) * 4
+    )
+    temperature_valid_count = sum(
+        status not in {"raw_invalid", "unstable"}
+        for status in temperature_status
+    )
+    temperature_enabled = resolved.ready and temperature_valid_count >= 2
     return CalibrationStatus(
         baseline_ready=resolved.ready,
         sample_count=min(resolved.sample_count, BASELINE_MIN_SAMPLES),
         required_samples=BASELINE_MIN_SAMPLES,
         reset_at_ms=state.reset_at_ms if state is not None else None,
         status_reason=_calibration_reason(metrics, resolved, residual_suspects),
+        empty_temperature_reference_ready=bool(metrics) and any(
+            status not in {"raw_invalid", "unstable"} for status in empty_status
+        ),
+        temperature_risk_enabled=temperature_enabled,
+        temperature_offset_channels=[
+            index for index, status in enumerate(temperature_status)
+            if status == "assembly_offset"
+        ],
+        temperature_untrusted_channels=[
+            index for index, status in enumerate(temperature_status)
+            if status in {"raw_invalid", "unstable"}
+        ],
+        temperature_risk_reason=(
+            "ready"
+            if temperature_enabled
+            else "temperature_unstable"
+            if resolved.ready
+            else "baseline_not_ready"
+        ),
     )
 
 
@@ -1881,6 +1972,11 @@ def restart_calibration(session: Session) -> CalibrationStatus:
         required_samples=BASELINE_MIN_SAMPLES,
         reset_at_ms=now_ms,
         status_reason="waiting_for_data",
+        empty_temperature_reference_ready=False,
+        temperature_risk_enabled=False,
+        temperature_offset_channels=[],
+        temperature_untrusted_channels=list(range(4)),
+        temperature_risk_reason="baseline_not_ready",
     )
 
 

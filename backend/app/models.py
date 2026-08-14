@@ -136,3 +136,8 @@ class CalibrationProfile(Base):
     pressure_channel_trust_json: Mapped[str] = mapped_column(String(128))
     temperature_delta_json: Mapped[str] = mapped_column(String(256))
     temperature_valid_json: Mapped[str] = mapped_column(String(64))
+    empty_temperature_delta_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")
+    empty_temperature_mad_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")
+    empty_temperature_slope_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")
+    temperature_offset_status_json: Mapped[str] = mapped_column(String(256), default='["unstable","unstable","unstable","unstable"]')
+    wearing_temperature_mad_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")

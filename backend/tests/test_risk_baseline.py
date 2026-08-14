@@ -10,6 +10,7 @@ from backend.app.services.risk_service import (
     _baseline_profile,
     _current_risk,
     _current_risks,
+    _empty_baseline,
     _pressure_metric_from_window,
     _prebaseline_residual_suspect_channels,
     _regional_analysis,
@@ -52,6 +53,13 @@ def _metric(
         right_distribution=right_distribution,
         temperature_delta_c=temperature_delta_c,
         motion_state=motion_state,
+    )
+
+
+def _temperature_ready(baseline: object):
+    return replace(
+        baseline,
+        temperature_offset_status=("normal_offset",) * 4,
     )
 
 
@@ -115,8 +123,8 @@ def test_baseline_rejects_too_few_responsive_channels_on_one_foot() -> None:
 
 
 def test_unloaded_temperature_alert_keeps_pressure_risks_suppressed() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     heated_off_ground = _metric(
         BASELINE_MIN_SAMPLES,
@@ -311,8 +319,8 @@ def test_single_valid_temperature_pair_cannot_trigger_temperature_risk() -> None
 
 
 def test_large_raw_temperature_delta_is_not_hidden_by_baseline() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     shifted_baseline = replace(
         baseline,
@@ -352,8 +360,8 @@ def test_baseline_temperature_shift_needs_visible_raw_support() -> None:
 
 
 def test_unloaded_raw_delta_of_2_97_c_triggers_right_alert() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     heated_off_ground = _metric(
         BASELINE_MIN_SAMPLES + 2,
@@ -603,7 +611,7 @@ def test_risk_continuity_uses_exit_hysteresis() -> None:
 
 def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() -> None:
     baseline_metrics = [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
-    baseline = _baseline_profile(baseline_metrics)
+    baseline = _temperature_ready(_baseline_profile(baseline_metrics))
     history = [
         _metric(
             200 + index,
@@ -625,9 +633,9 @@ def test_temperature_asymmetry_has_priority_over_competing_pressure_signals() ->
     assert risk.duration_ms >= 6_000
 
 
-def test_raw_temperature_side_wins_over_opposite_baseline_correction() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+def test_temperature_baseline_correction_wins_over_raw_offset() -> None:
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     shifted_baseline = replace(
         baseline,
@@ -640,17 +648,79 @@ def test_raw_temperature_side_wins_over_opposite_baseline_correction() -> None:
         temperature_delta_c=(3.2, -2.4, 0.0, 0.0),
     )
 
-    # T1's App-visible +3.2 C is authoritative. The larger corrected T2
-    # residual must not flip the selected side to right.
+    # The relative T2 change is the meaningful signal; a fixed raw T1 offset
+    # must not override it.
     assert _signal(visible_left_heat, shifted_baseline) == (
         "temperature_asymmetry",
-        "left",
+        "right",
     )
 
 
-def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
+def test_four_temperature_empty_offsets_are_classified_independently() -> None:
+    empty_delta = (3.0, -2.8, 0.4, 2.4)
+    metrics = [
+        _metric(index, left_total=0.0, right_total=0.0, temperature_delta_c=empty_delta)
+        for index in range(140)
+    ] + [
+        _metric(140 + index, temperature_delta_c=empty_delta)
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is True
+    assert baseline.temperature_offset_status == (
+        "assembly_offset",
+        "assembly_offset",
+        "normal_offset",
+        "assembly_offset",
+    )
+
+
+def test_temperature_offset_compensation_requires_two_zones_and_wearing_baseline() -> None:
+    empty_delta = (3.0, -2.8, 0.4, 2.4)
+    metrics = [
+        _metric(index, left_total=0.0, right_total=0.0, temperature_delta_c=empty_delta)
+        for index in range(140)
+    ] + [
+        _metric(140 + index, temperature_delta_c=empty_delta)
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+    baseline = _baseline_profile(metrics)
+    unchanged = _metric(200, left_total=0.0, right_total=0.0, temperature_delta_c=empty_delta)
+    heated_one = _metric(201, left_total=0.0, right_total=0.0, temperature_delta_c=(6.0, None, None, None))
+    heated_two = _metric(202, left_total=0.0, right_total=0.0, temperature_delta_c=(6.0, -5.8, None, None))
+
+    assert _signal(unchanged, baseline) is None
+    assert _signal(heated_one, baseline) is None
+    assert _signal(heated_two, baseline) == ("temperature_asymmetry", "left")
+    assert _signal(heated_two, _empty_baseline()) is None
+
+
+def test_sustained_pressure_duration_does_not_roll_back_after_window_slides() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    history = [
+        _metric(
+            100 + index,
+            left_total=0.10,
+            right_total=0.45,
+            temperature_delta_c=(0.0, 0.0, 0.0, 0.0),
+        )
+        for index in range(150)
+    ]
+
+    risks, _ = _current_risks(history, baseline)
+
+    right_bias = next(
+        risk for risk in risks if risk.risk_type == "right_load_bias"
+    )
+    assert right_bias.duration_ms >= 29_000
+
+
+def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     history = [
         replace(
@@ -675,8 +745,8 @@ def test_temperature_continuity_survives_ble_sync_id_rotation() -> None:
 
 
 def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     history = [
         replace(
@@ -704,8 +774,8 @@ def test_temperature_risk_tolerates_brief_internal_adc_dropout() -> None:
 
 
 def test_temperature_risk_clears_after_dropout_grace() -> None:
-    baseline = _baseline_profile(
-        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    baseline = _temperature_ready(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)])
     )
     history = [
         replace(

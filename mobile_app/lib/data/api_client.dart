@@ -192,6 +192,11 @@ class CalibrationStatus {
     required this.requiredSamples,
     this.resetAtMs,
     this.statusReason = 'waiting_for_data',
+    this.emptyTemperatureReferenceReady = false,
+    this.temperatureRiskEnabled = false,
+    this.temperatureOffsetChannels = const [],
+    this.temperatureUntrustedChannels = const [],
+    this.temperatureRiskReason = 'baseline_not_ready',
   });
 
   final bool baselineReady;
@@ -199,6 +204,11 @@ class CalibrationStatus {
   final int requiredSamples;
   final int? resetAtMs;
   final String statusReason;
+  final bool emptyTemperatureReferenceReady;
+  final bool temperatureRiskEnabled;
+  final List<int> temperatureOffsetChannels;
+  final List<int> temperatureUntrustedChannels;
+  final String temperatureRiskReason;
 
   double get progress => requiredSamples <= 0
       ? 0.0
@@ -211,6 +221,23 @@ class CalibrationStatus {
         requiredSamples: json['required_samples'] as int,
         resetAtMs: json['reset_at_ms'] as int?,
         statusReason: json['status_reason'] as String? ?? 'waiting_for_data',
+        emptyTemperatureReferenceReady:
+            json['empty_temperature_reference_ready'] as bool? ?? false,
+        temperatureRiskEnabled:
+            json['temperature_risk_enabled'] as bool? ?? false,
+        temperatureOffsetChannels:
+            (json['temperature_offset_channels'] as List<dynamic>? ?? const [])
+                .whereType<num>()
+                .map((value) => value.toInt())
+                .toList(growable: false),
+        temperatureUntrustedChannels:
+            (json['temperature_untrusted_channels'] as List<dynamic>? ??
+                    const [])
+                .whereType<num>()
+                .map((value) => value.toInt())
+                .toList(growable: false),
+        temperatureRiskReason:
+            json['temperature_risk_reason'] as String? ?? 'baseline_not_ready',
       );
 }
 

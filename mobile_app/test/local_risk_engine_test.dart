@@ -78,4 +78,43 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+      'learns four empty temperature offsets and allows unloaded compensated heat',
+      () {
+    final engine = LocalRiskEngine();
+    const emptyLeft = [33.0, 27.2, 30.4, 32.4];
+    const emptyRight = [30.0, 30.0, 30.0, 30.0];
+    const standing = [0.03, 0.03, 0.03, 0.03, 0.05, 0.05];
+    for (var sequence = 0; sequence < 140; sequence += 1) {
+      engine.evaluate([
+        frame('left', sequence, const [0, 0, 0, 0, 0, 0],
+            temperature: emptyLeft),
+        frame('right', sequence, const [0, 0, 0, 0, 0, 0],
+            temperature: emptyRight),
+      ]);
+    }
+    for (var sequence = 140; sequence < 180; sequence += 1) {
+      engine.evaluate([
+        frame('left', sequence, standing, temperature: emptyLeft),
+        frame('right', sequence, standing, temperature: emptyRight),
+      ]);
+    }
+    expect(engine.baselineReady, isTrue);
+
+    LocalRiskResult? result;
+    for (var sequence = 180; sequence < 200; sequence += 1) {
+      result = engine.evaluate([
+        frame('left', sequence, const [0, 0, 0, 0, 0, 0],
+            temperature: [36, 24.2, 30.4, 32.4]),
+        frame('right', sequence, const [0, 0, 0, 0, 0, 0],
+            temperature: emptyRight),
+      ]);
+    }
+    expect(result!.temperatureRiskEnabled, isTrue);
+    expect(
+        result.activeRisks
+            .any((risk) => risk.riskType == 'temperature_asymmetry'),
+        isTrue);
+  });
 }

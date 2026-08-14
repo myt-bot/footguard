@@ -48,8 +48,8 @@ BASELINE_MIN_SAMPLES = 40
 BASELINE_CALIBRATION_WINDOW_SAMPLES = 60
 BASELINE_STABLE_GAP_MS = 1_500
 BASELINE_MIN_FOOT_PRESSURE = 0.08
-# Do not classify pressure or temperature risk while the footwear is not
-# meaningfully loaded. This remains low enough for near-single-foot loading.
+# Pressure risks require meaningful loading. Temperature becomes independent
+# of loading only after the empty reference and wearing baseline are locked.
 RISK_MIN_TOTAL_PRESSURE = 0.08
 # A single high residual can come from an unloaded or mechanically biased FSR
 # (for example the observed right P3). Treat at least two trusted channels as

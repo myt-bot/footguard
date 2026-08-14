@@ -222,6 +222,11 @@ class RegionalAnalysis(StrictModel):
     temperature_delta_c: list[float | None] = Field(min_length=4, max_length=4)
     left_temperature_scores: list[float] = Field(min_length=4, max_length=4)
     right_temperature_scores: list[float] = Field(min_length=4, max_length=4)
+    temperature_offset_status: list[str] = Field(min_length=4, max_length=4)
+    temperature_offset_channels: list[int] = Field(default_factory=list)
+    temperature_untrusted_channels: list[int] = Field(default_factory=list)
+    temperature_risk_enabled: bool = False
+    temperature_risk_reason: str = "baseline_not_ready"
 
 
 class DeviceCommand(StrictModel):
@@ -304,7 +309,15 @@ class CalibrationStatus(StrictModel):
         "pressure_residual",
         "moving",
         "unstable",
+        "temperature_reference_learning",
+        "temperature_unavailable",
+        "temperature_unstable",
     ] = "waiting_for_data"
+    empty_temperature_reference_ready: bool = False
+    temperature_risk_enabled: bool = False
+    temperature_offset_channels: list[int] = Field(default_factory=list)
+    temperature_untrusted_channels: list[int] = Field(default_factory=list)
+    temperature_risk_reason: str = "baseline_not_ready"
 
 
 class RiskEventOut(StrictModel):

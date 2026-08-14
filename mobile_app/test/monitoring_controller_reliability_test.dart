@@ -246,4 +246,75 @@ void main() {
     ]);
     controller.dispose();
   });
+
+  test('offline upload failure keeps a healthy backend online and backs off',
+      () async {
+    var uploadCount = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/health') {
+        return http.Response(
+          jsonEncode({'status': 'ok', 'server_time_ms': 1000}),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/realtime') {
+        return http.Response(
+          jsonEncode({
+            'left': null,
+            'right': null,
+            'paired_timestamp_ms': null,
+            'load_bias': null,
+            'load_diff': null,
+            'sync_error_ms': null,
+            'risk': {
+              'risk_type': 'data_incomplete',
+              'risk_side': 'none',
+              'risk_level': 0,
+              'duration_ms': 0,
+            },
+            'regional_analysis': null,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/command/pending') {
+        return http.Response(jsonEncode({'command': null}), 200);
+      }
+      if (request.url.path == '/api/v1/sensor/batch' ||
+          request.url.path == '/api/v1/sensor/offline-sync') {
+        uploadCount += 1;
+        return http.Response('Internal Server Error', 500);
+      }
+      return http.Response('not found', 404);
+    });
+    final source = _FakeFootDataSource();
+    final controller = MonitoringController(
+      source: source,
+      api: FootGuardApiClient(baseUrl: 'http://footguard.test', client: client),
+    );
+    await controller.start();
+    source.emitConnections(const FootConnectionSnapshot(
+      left: FootConnectionStatus.connected,
+      right: FootConnectionStatus.connected,
+    ));
+    source.emitFrame(_frame('left', 1000, packetSeq: 20));
+    source.emitFrame(_frame('right', 1001, packetSeq: 20));
+
+    for (var attempt = 0;
+        attempt < 20 && controller.syncWarningMessage == null;
+        attempt += 1) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(controller.backendOnline, isTrue);
+    expect(controller.errorMessage, isNull);
+    expect(controller.syncWarningMessage, contains('离线数据补传失败'));
+    expect(controller.offlinePairCount, 1);
+    expect(uploadCount, 1);
+
+    await controller.refreshBackend();
+    await controller.refreshBackend();
+    expect(controller.backendOnline, isTrue);
+    expect(uploadCount, 1);
+    controller.dispose();
+  });
 }

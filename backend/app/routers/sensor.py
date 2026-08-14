@@ -51,11 +51,12 @@ def ingest_batch(
 def ingest_offline_batch(
     payload: SensorBatchRequest, session: Session = Depends(get_db)
 ) -> SensorBatchResponse:
-    """Replay a disconnected App backlog in measurement order.
+    """Archive a disconnected App backlog without rewriting live risk state.
 
-    The regular batch endpoint evaluates only its newest pair. Offline replay
-    evaluates every pair so a risk that started and recovered while the phone
-    could not reach the backend is still reconstructed in history.
+    Offline risk events and intervention results are uploaded separately by
+    ``/offline-interventions``. Re-evaluating every historical frame pair here
+    would run the live engine against the database's newest pair and could
+    corrupt event times when old and new data arrive out of order.
     """
     groups: dict[tuple[int, int], list] = {}
     for frame in payload.frames:
@@ -63,16 +64,9 @@ def ingest_offline_batch(
     ordered_groups = sorted(
         groups.values(), key=lambda frames: max(frame.timestamp_ms for frame in frames)
     )
-    accepted = 0
-    rejected = 0
-    latest = None
-    for frames in ordered_groups:
-        pair_accepted, pair_rejected = add_frames(session, frames)
-        accepted += pair_accepted
-        rejected += pair_rejected
-        if pair_accepted:
-            latest = evaluate_risk(session, record=True, allow_motor_command=False)
-    latest = latest or evaluate_risk(session)
+    ordered_frames = [frame for frames in ordered_groups for frame in frames]
+    accepted, rejected = add_frames(session, ordered_frames)
+    latest = evaluate_risk(session)
     return SensorBatchResponse(
         accepted=accepted,
         rejected=rejected,
