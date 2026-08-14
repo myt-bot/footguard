@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 
 import '../data/api_client.dart';
 import '../data/foot_data_source.dart';
-import '../models/ai_advice.dart';
 import '../models/ai_chat_answer.dart';
 import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
@@ -44,13 +43,9 @@ class MonitoringController extends ChangeNotifier {
   bool _refreshing = false;
   bool _disposed = false;
   final Map<String, List<double>> _displayPressureBySide = {};
-  bool _aiAdviceLoading = false;
   bool _aiQuestionLoading = false;
   bool _aiChatLoading = false;
   bool _calibrationResetting = false;
-  String? _lastAdviceSignature;
-  String? _aiQuestionSignature;
-  DateTime? _lastAdviceAttemptAt;
   DateTime? _lastSessionAdviceAt;
   LocalRiskResult? _localResult;
   String? _lastNoticeSignature;
@@ -81,7 +76,6 @@ class MonitoringController extends ChangeNotifier {
   String leftMotionState = 'unavailable';
   String rightMotionState = 'unavailable';
   RegionalAnalysis? regionalAnalysis;
-  AiAdvice? aiAdvice;
   AiQuestionAnswer? aiQuestionAnswer;
   AiChatAnswer? aiChatAnswer;
   CalibrationStatus? calibrationStatus;
@@ -89,17 +83,17 @@ class MonitoringController extends ChangeNotifier {
   bool sessionAdviceLoading = false;
   RecoveryObservation? recoveryObservation;
   String? riskNoticeMessage;
-  String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
   String aiQuestionStatus = '请选择一个常见问题';
   String aiChatStatus = '可询问当前状态、设备检查或日常观察建议';
+  String calibrationStage = 'empty_reference';
 
-  bool get aiAdviceLoading => _aiAdviceLoading;
   bool get aiQuestionLoading => _aiQuestionLoading;
   bool get aiChatLoading => _aiChatLoading;
   bool get calibrationResetting => _calibrationResetting;
   int get noticeSequence => _noticeSequence;
   int get offlinePairCount => _pendingUploadPairs.length;
   String get ruleVersion => LocalRiskEngine.ruleVersion;
+  bool get bothFeetConnected => _bothFeetConnected;
 
   String get motionStatusLabel => switch (motionState) {
         'stationary' => '静止/稳定',
@@ -122,61 +116,77 @@ class MonitoringController extends ChangeNotifier {
     );
     _requiresOfflineReplay = savedPairs.isNotEmpty;
     _localRiskEngine.restoreBaseline(await _offlineStore.loadBaseline());
-    final cachedAdvice = await _offlineStore.loadSessionAdvice();
-    if (cachedAdvice != null) {
-      sessionAdvice = SessionAdvice.fromJson(cachedAdvice);
-    }
     _localBaselinePersisted = _localRiskEngine.baselineReady;
     _subscriptions.add(source.frames.listen(_onFrame));
     _subscriptions.add(source.connectionState.listen(_onConnections));
-    _subscriptions.add(source.errorState.listen((value) {
-      _sourceError = value;
-      notifyListeners();
-    }));
+    _subscriptions.add(
+      source.errorState.listen((value) {
+        _sourceError = value;
+        notifyListeners();
+      }),
+    );
     await source.start();
     if (commandBridge != null) {
       commandBridge!.start();
-      _subscriptions.add(commandBridge!.statuses.listen((value) {
-        motorStatus = value;
-        if (value.startsWith('设备返回executed') &&
-            value.contains('已保存为离线干预') &&
-            _pendingLocalEventId != null) {
-          final now = DateTime.now().millisecondsSinceEpoch;
-          recoveryObservation = RecoveryObservation(
-            eventId: _pendingLocalEventId!,
-            status: 'observing',
-            startedAtMs: now,
-            deadlineAtMs: now + 15000,
-            remainingMs: 15000,
-          );
-          _pendingLocalEventId = null;
-        } else if (value.contains('已保存为离线干预') &&
-            _activeOfflineIntervention != null) {
-          _activeOfflineIntervention!.effectLabel = 'unknown';
-          _activeOfflineIntervention!.recoveryTimeMs = 0;
-          _pendingLocalEventId = null;
+      _subscriptions.add(
+        commandBridge!.statuses.listen((value) {
+          motorStatus = value;
+          if (value.startsWith('设备返回executed') &&
+              value.contains('已保存为离线干预') &&
+              _pendingLocalEventId != null) {
+            final pressureIntervention =
+                _activeOfflineIntervention?.activeRisks.any(
+                      (item) => item.isPressure,
+                    ) ??
+                    false;
+            if (pressureIntervention) {
+              final now = DateTime.now().millisecondsSinceEpoch;
+              recoveryObservation = RecoveryObservation(
+                eventId: _pendingLocalEventId!,
+                status: 'observing',
+                startedAtMs: now,
+                deadlineAtMs: now + 15000,
+                remainingMs: 15000,
+              );
+            } else {
+              _activeOfflineIntervention?.effectLabel = 'unknown';
+              _activeOfflineIntervention?.recoveryTimeMs = 0;
+              unawaited(
+                _offlineStore.saveInterventions(_pendingOfflineInterventions),
+              );
+            }
+            _pendingLocalEventId = null;
+          } else if (value.contains('已保存为离线干预') &&
+              _activeOfflineIntervention != null) {
+            _activeOfflineIntervention!.effectLabel = 'unknown';
+            _activeOfflineIntervention!.recoveryTimeMs = 0;
+            _pendingLocalEventId = null;
+            unawaited(
+              _offlineStore.saveInterventions(_pendingOfflineInterventions),
+            );
+          }
+          notifyListeners();
+        }),
+      );
+      _subscriptions.add(
+        commandBridge!.localAcknowledgements.listen((ack) {
+          final intervention = _activeOfflineIntervention;
+          if (intervention == null ||
+              intervention.command.commandId != ack.commandId) {
+            return;
+          }
+          intervention.acknowledgements.add(ack);
           unawaited(
             _offlineStore.saveInterventions(_pendingOfflineInterventions),
           );
-        }
-        notifyListeners();
-      }));
-      _subscriptions.add(commandBridge!.localAcknowledgements.listen((ack) {
-        final intervention = _activeOfflineIntervention;
-        if (intervention == null ||
-            intervention.command.commandId != ack.commandId) {
-          return;
-        }
-        intervention.acknowledgements.add(ack);
-        unawaited(
-          _offlineStore.saveInterventions(_pendingOfflineInterventions),
-        );
-      }));
+        }),
+      );
     }
     await refreshBackend();
-    _updateSessionAdviceIfNeeded();
-    _refreshTimer =
-        Timer.periodic(const Duration(seconds: 1), (_) => refreshBackend());
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => refreshBackend(),
+    );
     _recoveryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _tickRecoveryObservation();
       if (!_disposed) notifyListeners();
@@ -351,14 +361,9 @@ class MonitoringController extends ChangeNotifier {
         final take =
             _pendingUploadPairs.length > 100 ? 100 : _pendingUploadPairs.length;
         final queuedPairs = _pendingUploadPairs.sublist(0, take);
-        final batch = [
-          for (final pair in queuedPairs) ...pair,
-        ];
+        final batch = [for (final pair in queuedPairs) ...pair];
         try {
-          await api.uploadFrames(
-            batch,
-            offlineReplay: _requiresOfflineReplay,
-          );
+          await api.uploadFrames(batch, offlineReplay: _requiresOfflineReplay);
           _pendingUploadPairs.removeRange(0, take);
           await _offlineStore.savePairs(_pendingUploadPairs);
           _syncFailureCount = 0;
@@ -444,8 +449,6 @@ class MonitoringController extends ChangeNotifier {
             await _offlineStore.clearBaseline();
           }
         }
-        _updateAiAdviceIfNeeded();
-        _updateSessionAdviceIfNeeded();
       } else {
         _resetBilateralState();
       }
@@ -541,70 +544,11 @@ class MonitoringController extends ChangeNotifier {
     }
   }
 
-  void _updateAiAdviceIfNeeded() {
-    if (_aiQuestionSignature != null &&
-        _aiQuestionSignature != _currentMonitoringSignature) {
-      _clearAiQuestion();
-    }
-    final signature = _currentMonitoringSignature;
-    final now = DateTime.now();
-    final withinCooldown = _lastAdviceSignature == signature &&
-        _lastAdviceAttemptAt != null &&
-        now.difference(_lastAdviceAttemptAt!) < const Duration(seconds: 30);
-    final alreadyExplained =
-        _lastAdviceSignature == signature && aiAdvice != null;
-    if (_aiAdviceLoading || withinCooldown || alreadyExplained) {
-      return;
-    }
-
-    _lastAdviceSignature = signature;
-    _lastAdviceAttemptAt = now;
-    _aiAdviceLoading = true;
-    aiAdvice = null;
-    aiAdviceStatus = '正在生成辅助解释…';
-    unawaited(_requestAiAdvice(signature, risk, regionalAnalysis));
-  }
-
-  Future<void> _requestAiAdvice(
-    String signature,
-    RiskState requestedRisk,
-    RegionalAnalysis? requestedAnalysis,
-  ) async {
-    try {
-      final advice = await api.aiAdvice(
-        risk: requestedRisk,
-        activeRisks: activeRisks,
-        loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(requestedAnalysis?.temperatureDeltaC),
-        baselineReady: requestedAnalysis?.baselineReady ?? false,
-        pressureAvailable: requestedAnalysis?.pressureAvailable ?? false,
-        temperatureAvailable: requestedAnalysis?.temperatureAvailable ?? false,
-        leftConnected: left != null,
-        rightConnected: right != null,
-      );
-      if (_currentMonitoringSignature == signature) {
-        aiAdvice = advice;
-        aiAdviceStatus = advice.usedFallback ? '云端暂不可用，已使用本地安全降级解释' : '辅助解释已更新';
-      }
-    } catch (error) {
-      if (_currentMonitoringSignature == signature) {
-        aiAdviceStatus = 'AI 辅助解释暂不可用：$error';
-      }
-    } finally {
-      _aiAdviceLoading = false;
-      if (!_disposed) {
-        notifyListeners();
-      }
-    }
-  }
-
   Future<void> askAiQuestion(String questionKey) async {
     if (_aiQuestionLoading) {
       return;
     }
     final signature = _currentMonitoringSignature;
-    _aiQuestionSignature = signature;
     _aiQuestionLoading = true;
     aiQuestionAnswer = null;
     aiQuestionStatus = '正在生成回答…';
@@ -615,8 +559,9 @@ class MonitoringController extends ChangeNotifier {
         risk: risk,
         activeRisks: activeRisks,
         loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(regionalAnalysis?.temperatureDeltaC),
+        temperatureDeltaMaxC: _maximumTemperatureDelta(
+          regionalAnalysis?.temperatureDeltaC,
+        ),
         baselineReady: regionalAnalysis?.baselineReady ?? false,
         pressureAvailable: regionalAnalysis?.pressureAvailable ?? false,
         temperatureAvailable: regionalAnalysis?.temperatureAvailable ?? false,
@@ -659,8 +604,9 @@ class MonitoringController extends ChangeNotifier {
         risk: risk,
         activeRisks: activeRisks,
         loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(analysis?.temperatureDeltaC),
+        temperatureDeltaMaxC: _maximumTemperatureDelta(
+          analysis?.temperatureDeltaC,
+        ),
         baselineReady: analysis?.baselineReady ?? false,
         pressureAvailable: analysis?.pressureAvailable ??
             (left?.pressureChannelsValid == true &&
@@ -715,6 +661,7 @@ class MonitoringController extends ChangeNotifier {
     notifyListeners();
     _localRiskEngine.reset();
     _localResult = null;
+    calibrationStage = 'empty_reference';
     _localBaselinePersisted = false;
     await _offlineStore.clearBaseline();
     try {
@@ -737,10 +684,7 @@ class MonitoringController extends ChangeNotifier {
       regionalAnalysis = null;
       motorCommand = null;
       motorStatus = '基线学习中，压力马达提醒已暂停';
-      aiAdvice = null;
       aiQuestionAnswer = null;
-      _lastAdviceSignature = null;
-      _aiQuestionSignature = null;
       _backendError = null;
     } catch (error) {
       backendOnline = false;
@@ -760,7 +704,6 @@ class MonitoringController extends ChangeNotifier {
   void _clearAiQuestion() {
     aiQuestionAnswer = null;
     aiQuestionStatus = '请选择一个常见问题';
-    _aiQuestionSignature = null;
   }
 
   void _applyLocalResult(LocalRiskResult result) {
@@ -776,8 +719,9 @@ class MonitoringController extends ChangeNotifier {
       sampleCount: result.baselineSamples,
       requiredSamples: LocalRiskEngine.requiredSamples,
       statusReason: result.baselineReady ? 'ready' : 'waiting_for_data',
-      emptyTemperatureReferenceReady: result.temperatureOffsetStatus
-          .any((item) => item != 'unstable' && item != 'raw_invalid'),
+      emptyTemperatureReferenceReady: result.temperatureOffsetStatus.any(
+        (item) => item != 'unstable' && item != 'raw_invalid',
+      ),
       temperatureRiskEnabled: result.temperatureRiskEnabled,
       temperatureOffsetChannels: [
         for (var index = 0;
@@ -795,6 +739,7 @@ class MonitoringController extends ChangeNotifier {
       ],
       temperatureRiskReason: result.temperatureRiskReason,
     );
+    calibrationStage = result.calibrationStage;
     _updateRiskNotice();
     if (result.motorTarget != null &&
         result.motorPattern != null &&
@@ -824,9 +769,7 @@ class MonitoringController extends ChangeNotifier {
         beforeLoadDiff: result.loadDiff,
       );
       _pendingOfflineInterventions.add(_activeOfflineIntervention!);
-      unawaited(
-        _offlineStore.saveInterventions(_pendingOfflineInterventions),
-      );
+      unawaited(_offlineStore.saveInterventions(_pendingOfflineInterventions));
       motorCommand = command;
       unawaited(commandBridge!.submitLocal(command));
     }
@@ -929,15 +872,9 @@ class MonitoringController extends ChangeNotifier {
     }).toList(growable: false);
   }
 
-  static String _riskNoticeLabel(RiskState item) => switch (item.riskType) {
-        'left_load_bias' => '检测到左侧负载持续偏高，请适当减轻左侧负载',
-        'right_load_bias' => '检测到右侧负载持续偏高，请适当减轻右侧负载',
-        'forefoot_high' =>
-          '${item.riskSide == 'left' ? '左脚' : item.riskSide == 'right' ? '右脚' : '双脚'}前掌负荷持续集中，请调整受力',
-        'temperature_asymmetry' =>
-          '${item.riskSide == 'left' ? '左脚' : '右脚'}同区温度趋势异常，请检查足部并继续观察',
-        _ => '检测到持续异常，请调整并复查',
-      };
+  static String _riskNoticeLabel(RiskState item) => item.isTemperature
+      ? '${riskDisplayLabel(item.riskType, item.riskSide)}，请检查足部并继续观察'
+      : '检测到${riskDisplayLabel(item.riskType, item.riskSide)}，请调整受力并减负';
 
   String get _currentMonitoringSignature => [
         risk.riskType,

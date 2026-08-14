@@ -3,6 +3,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/config/app_config.dart';
 import 'package:footguard/data/api_client.dart';
 import 'package:footguard/screens/settings_screen.dart';
+import 'package:footguard/services/local_tts_service.dart';
+
+class _FakeTtsSpeaker implements TtsSpeaker {
+  final spoken = <String>[];
+
+  @override
+  Future<bool> speak(String text) async {
+    spoken.add(text);
+    return true;
+  }
+
+  @override
+  Future<void> stop() async {}
+}
 
 Future<void> _scrollUntilVisible(
   WidgetTester tester,
@@ -26,8 +40,9 @@ Future<void> _scrollUntilVisible(
 }
 
 void main() {
-  testWidgets('release settings expose BLE mode without simulation controls',
-      (tester) async {
+  testWidgets('release settings expose BLE mode without simulation controls', (
+    tester,
+  ) async {
     AppSettings? applied;
     await tester.pumpWidget(
       MaterialApp(
@@ -44,6 +59,8 @@ void main() {
     expect(find.text('数据源'), findsNothing);
     expect(find.text('模拟场景'), findsNothing);
     expect(find.text('CSV 回放数据'), findsNothing);
+    expect(find.text('FastAPI 后端地址'), findsNothing);
+    expect(find.text('语音提醒'), findsOneWidget);
     await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
@@ -51,27 +68,10 @@ void main() {
     expect(applied?.dataMode, FootDataMode.ble);
   });
 
-  testWidgets('backend address can be validated before applying settings',
-      (tester) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: const AppSettings(),
-            onChanged: (_) {},
-            healthCheck: (baseUrl) async => baseUrl == 'http://10.0.2.2:8000',
-          ),
-        ),
-      ),
-    );
-
-    await tester.tap(find.byTooltip('检测连接'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('后端连接正常'), findsOneWidget);
-  });
-
-  testWidgets('invalid backend address is not applied', (tester) async {
+  testWidgets('voice switch persists and test button uses local TTS', (
+    tester,
+  ) async {
+    final speaker = _FakeTtsSpeaker();
     AppSettings? applied;
     await tester.pumpWidget(
       MaterialApp(
@@ -79,33 +79,26 @@ void main() {
           body: SettingsScreen(
             settings: const AppSettings(),
             onChanged: (settings) => applied = settings,
+            ttsSpeaker: speaker,
           ),
         ),
       ),
     );
 
-    await tester.enterText(
-      find.byType(TextField),
-      '192.168.1.10:8000',
-    );
-    await _scrollUntilVisible(tester, find.text('应用设置'));
-    await tester.tap(find.text('应用设置'));
-    await tester.pump();
+    await tester.tap(find.text('测试中文语音'));
+    await tester.pumpAndSettle();
+    expect(speaker.spoken, ['语音提醒已开启。']);
+    expect(find.text('中文语音测试成功'), findsOneWidget);
 
-    expect(applied, isNull);
-    await _scrollUntilVisible(
-      tester,
-      find.byKey(const ValueKey('backend-status')),
-      delta: -300,
-    );
-    expect(
-      find.text('请输入以 http:// 或 https:// 开头的完整地址'),
-      findsOneWidget,
-    );
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(applied?.voiceEnabled, isFalse);
+    expect(find.text('测试中文语音'), findsOneWidget);
   });
 
-  testWidgets('baseline status is visible and reset requires confirmation',
-      (tester) async {
+  testWidgets('baseline status is visible and reset requires confirmation', (
+    tester,
+  ) async {
     var resetCalls = 0;
     await tester.pumpWidget(
       MaterialApp(

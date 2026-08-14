@@ -11,6 +11,7 @@ from backend.app.services.risk_service import (
     _current_risk,
     _current_risks,
     _empty_baseline,
+    _empty_temperature_reference,
     _pressure_metric_from_window,
     _prebaseline_residual_suspect_channels,
     _regional_analysis,
@@ -79,6 +80,62 @@ def test_learns_heel_heavy_personal_distribution() -> None:
     assert regional.left_pressure_scores == pytest.approx([0.0] * 6)
     assert regional.right_pressure_scores == pytest.approx([0.0] * 6)
     assert regional.temperature_delta_c == pytest.approx([0.0] * 4)
+
+
+def test_20_hz_frames_need_about_eight_seconds_to_build_baseline() -> None:
+    first_two_seconds = [
+        replace(_metric(index), timestamp_ms=index * 50)
+        for index in range(41)
+    ]
+    almost_eight_seconds = [
+        replace(_metric(index), timestamp_ms=index * 50)
+        for index in range(156)
+    ]
+    eight_second_window = [
+        replace(_metric(index), timestamp_ms=index * 50)
+        for index in range(157)
+    ]
+
+    after_two_seconds = _baseline_profile(first_two_seconds)
+    before_eight_seconds = _baseline_profile(almost_eight_seconds)
+    after_eight_seconds = _baseline_profile(eight_second_window)
+
+    assert after_two_seconds.ready is False
+    assert after_two_seconds.sample_count == 11
+    assert before_eight_seconds.ready is False
+    assert before_eight_seconds.sample_count == 39
+    assert after_eight_seconds.ready is True
+    assert after_eight_seconds.sample_count == BASELINE_MIN_SAMPLES
+
+
+def test_20_hz_empty_reference_keeps_warmup_and_200_ms_sampling() -> None:
+    empty_delta = (3.0, -2.8, 0.4, 2.4)
+
+    def unloaded_metric(index: int) -> PairMetric:
+        return replace(
+            _metric(
+                index,
+                left_total=0.0,
+                right_total=0.0,
+                temperature_delta_c=empty_delta,
+            ),
+            timestamp_ms=index * 50,
+        )
+
+    too_early = _empty_temperature_reference(
+        [unloaded_metric(index) for index in range(341)]
+    )
+    ready = _empty_temperature_reference(
+        [unloaded_metric(index) for index in range(537)]
+    )
+
+    assert too_early[3] == ("unstable",) * 4
+    assert ready[3] == (
+        "assembly_offset",
+        "assembly_offset",
+        "normal_offset",
+        "assembly_offset",
+    )
 
 
 def test_rejects_off_ground_one_sided_and_single_point_samples() -> None:
