@@ -79,7 +79,7 @@ def test_normal_advice_never_proposes_motor_action(client: TestClient) -> None:
     assert result["candidate_pattern"] == "off"
 
 
-def test_severe_left_bias_returns_explanation_and_candidate(
+def test_level_two_left_bias_returns_explanation_without_motor_candidate(
     client: TestClient,
 ) -> None:
     payload = advice_payload(
@@ -94,8 +94,8 @@ def test_severe_left_bias_returns_explanation_and_candidate(
     assert response.status_code == 200
     result = response.json()
     assert result["risk_level"] == 2
-    assert result["target"] == "left"
-    assert result["candidate_pattern"] == "double"
+    assert result["target"] == "none"
+    assert result["candidate_pattern"] == "off"
     assert "0.310" in result["explanation"]
     assert "不能替代医疗诊断" in result["advice"]
 
@@ -296,8 +296,8 @@ def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(
     assert result.provider == "openai-compatible:competition-model"
     assert result.explanation == "左脚负荷持续偏高。"
     assert "不能替代医疗诊断" in result.advice
-    assert result.target == "left"
-    assert result.candidate_pattern == "double"
+    assert result.target == "none"
+    assert result.candidate_pattern == "off"
 
 
 def test_cloud_failure_falls_back_to_safe_mock(
@@ -322,8 +322,8 @@ def test_cloud_failure_falls_back_to_safe_mock(
         )
 
     assert result.provider == "mock-risk-advisor-v1:fallback"
-    assert result.target == "right"
-    assert result.candidate_pattern == "short"
+    assert result.target == "none"
+    assert result.candidate_pattern == "off"
 
 
 def test_combined_risks_use_target_union_and_forefoot_pattern(
@@ -332,15 +332,16 @@ def test_combined_risks_use_target_union_and_forefoot_pattern(
     payload = advice_payload(
         risk_type="right_load_bias",
         risk_side="right",
-        risk_level=2,
+        risk_level=3,
+        duration_ms=25_000,
     )
     payload["active_risks"] = [
         payload["risk"],
         {
             "risk_type": "forefoot_high",
             "risk_side": "left",
-            "risk_level": 2,
-            "duration_ms": 7_600,
+            "risk_level": 3,
+            "duration_ms": 25_000,
         },
     ]
 

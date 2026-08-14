@@ -7,6 +7,7 @@ FootFrame frame(
   int sequence,
   List<double> pressure, {
   List<double> temperature = const [30, 30, 30, 30],
+  ImuData imu = const ImuData(ax: 0, ay: 0, az: 9.8, gx: 0, gy: 0, gz: 0),
   int qualityFlags = 0,
   int? timestampMs,
 }) =>
@@ -20,7 +21,7 @@ FootFrame frame(
       timestampMs: timestampMs ?? 100000 + sequence * 200,
       pressure: pressure,
       temperature: temperature,
-      imu: const ImuData(ax: 0, ay: 0, az: 9.8, gx: 0, gy: 0, gz: 0),
+      imu: imu,
       battery: 50,
       qualityFlags: qualityFlags,
       source: 'ble',
@@ -141,6 +142,39 @@ void main() {
     expect(result.baselineSamples, LocalRiskEngine.requiredSamples);
   });
 
+  test('low-load multipoint stance builds a baseline', () {
+    final engine = LocalRiskEngine();
+    const leftStanding = [0.006, 0.010, 0.019, 0.005, 0.011, 0.0345];
+    const rightStanding = [0.006, 0.004, 0.014, 0.004, 0.010, 0.028];
+
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence < 40; sequence += 1) {
+      result = engine.evaluate([
+        frame('left', sequence, leftStanding),
+        frame('right', sequence, rightStanding),
+      ]);
+    }
+
+    expect(result!.baselineReady, isTrue);
+    expect(result.baselineSamples, LocalRiskEngine.requiredSamples);
+  });
+
+  test('low-load floor does not accept single-point residuals', () {
+    final engine = LocalRiskEngine();
+    const residual = [0.0, 0.0, 0.07, 0.0, 0.0, 0.0];
+
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence < 60; sequence += 1) {
+      result = engine.evaluate([
+        frame('left', sequence, residual),
+        frame('right', sequence, residual),
+      ]);
+    }
+
+    expect(result!.baselineReady, isFalse);
+    expect(result.baselineSamples, 0);
+  });
+
   test('20 Hz empty reference keeps 15 second warmup and 200 ms samples', () {
     final engine = LocalRiskEngine();
     const unloaded = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -206,10 +240,40 @@ void main() {
       }
 
       const biased = [0.08, 0.08, 0.08, 0.08, 0.12, 0.12];
-      LocalRiskResult evaluateAt(int offsetMs, int sequence) =>
+      LocalRiskResult evaluateAt(
+        int offsetMs,
+        int sequence, {
+        bool moving = false,
+      }) =>
           engine.evaluate([
-            frame('left', sequence, biased, timestampMs: 200000 + offsetMs),
-            frame('right', sequence, standing, timestampMs: 200013 + offsetMs),
+            frame(
+              'left',
+              sequence,
+              biased,
+              timestampMs: 200000 + offsetMs,
+              imu: ImuData(
+                ax: 0,
+                ay: 0,
+                az: 9.8,
+                gx: moving ? 30 : 0,
+                gy: 0,
+                gz: 0,
+              ),
+            ),
+            frame(
+              'right',
+              sequence,
+              standing,
+              timestampMs: 200013 + offsetMs,
+              imu: ImuData(
+                ax: 0,
+                ay: 0,
+                az: 9.8,
+                gx: moving ? 30 : 0,
+                gy: 0,
+                gz: 0,
+              ),
+            ),
           ]);
 
       evaluateAt(0, 40);
@@ -217,12 +281,17 @@ void main() {
       expect(warning.risk.riskLevel, 2);
       expect(warning.motorTarget, isNull);
 
-      final persistent = evaluateAt(20000, 42);
+      final movingPersistent = evaluateAt(20000, 42, moving: true);
+      expect(movingPersistent.risk.riskLevel, 3);
+      expect(movingPersistent.motionState, 'moving');
+      expect(movingPersistent.motorTarget, isNull);
+
+      final persistent = evaluateAt(21500, 43);
       expect(persistent.risk.riskLevel, 3);
       expect(persistent.motorTarget, 'left');
-      expect(persistent.motorPattern, isNotNull);
+      expect(persistent.motorPattern, 'long');
 
-      final repeated = evaluateAt(21500, 43);
+      final repeated = evaluateAt(22000, 44);
       expect(repeated.risk.riskLevel, 3);
       expect(repeated.motorTarget, isNull);
     },
@@ -330,6 +399,7 @@ void main() {
     }
     expect(result!.risk.riskLevel, 3);
     expect(result.motorTarget, 'both');
+    expect(result.motorPattern, 'long');
 
     result = engine.evaluate([
       frame(

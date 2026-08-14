@@ -65,3 +65,7 @@ String riskDisplayLabel(String riskType, String side) {
     _ => '$sideLabel区域负荷集中',
   };
 }
+
+String riskVoiceMessage(RiskState risk) => risk.isTemperature
+    ? '${riskDisplayLabel(risk.riskType, risk.riskSide)}，请检查足部并继续观察'
+    : '检测到${riskDisplayLabel(risk.riskType, risk.riskSide)}，请调整受力并减负';

@@ -33,6 +33,15 @@ from ..config import (
     FOREFOOT_MIN_ACTIVE_CHANNELS,
     FOREFOOT_MAX_THRESHOLD,
     FOREFOOT_NOISE_MULTIPLIER,
+    GAIT_ANALYSIS_WINDOW_MS,
+    GAIT_LOAD_SHIFT_THRESHOLD,
+    GAIT_MAX_ADAPTIVE_THRESHOLD,
+    GAIT_MAX_CADENCE_SPM,
+    GAIT_MIN_CADENCE_SPM,
+    GAIT_MIN_MOVING_RATIO,
+    GAIT_MIN_STEP_CANDIDATES,
+    GAIT_MIN_WINDOW_MS,
+    GAIT_STEP_REFRACTORY_MS,
     IMU_ACCEL_STATIONARY_TOLERANCE_MS2,
     IMU_ACCEL_DELTA_MOVING_MS2,
     IMU_GRAVITY_MS2,
@@ -91,7 +100,13 @@ from ..repositories.calibration_repository import (
 )
 from ..repositories.event_repository import active_event, feedback_for_event
 from ..repositories.sensor_repository import latest_frame, recent_frames, to_schema
-from ..schemas import CalibrationStatus, RegionalAnalysis, RealtimeResponse, RiskState
+from ..schemas import (
+    CalibrationStatus,
+    GaitSummary,
+    RegionalAnalysis,
+    RealtimeResponse,
+    RiskState,
+)
 from .command_service import ensure_combined_motor_command, ensure_motor_command
 
 
@@ -292,8 +307,19 @@ def _pair_history(
 ) -> list[PairMetric]:
     pairs: dict[tuple[int, int], dict[str, SensorFrame]] = {}
     state = calibration_state(session)
+    stored_profile = calibration_profile(session)
+    stored_temperature_status = (
+        tuple(json.loads(stored_profile.temperature_offset_status_json))
+        if stored_profile is not None
+        else ()
+    )
+    needs_calibration_history = stored_profile is None or not any(
+        status not in {"unstable", "raw_invalid"}
+        for status in stored_temperature_status
+    )
     for frame in recent_frames(
         session,
+        limit=6_000 if needs_calibration_history else 2_000,
         after_id=calibration_frame_cutoff(session),
     ):
         # An offline replay inserted after reset can have a new database id
@@ -359,6 +385,103 @@ def _pair_history(
         )
         previous = {"left": left, "right": right}
     return sorted(metrics, key=lambda item: item.timestamp_ms)
+
+
+def _gait_summary(
+    metrics: list[PairMetric], baseline: BaselineProfile
+) -> GaitSummary:
+    if not metrics:
+        return GaitSummary(
+            state="insufficient_data",
+            window_ms=0,
+            step_count=0,
+            left_steps=0,
+            right_steps=0,
+        )
+    latest_at_ms = metrics[-1].timestamp_ms
+    recent = [
+        metric
+        for metric in metrics
+        if metric.timestamp_ms >= latest_at_ms - GAIT_ANALYSIS_WINDOW_MS
+    ]
+    segment = [recent[-1]]
+    for metric in reversed(recent[:-1]):
+        if segment[-1].timestamp_ms - metric.timestamp_ms > RISK_CONTINUITY_GAP_MS:
+            break
+        segment.append(metric)
+    segment.reverse()
+    window_ms = max(0, segment[-1].timestamp_ms - segment[0].timestamp_ms)
+    empty = {
+        "window_ms": window_ms,
+        "step_count": 0,
+        "left_steps": 0,
+        "right_steps": 0,
+    }
+    if window_ms < GAIT_MIN_WINDOW_MS or segment[-1].motion_state == "unavailable":
+        return GaitSummary(state="insufficient_data", **empty)
+    if segment[-1].motion_state == "stationary":
+        return GaitSummary(state="stationary", **empty)
+
+    moving_ratio = sum(
+        metric.motion_state == "moving" for metric in segment
+    ) / len(segment)
+    center = (
+        baseline.load_ratio
+        if baseline.ready
+        else median(metric.log_load_ratio for metric in segment)
+    )
+    adaptive_threshold = min(
+        GAIT_MAX_ADAPTIVE_THRESHOLD,
+        baseline.load_ratio_mad * 4.0 if baseline.ready else 0.0,
+    )
+    threshold = max(GAIT_LOAD_SHIFT_THRESHOLD, adaptive_threshold)
+    events: list[tuple[int, str]] = []
+    current_side: str | None = None
+    last_event_at_ms = 0
+    for metric in segment:
+        if metric.motion_state != "moving" or not metric.pressure_valid:
+            continue
+        shifted_ratio = metric.log_load_ratio - center
+        side = (
+            "left"
+            if shifted_ratio >= threshold
+            else "right"
+            if shifted_ratio <= -threshold
+            else None
+        )
+        if (
+            side is not None
+            and side != current_side
+            and metric.timestamp_ms - last_event_at_ms >= GAIT_STEP_REFRACTORY_MS
+        ):
+            events.append((metric.timestamp_ms, side))
+            current_side = side
+            last_event_at_ms = metric.timestamp_ms
+
+    intervals = [
+        events[index][0] - events[index - 1][0]
+        for index in range(1, len(events))
+        if GAIT_STEP_REFRACTORY_MS
+        <= events[index][0] - events[index - 1][0]
+        <= 3_000
+    ]
+    cadence_spm = 60_000.0 / median(intervals) if intervals else None
+    gait_is_valid = (
+        moving_ratio >= GAIT_MIN_MOVING_RATIO
+        and len(events) >= GAIT_MIN_STEP_CANDIDATES
+        and cadence_spm is not None
+        and GAIT_MIN_CADENCE_SPM <= cadence_spm <= GAIT_MAX_CADENCE_SPM
+    )
+    if not gait_is_valid:
+        return GaitSummary(state="insufficient_data", **empty)
+    return GaitSummary(
+        state="walking",
+        window_ms=window_ms,
+        step_count=len(events),
+        left_steps=sum(side == "left" for _, side in events),
+        right_steps=sum(side == "right" for _, side in events),
+        cadence_spm=round(cadence_spm, 1),
+    )
 
 
 def _latest_complete_pair(
@@ -2326,7 +2449,13 @@ def _record_combined_risks(
         event.risk_components_json = components_json
     session.commit()
     if allow_motor_command:
-        ensure_combined_motor_command(session, event, risks)
+        motor_risks = [
+            risk
+            for risk in risks
+            if risk.risk_type == "temperature_asymmetry"
+            or metric.motion_state != "moving"
+        ]
+        ensure_combined_motor_command(session, event, motor_risks)
 
 
 def evaluate_risk(
@@ -2382,6 +2511,39 @@ def evaluate_risk(
         baseline = candidate_baseline
     else:
         baseline = learned_baseline
+        if not any(
+            status not in {"unstable", "raw_invalid"}
+            for status in learned_baseline.temperature_offset_status
+        ):
+            temperature_candidate = _baseline_profile(metrics)
+            if temperature_candidate.ready and any(
+                status not in {"unstable", "raw_invalid"}
+                for status in temperature_candidate.temperature_offset_status
+            ):
+                baseline = replace(
+                    learned_baseline,
+                    temperature_delta_c=temperature_candidate.temperature_delta_c,
+                    temperature_valid=temperature_candidate.temperature_valid,
+                    empty_temperature_delta_c=(
+                        temperature_candidate.empty_temperature_delta_c
+                    ),
+                    empty_temperature_mad_c=(
+                        temperature_candidate.empty_temperature_mad_c
+                    ),
+                    empty_temperature_slope_c_per_s=(
+                        temperature_candidate.empty_temperature_slope_c_per_s
+                    ),
+                    temperature_offset_status=(
+                        temperature_candidate.temperature_offset_status
+                    ),
+                    wearing_temperature_mad_c=(
+                        temperature_candidate.wearing_temperature_mad_c
+                    ),
+                )
+                save_calibration_profile(
+                    session,
+                    _profile_to_model(baseline, left_model, right_model),
+                )
     risk_metrics = metrics or [_metric(left_model, right_model)]
     baseline_trust = baseline.pressure_channel_trust
     analysis_baseline, residual_suspects = _diagnosed_baseline(
@@ -2389,6 +2551,7 @@ def evaluate_risk(
     )
     active_risks, metric = _current_risks(risk_metrics, analysis_baseline)
     risk, _ = _current_risk(risk_metrics[-100:], analysis_baseline)
+    gait = _gait_summary(risk_metrics, analysis_baseline)
     if active_risks:
         risk = active_risks[0]
     if record:
@@ -2404,7 +2567,11 @@ def evaluate_risk(
                         item.risk_type == "temperature_asymmetry"
                         for item in active_risks
                     )
-                    or (analysis_baseline.ready and metric.pressure_valid)
+                    or (
+                        analysis_baseline.ready
+                        and metric.pressure_valid
+                        and metric.motion_state != "moving"
+                    )
                 )
             ),
             baseline=analysis_baseline,
@@ -2420,6 +2587,7 @@ def evaluate_risk(
         motion_state=metric.motion_state,
         left_motion_state=metric.left_motion_state,
         right_motion_state=metric.right_motion_state,
+        gait=gait,
         pressure_available=(
             metric.pressure_valid
             and _pressure_supported(metric, analysis_baseline)

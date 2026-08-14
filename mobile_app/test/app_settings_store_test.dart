@@ -15,11 +15,16 @@ void main() {
 
     final settings = await store.load();
 
-    expect(settings.backendUrl, 'http://10.0.2.2:8000');
+    expect(settings.backendUrl, defaultBackendUrl);
     expect(settings.dataMode, FootDataMode.ble);
     expect(settings.mockScenario, 'normal_stand');
     expect(settings.replaySpeed, 1.0);
     expect(settings.voiceEnabled, isTrue);
+  });
+
+  test('uses the compile-time backend URL as the unsaved default', () {
+    expect(const AppSettings().backendUrl, defaultBackendUrl);
+    expect(isValidBackendUrl(defaultBackendUrl), isTrue);
   });
 
   test('saves and restores all configurable settings', () async {

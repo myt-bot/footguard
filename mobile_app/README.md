@@ -6,6 +6,15 @@
 2. Android 模拟器使用默认地址 `http://10.0.2.2:8000`。
 3. 在本目录执行 `flutter pub get`、`flutter run -d emulator-5554`。
 
+真机正式构建可在编译时指定默认后端地址：
+
+```powershell
+flutter build apk --release `
+  --dart-define=FOOTGUARD_BACKEND_URL=http://192.168.1.6:8000
+```
+
+正式版设置页始终允许修改和检测后端地址，但不显示模拟数据源或 CSV 回放。只有显式增加 `--dart-define=FOOTGUARD_DIAGNOSTIC_REPLAY=true` 时才显示诊断回放入口。
+
 ## 页面
 
 - 首页：项目能力与监测入口；
@@ -16,7 +25,7 @@
 
 ## 马达提醒演示
 
-在设置中选择 `Mock 实时生成` 和 `left_load_bias` 或 `right_load_bias`，保持 FastAPI 运行。持续偏载达到后端警告窗口后，实时页显示 `double · 800 ms` 命令；点击“模拟执行”会向 `/api/v1/ack` 回传执行成功。
+诊断模式可选择 `Mock 实时生成` 和 `left_load_bias` 或 `right_load_bias`。持续偏载达到等级 2 时只播报准确风险名称；达到等级 3 后，实时页显示风险侧 `long · 1500 ms` 单次命令，点击“模拟执行”会向 `/api/v1/ack` 回传执行成功。
 
 压力显示依据足内载荷占比、左右镜像同区差异和个人动态基线，不直接使用与体重相关的原始压力固定阈值。温度显示同时给出 T1～T4 的实际位置和左右同区温差。
 

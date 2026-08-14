@@ -8,6 +8,7 @@ import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/device_ack.dart';
 import '../models/foot_frame.dart';
+import '../models/gait_summary.dart';
 import '../models/regional_analysis.dart';
 import '../models/risk_state.dart';
 import '../models/session_advice.dart';
@@ -23,6 +24,7 @@ class RealtimeSnapshot {
     this.motionState = 'unavailable',
     this.leftMotionState = 'unavailable',
     this.rightMotionState = 'unavailable',
+    this.gait = const GaitSummary.insufficient(),
     this.pressureAvailable = false,
     this.temperatureAvailable = false,
     required this.risk,
@@ -39,6 +41,7 @@ class RealtimeSnapshot {
   final String motionState;
   final String leftMotionState;
   final String rightMotionState;
+  final GaitSummary gait;
   final bool pressureAvailable;
   final bool temperatureAvailable;
   final RiskState risk;
@@ -61,6 +64,9 @@ class RealtimeSnapshot {
         leftMotionState: json['left_motion_state'] as String? ?? 'unavailable',
         rightMotionState:
             json['right_motion_state'] as String? ?? 'unavailable',
+        gait: json['gait'] == null
+            ? const GaitSummary.insufficient()
+            : GaitSummary.fromJson(json['gait'] as Map<String, dynamic>),
         pressureAvailable: json['pressure_available'] as bool? ?? false,
         temperatureAvailable: json['temperature_available'] as bool? ?? false,
         risk: RiskState.fromJson(json['risk'] as Map<String, dynamic>),

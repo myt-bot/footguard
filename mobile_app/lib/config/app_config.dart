@@ -5,6 +5,11 @@ const diagnosticReplayEnabled = bool.fromEnvironment(
   defaultValue: false,
 );
 
+const defaultBackendUrl = String.fromEnvironment(
+  'FOOTGUARD_BACKEND_URL',
+  defaultValue: 'http://10.0.2.2:8000',
+);
+
 bool isValidBackendUrl(String value) {
   final uri = Uri.tryParse(value.trim());
   return uri != null &&
@@ -37,7 +42,7 @@ class CsvReplayOption {
 
 class AppSettings {
   const AppSettings({
-    this.backendUrl = 'http://10.0.2.2:8000',
+    this.backendUrl = defaultBackendUrl,
     this.dataMode = FootDataMode.ble,
     this.mockScenario = 'normal_stand',
     this.csvAsset = 'assets/sample_data/intervention_recovery.csv',

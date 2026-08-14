@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, Float, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -16,7 +16,10 @@ class Base(DeclarativeBase):
 
 class SensorFrame(Base):
     __tablename__ = "sensor_frames"
-    __table_args__ = (UniqueConstraint("device_id", "sync_id", "packet_seq"),)
+    __table_args__ = (
+        UniqueConstraint("device_id", "sync_id", "packet_seq"),
+        Index("ix_sensor_frames_side_timestamp_ms", "side", "timestamp_ms"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     protocol_version: Mapped[int] = mapped_column(Integer)

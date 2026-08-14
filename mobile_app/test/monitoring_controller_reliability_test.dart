@@ -46,6 +46,7 @@ FootFrame _frame(
   String side,
   int timestampMs, {
   int packetSeq = 3,
+  List<double> pressure = const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
 }) {
   return FootFrame(
     protocolVersion: 1,
@@ -55,7 +56,7 @@ FootFrame _frame(
     syncId: 9,
     packetSeq: packetSeq,
     timestampMs: timestampMs,
-    pressure: const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+    pressure: pressure,
     temperature: const [30.1, 30.2, 30.3, 30.4],
     imu: const ImuData(
       ax: 0,
@@ -315,6 +316,79 @@ void main() {
     await controller.refreshBackend();
     expect(controller.backendOnline, isTrue);
     expect(uploadCount, 1);
+    controller.dispose();
+  });
+
+  test('healthy backend still follows the local calibration speech stage',
+      () async {
+    final client = MockClient((request) async {
+      if (request.url.path == '/health') {
+        return http.Response(
+          jsonEncode({'status': 'ok', 'server_time_ms': 1000}),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/realtime') {
+        return http.Response(
+          jsonEncode({
+            'left': null,
+            'right': null,
+            'paired_timestamp_ms': null,
+            'load_bias': null,
+            'load_diff': null,
+            'sync_error_ms': null,
+            'risk': {
+              'risk_type': 'data_incomplete',
+              'risk_side': 'none',
+              'risk_level': 0,
+              'duration_ms': 0,
+            },
+            'regional_analysis': null,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/command/pending') {
+        return http.Response(jsonEncode({'command': null}), 200);
+      }
+      if (request.url.path.startsWith('/api/v1/sensor/')) {
+        return http.Response(
+          jsonEncode({'accepted': 2, 'rejected': 0}),
+          200,
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final source = _FakeFootDataSource();
+    final controller = MonitoringController(
+      source: source,
+      api: FootGuardApiClient(baseUrl: 'http://footguard.test', client: client),
+    );
+    await controller.start();
+    source.emitConnections(const FootConnectionSnapshot(
+      left: FootConnectionStatus.connected,
+      right: FootConnectionStatus.connected,
+    ));
+
+    for (var packetSeq = 0; packetSeq <= 136; packetSeq += 1) {
+      final timestamp = 100000 + packetSeq * 200;
+      source.emitFrame(_frame(
+        'left',
+        timestamp,
+        packetSeq: packetSeq,
+        pressure: const [0, 0, 0, 0, 0, 0],
+      ));
+      source.emitFrame(_frame(
+        'right',
+        timestamp + 10,
+        packetSeq: packetSeq,
+        pressure: const [0, 0, 0, 0, 0, 0],
+      ));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(controller.backendOnline, isTrue);
+    expect(controller.calibrationStage, 'put_on');
     controller.dispose();
   });
 }

@@ -169,6 +169,15 @@ class AiChatResponse(StrictModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class GaitSummary(StrictModel):
+    state: Literal["stationary", "walking", "insufficient_data"]
+    window_ms: int = Field(ge=0)
+    step_count: int = Field(ge=0)
+    left_steps: int = Field(ge=0)
+    right_steps: int = Field(ge=0)
+    cadence_spm: float | None = Field(default=None, ge=0)
+
+
 class RealtimeResponse(StrictModel):
     left: FootFrame | None
     right: FootFrame | None
@@ -179,6 +188,15 @@ class RealtimeResponse(StrictModel):
     motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
     left_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
     right_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    gait: GaitSummary = Field(
+        default_factory=lambda: GaitSummary(
+            state="insufficient_data",
+            window_ms=0,
+            step_count=0,
+            left_steps=0,
+            right_steps=0,
+        )
+    )
     pressure_available: bool = False
     temperature_available: bool = False
     risk: RiskState

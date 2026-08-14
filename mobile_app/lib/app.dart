@@ -11,6 +11,7 @@ import 'screens/realtime_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/app_settings_store.dart';
 import 'services/ble_connection_service.dart';
+import 'services/calibration_speech_coordinator.dart';
 import 'services/local_tts_service.dart';
 
 class FootGuardApp extends StatefulWidget {
@@ -25,9 +26,12 @@ class FootGuardApp extends StatefulWidget {
 class _FootGuardAppState extends State<FootGuardApp> {
   AppSettings settings = const AppSettings();
   int selectedIndex = 0;
+  int _calibrationEpoch = 0;
   late final BleConnectionService _bleConnectionService;
   late final AppSettingsStore _settingsStore;
   late final TtsSpeaker _ttsSpeaker;
+  final CalibrationSpeechCoordinator _calibrationSpeech =
+      CalibrationSpeechCoordinator();
 
   @override
   void initState() {
@@ -57,6 +61,14 @@ class _FootGuardAppState extends State<FootGuardApp> {
     setState(() => settings = next);
     unawaited(_saveSettings(next));
     unawaited(_synchronizeConnectedDeviceClocks());
+  }
+
+  void _handleCalibrationReset() {
+    _calibrationSpeech.start();
+    setState(() {
+      _calibrationEpoch += 1;
+      selectedIndex = 1;
+    });
   }
 
   Future<int> _backendUnixTimeMs() async {
@@ -139,11 +151,12 @@ class _FootGuardAppState extends State<FootGuardApp> {
             ),
             RealtimeScreen(
               key: ValueKey(
-                '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.csvAsset}-${settings.replaySpeed}',
+                '${settings.backendUrl}-${settings.dataMode}-${settings.mockScenario}-${settings.csvAsset}-${settings.replaySpeed}-$_calibrationEpoch',
               ),
               settings: settings,
               connectionService: _bleConnectionService,
               ttsSpeaker: _ttsSpeaker,
+              calibrationSpeech: _calibrationSpeech,
             ),
             HistoryScreen(
               key: ValueKey(settings.backendUrl),
@@ -157,6 +170,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
             SettingsScreen(
               settings: settings,
               onChanged: _applySettings,
+              onCalibrationReset: _handleCalibrationReset,
               ttsSpeaker: _ttsSpeaker,
             ),
           ],

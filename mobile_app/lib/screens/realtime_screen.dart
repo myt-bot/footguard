@@ -11,6 +11,7 @@ import '../data/foot_data_source.dart';
 import '../data/mock_foot_data_source.dart';
 import '../services/ble_connection_service.dart';
 import '../services/ble_command_bridge.dart';
+import '../services/calibration_speech_coordinator.dart';
 import '../services/monitoring_controller.dart';
 import '../services/risk_notification_service.dart';
 import '../services/local_tts_service.dart';
@@ -24,10 +25,12 @@ class RealtimeScreen extends StatefulWidget {
     required this.settings,
     required this.connectionService,
     required this.ttsSpeaker,
+    required this.calibrationSpeech,
   });
   final AppSettings settings;
   final BleConnectionService connectionService;
   final TtsSpeaker ttsSpeaker;
+  final CalibrationSpeechCoordinator calibrationSpeech;
 
   @override
   State<RealtimeScreen> createState() => _RealtimeScreenState();
@@ -39,7 +42,6 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   final RiskNotificationService _notifications = RiskNotificationService();
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   int _handledNoticeSequence = 0;
-  String? _spokenCalibrationStage;
 
   FootDataSource _source(FootGuardApiClient api) =>
       switch (widget.settings.dataMode) {
@@ -85,13 +87,11 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   void _handleCalibrationSpeech() {
     if (!widget.settings.voiceEnabled || !controller.bothFeetConnected) return;
     final stage = controller.calibrationStage;
-    if (_spokenCalibrationStage == stage) return;
-    _spokenCalibrationStage = stage;
+    if (!widget.calibrationSpeech.take(stage)) return;
     final message = switch (stage) {
-      'empty_reference' => '请保持双脚离开鞋垫，开始空载参考采集。',
-      'put_on' => '空载参考完成，请穿好双脚。',
-      'standing_baseline' => '请开始自然站立，采集本次穿戴基线。',
-      'complete' => '本次穿戴基线已完成。',
+      'empty_reference' => '请保持双脚离开鞋垫，开始空载温度采集。',
+      'put_on' => '空载温度采集完成，现在可以穿鞋，并自然站立开始个人基线采集。',
+      'complete' => '个人基线采集完成，本次穿戴已就绪。',
       _ => null,
     };
     if (message != null) unawaited(widget.ttsSpeaker.speak(message));
@@ -167,13 +167,15 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   }
 
   Future<void> _restartCalibration() async {
+    widget.calibrationSpeech.start();
     try {
       await controller.restartWearingCalibration();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已开始本次穿戴标定，请双脚平行自然站稳约 8–12 秒')),
+        const SnackBar(content: Text('已开始空载温度采集，请保持双脚完全离开鞋垫')),
       );
     } catch (_) {
+      widget.calibrationSpeech.cancel();
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('标定启动失败，请确认后端已连接')));
@@ -229,6 +231,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             const SizedBox(height: 10),
             _WearingCalibrationCard(
               status: controller.calibrationStatus,
+              stage: controller.calibrationStage,
               backendOnline: controller.backendOnline,
               resetting: controller.calibrationResetting,
               onRestart: _restartCalibration,
@@ -238,14 +241,6 @@ class _RealtimeScreenState extends State<RealtimeScreen>
               Text(
                 controller.errorMessage!,
                 style: const TextStyle(color: Color(0xFFB54A42)),
-              ),
-            ],
-            if (controller.backendOnline &&
-                controller.syncWarningMessage != null) ...[
-              const SizedBox(height: 10),
-              Text(
-                controller.syncWarningMessage!,
-                style: const TextStyle(color: Color(0xFFA86612)),
               ),
             ],
             const SizedBox(height: 12),
@@ -399,12 +394,14 @@ class _RealtimeScreenState extends State<RealtimeScreen>
 class _WearingCalibrationCard extends StatelessWidget {
   const _WearingCalibrationCard({
     required this.status,
+    required this.stage,
     required this.backendOnline,
     required this.resetting,
     required this.onRestart,
   });
 
   final CalibrationStatus? status;
+  final String stage;
   final bool backendOnline;
   final bool resetting;
   final Future<void> Function() onRestart;
@@ -419,6 +416,32 @@ class _WearingCalibrationCard extends StatelessWidget {
         'moving' => '身体移动较大，请保持自然站立',
         'unstable' => '数据波动较大，请放松并保持站稳',
         _ => '等待双脚有效压力数据',
+      };
+
+  String get _progressReason {
+    final current = status;
+    if (current == null || current.baselineReady) return _reason;
+    if (current.sampleCount >= current.requiredSamples) {
+      return '最低样本数已达到，正在校验承重稳定性，请继续自然站立';
+    }
+    return _reason;
+  }
+
+  String get _stageTitle => switch (stage) {
+        'empty_reference' => '步骤 1：空载温度采集',
+        'put_on' => '步骤 2：请穿鞋并自然站立',
+        'standing_baseline' =>
+          '步骤 2：个人基线 ${status?.sampleCount ?? 0}/${status?.requiredSamples ?? 40}',
+        'complete' => '本次穿戴已就绪',
+        _ => '本次穿戴标定',
+      };
+
+  String get _stageReason => switch (stage) {
+        'empty_reference' => '请保持双脚完全离开鞋垫，空载完成后会立即语音提示',
+        'put_on' => '空载温度已完成，现在可以穿鞋并开始个人基线采集',
+        'standing_baseline' => _progressReason,
+        'complete' => '个人基线已锁定，风险识别与马达提醒已启用',
+        _ => _progressReason,
       };
 
   String get _temperatureReason {
@@ -445,8 +468,6 @@ class _WearingCalibrationCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ready = status?.baselineReady ?? false;
     final progress = status?.progress ?? 0.0;
-    final count = status?.sampleCount ?? 0;
-    final required = status?.requiredSamples ?? 40;
     final color = ready ? const Color(0xFF168A70) : const Color(0xFF39758C);
     return Card(
       elevation: 0,
@@ -470,7 +491,7 @@ class _WearingCalibrationCard extends StatelessWidget {
                     ),
                     const SizedBox(width: 9),
                     Text(
-                      ready ? '本次穿戴已就绪' : '本次穿戴标定 $count/$required',
+                      _stageTitle,
                       style: const TextStyle(fontWeight: FontWeight.w800),
                     ),
                   ],
@@ -496,7 +517,7 @@ class _WearingCalibrationCard extends StatelessWidget {
             ),
             const SizedBox(height: 7),
             Text(
-              _reason,
+              _stageReason,
               style: const TextStyle(color: Color(0xFF63757B), fontSize: 12),
             ),
             const SizedBox(height: 5),
@@ -547,6 +568,9 @@ class _MetricsCard extends StatelessWidget {
                 label: '右脚运动',
                 value: controller.footMotionStatusLabel('right'),
               ),
+              _Metric(label: '基础步态', value: controller.gaitStatusLabel),
+              _Metric(label: '近12秒落脚', value: controller.gaitStepLabel),
+              _Metric(label: '估算步频', value: controller.gaitCadenceLabel),
               _Metric(
                   label: '后端', value: controller.backendOnline ? '在线' : '离线'),
               _Metric(label: '数据源', value: controller.source.label),

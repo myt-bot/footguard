@@ -49,7 +49,11 @@ BASELINE_MIN_SAMPLES = 40
 BASELINE_CALIBRATION_WINDOW_SAMPLES = 60
 CALIBRATION_SAMPLE_INTERVAL_MS = 200
 BASELINE_STABLE_GAP_MS = 1_500
-BASELINE_MIN_FOOT_PRESSURE = 0.08
+# A low-sensitivity handmade insole can report about 0.066 total pressure on
+# one foot during a valid bilateral stance. Keep this below the runtime risk
+# load floor; multi-channel contact, balance, motion and stability checks still
+# prevent unloaded residuals from becoming a baseline.
+BASELINE_MIN_FOOT_PRESSURE = 0.04
 # Pressure risks require meaningful loading. Temperature becomes independent
 # of loading only after the empty reference and wearing baseline are locked.
 RISK_MIN_TOTAL_PRESSURE = 0.08
@@ -75,7 +79,18 @@ IMU_ACCEL_STATIONARY_TOLERANCE_MS2 = 3.0
 # Use a lower gyro threshold and compare consecutive vectors in risk_service.
 IMU_GYRO_STATIONARY_THRESHOLD_DPS = 12.0
 IMU_ACCEL_DELTA_MOVING_MS2 = 0.75
-IMU_MOTION_HOLD_MS = 3_000
+IMU_MOTION_HOLD_MS = 1_500
+# Conservative gait observation from bilateral load transfer plus MPU motion.
+# These values describe an engineering prototype, not clinical gait criteria.
+GAIT_ANALYSIS_WINDOW_MS = 12_000
+GAIT_MIN_WINDOW_MS = 4_000
+GAIT_LOAD_SHIFT_THRESHOLD = 0.50
+GAIT_MAX_ADAPTIVE_THRESHOLD = 1.00
+GAIT_STEP_REFRACTORY_MS = 250
+GAIT_MIN_STEP_CANDIDATES = 4
+GAIT_MIN_MOVING_RATIO = 0.35
+GAIT_MIN_CADENCE_SPM = 20.0
+GAIT_MAX_CADENCE_SPM = 180.0
 BASELINE_LOAD_BIAS_INLIER_TOLERANCE = 0.20
 BASELINE_DISTRIBUTION_INLIER_TOLERANCE = 0.25
 BASELINE_TEMPERATURE_INLIER_TOLERANCE_C = 1.5
@@ -109,11 +124,7 @@ PERSISTENT_AFTER_MS = 20_000
 TEMPERATURE_ATTENTION_AFTER_MS = 8_000
 TEMPERATURE_WARNING_AFTER_MS = 15_000
 TEMPERATURE_PERSISTENT_AFTER_MS = 30_000
-MOTOR_COMMAND_LEVEL = 2
-MOTOR_WARNING_PATTERN = "double"
-MOTOR_WARNING_DURATION_MS = 800
-MOTOR_TEMPERATURE_PATTERN = "short"
-MOTOR_TEMPERATURE_DURATION_MS = 500
+MOTOR_COMMAND_LEVEL = 3
 MOTOR_PERSISTENT_PATTERN = "long"
 MOTOR_PERSISTENT_DURATION_MS = 1_500
 # Human-facing competition demo: leave enough time for the App polling cycle

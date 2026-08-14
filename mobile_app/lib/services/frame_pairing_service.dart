@@ -1,28 +1,26 @@
 import '../models/foot_frame.dart';
 
 class FramePairingService {
-  FootFrame? _left;
-  FootFrame? _right;
+  static const _maxPendingKeys = 128;
+  final Map<(int, int), Map<String, FootFrame>> _pending = {};
 
   List<FootFrame>? add(FootFrame frame) {
-    if (frame.side == 'left') {
-      _left = frame;
-    } else {
-      _right = frame;
+    final key = (frame.syncId, frame.packetSeq);
+    final frames = _pending.putIfAbsent(key, () => {});
+    frames[frame.side] = frame;
+    while (_pending.length > _maxPendingKeys) {
+      _pending.remove(_pending.keys.first);
     }
-    final left = _left;
-    final right = _right;
+
+    final left = frames['left'];
+    final right = frames['right'];
     if (left == null || right == null) {
       return null;
     }
-    if (left.syncId != right.syncId || left.packetSeq != right.packetSeq) {
-      return null;
-    }
+    _pending.remove(key);
     if ((left.timestampMs - right.timestampMs).abs() > 50) {
       return null;
     }
-    _left = null;
-    _right = null;
     return [left, right];
   }
 }

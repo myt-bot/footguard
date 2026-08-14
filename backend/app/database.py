@@ -30,6 +30,13 @@ def create_database(url: str) -> tuple[Engine, sessionmaker[Session]]:
             },
         }
         with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_sensor_frames_side_timestamp_ms "
+                    "ON sensor_frames (side, timestamp_ms)"
+                )
+            )
             for table, table_migrations in migrations.items():
                 columns = {column["name"] for column in inspect(engine).get_columns(table)}
                 for column, definition in table_migrations.items():

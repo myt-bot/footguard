@@ -12,6 +12,7 @@ from backend.app.services.risk_service import (
     _current_risks,
     _empty_baseline,
     _empty_temperature_reference,
+    _gait_summary,
     _pressure_metric_from_window,
     _prebaseline_residual_suspect_channels,
     _regional_analysis,
@@ -106,6 +107,34 @@ def test_20_hz_frames_need_about_eight_seconds_to_build_baseline() -> None:
     assert before_eight_seconds.sample_count == 39
     assert after_eight_seconds.ready is True
     assert after_eight_seconds.sample_count == BASELINE_MIN_SAMPLES
+
+
+def test_low_load_multipoint_stance_can_build_personal_baseline() -> None:
+    metrics = [
+        _metric(index, left_total=0.0855, right_total=0.066)
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+
+    baseline = _baseline_profile(metrics)
+
+    assert baseline.ready is True
+    assert baseline.sample_count == BASELINE_MIN_SAMPLES
+
+
+def test_low_load_floor_still_rejects_unloaded_multipoint_residuals() -> None:
+    uniform = (1 / 6,) * 6
+    metrics = [
+        _metric(
+            index,
+            left_total=0.039,
+            right_total=0.039,
+            left_distribution=uniform,
+            right_distribution=uniform,
+        )
+        for index in range(BASELINE_MIN_SAMPLES)
+    ]
+
+    assert _baseline_profile(metrics).ready is False
 
 
 def test_20_hz_empty_reference_keeps_warmup_and_200_ms_sampling() -> None:
@@ -539,6 +568,43 @@ def test_moving_samples_do_not_train_personal_baseline() -> None:
     assert _baseline_profile(stationary).ready is True
     # Systems without a valid MPU keep the existing pressure-only behavior.
     assert _baseline_profile(unavailable).ready is True
+
+
+def test_gait_summary_detects_alternating_load_transfer() -> None:
+    metrics = []
+    for index in range(61):
+        phase = (index // 3) % 2
+        metrics.append(
+            replace(
+                _metric(
+                    index,
+                    left_total=0.45 if phase == 0 else 0.10,
+                    right_total=0.10 if phase == 0 else 0.45,
+                    motion_state="moving",
+                ),
+                log_load_ratio=1.50 if phase == 0 else -1.50,
+            )
+        )
+
+    baseline = replace(
+        _empty_baseline(), ready=True, load_ratio=0.0, load_ratio_mad=0.05
+    )
+    gait = _gait_summary(metrics, baseline)
+
+    assert gait.state == "walking"
+    assert gait.step_count >= 18
+    assert abs(gait.left_steps - gait.right_steps) <= 1
+    assert gait.cadence_spm == pytest.approx(100.0, abs=0.1)
+
+
+def test_gait_summary_reports_stationary_without_false_steps() -> None:
+    metrics = [_metric(index, motion_state="stationary") for index in range(31)]
+
+    gait = _gait_summary(metrics, _empty_baseline())
+
+    assert gait.state == "stationary"
+    assert gait.step_count == 0
+    assert gait.cadence_spm is None
 
 
 def test_discontinuous_standing_samples_do_not_form_a_baseline() -> None:

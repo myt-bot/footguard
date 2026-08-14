@@ -98,10 +98,9 @@ def test_normal_scenarios_do_not_create_alarm_or_motor_command(
 @pytest.mark.parametrize(
     ("scenario", "risk_type", "side", "pattern", "duration_ms", "expected_level"),
     [
-        ("left_load_bias", "left_load_bias", "left", "double", 800, 3),
-        ("right_load_bias", "right_load_bias", "right", "double", 800, 3),
+        ("left_load_bias", "left_load_bias", "left", "long", 1_500, 3),
+        ("right_load_bias", "right_load_bias", "right", "long", 1_500, 3),
         ("left_forefoot_high", "forefoot_high", "left", "long", 1_500, 3),
-        ("left_temperature_rise", "temperature_asymmetry", "left", "short", 500, 2),
     ],
 )
 def test_sustained_risk_creates_one_event_and_motor_vibration_command(
@@ -127,6 +126,19 @@ def test_sustained_risk_creates_one_event_and_motor_vibration_command(
         assert command.pattern == pattern
         assert command.duration_ms == duration_ms
         assert command.reason_code == risk_type
+
+
+def test_level_two_temperature_risk_does_not_create_motor_command(
+    client: TestClient, app
+) -> None:
+    calibrate(client)
+    result = upload(client, scenario_frames("left_temperature_rise"))
+    assert result["latest_risk"] == "temperature_asymmetry"
+    with app.state.session_factory() as session:
+        event = session.scalar(select(RiskEvent))
+        assert event.risk_level == 2
+        assert event.risk_side == "left"
+        assert session.scalar(select(func.count()).select_from(Command)) == 0
 
 
 def test_pressure_observation_state_does_not_create_formal_event(
@@ -273,7 +285,7 @@ def test_replaying_same_risk_does_not_duplicate_event_or_command(client: TestCli
         assert session.scalar(select(func.count()).select_from(Command)) == 1
 
 
-def test_warning_escalation_uses_distinct_double_then_long_patterns(
+def test_motor_waits_for_persistent_level_and_runs_once(
     client: TestClient,
     app,
 ) -> None:
@@ -293,29 +305,24 @@ def test_warning_escalation_uses_distinct_double_then_long_patterns(
         session.commit()
 
         warning = ensure_motor_command(session, event, 2)
-        repeated_warning = ensure_motor_command(session, event, 2)
         persistent = ensure_motor_command(session, event, 3)
         repeated_persistent = ensure_motor_command(session, event, 3)
 
-        assert warning is not None
-        assert warning.pattern == "double"
-        assert warning.duration_ms == 800
-        assert repeated_warning.command_id == warning.command_id
+        assert warning is None
         assert persistent is not None
         assert persistent.pattern == "long"
         assert persistent.duration_ms == 1_500
-        assert persistent.command_id != warning.command_id
         assert repeated_persistent.command_id == persistent.command_id
-        assert session.scalar(select(func.count()).select_from(Command)) == 2
+        assert session.scalar(select(func.count()).select_from(Command)) == 1
 
 
-def test_combined_motor_uses_side_union_and_risk_pattern_priority(app) -> None:
+def test_combined_motor_uses_persistent_side_union_once(app) -> None:
     with app.state.session_factory() as session:
         event = RiskEvent(
             event_id="evt_combined_motor",
             risk_type="forefoot_high",
             risk_side="both",
-            risk_level=2,
+            risk_level=3,
             started_at_ms=1,
             duration_ms=7_600,
             status="active",
@@ -330,13 +337,13 @@ def test_combined_motor_uses_side_union_and_risk_pattern_priority(app) -> None:
                 RiskState(
                     risk_type="right_load_bias",
                     risk_side="right",
-                    risk_level=2,
+                    risk_level=3,
                     duration_ms=7_600,
                 ),
                 RiskState(
                     risk_type="forefoot_high",
                     risk_side="left",
-                    risk_level=2,
+                    risk_level=3,
                     duration_ms=7_200,
                 ),
             ],
@@ -349,13 +356,13 @@ def test_combined_motor_uses_side_union_and_risk_pattern_priority(app) -> None:
         assert command.reason_code == "forefoot_high"
 
 
-def test_temperature_motor_targets_hotter_side_with_short_pattern(app) -> None:
+def test_temperature_motor_targets_hotter_side_once_at_persistent_level(app) -> None:
     with app.state.session_factory() as session:
         event = RiskEvent(
             event_id="evt_temperature_motor",
             risk_type="temperature_asymmetry",
             risk_side="right",
-            risk_level=2,
+            risk_level=3,
             started_at_ms=1,
             duration_ms=6_000,
             status="active",
@@ -370,7 +377,7 @@ def test_temperature_motor_targets_hotter_side_with_short_pattern(app) -> None:
                 RiskState(
                     risk_type="temperature_asymmetry",
                     risk_side="right",
-                    risk_level=2,
+                    risk_level=3,
                     duration_ms=6_000,
                 )
             ],
@@ -378,8 +385,8 @@ def test_temperature_motor_targets_hotter_side_with_short_pattern(app) -> None:
 
         assert command is not None
         assert command.target == "right"
-        assert command.pattern == "short"
-        assert command.duration_ms == 500
+        assert command.pattern == "long"
+        assert command.duration_ms == 1_500
 
 
 def test_new_sync_window_creates_a_new_motor_reminder(
@@ -454,11 +461,10 @@ def test_duplicate_motor_ack_is_idempotent(client: TestClient, app) -> None:
 
 def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> None:
     calibrate(client)
-    frames = scenario_frames("intervention_recovery")
-    split = 130  # first 13 seconds contain the sustained-bias phase
-    upload(client, frames[:split])
+    risk_frames = scenario_frames("left_load_bias")
+    upload(client, risk_frames)
     pending = client.get("/api/v1/command/pending?target=left").json()["command"]
-    assert pending["pattern"] == "double"
+    assert pending["pattern"] == "long"
     now_ms = int(time() * 1000)
     ack = {
         "protocol_version": 1,
@@ -470,7 +476,16 @@ def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> 
         "error_code": "none",
     }
     assert client.post("/api/v1/ack", json=ack).status_code == 200
-    upload(client, frames[split:])
+    recovery_frames = scenario_frames("normal_stand")
+    timestamp_shift = (
+        max(frame["timestamp_ms"] for frame in risk_frames)
+        - min(frame["timestamp_ms"] for frame in recovery_frames)
+        + 1_000
+    )
+    for frame in recovery_frames:
+        frame["sync_id"] += 1_000
+        frame["timestamp_ms"] += timestamp_shift
+    upload(client, recovery_frames)
     with app.state.session_factory() as session:
         event = session.scalar(select(RiskEvent))
         feedback = session.scalar(select(InterventionFeedback))

@@ -12,6 +12,7 @@ class LocalRiskResult {
     required this.loadBias,
     required this.loadDiff,
     required this.calibrationStage,
+    this.motionState = 'unavailable',
     this.motorTarget,
     this.motorPattern,
     this.temperatureOffsetStatus = const [
@@ -31,6 +32,7 @@ class LocalRiskResult {
   final double? loadBias;
   final double? loadDiff;
   final String calibrationStage;
+  final String motionState;
   final String? motorTarget;
   final String? motorPattern;
   final List<String> temperatureOffsetStatus;
@@ -39,13 +41,17 @@ class LocalRiskResult {
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v5-200ms-calibration';
+  static const ruleVersion = 'local-rules-v6-low-load-baseline';
   static const requiredSamples = 40;
   static const emptyRequiredSamples = 60;
   static const emptyWarmupMs = 15000;
   static const calibrationSampleIntervalMs = 200;
-  static const _contactFloor = 0.01;
-  static const _minimumFootLoad = 0.08;
+  static const _baselineContactFloor = 0.005;
+  static const _baselineMinimumFootLoad = 0.04;
+  static const _baselineMinimumActiveChannels = 3;
+  static const _runtimeContactFloor = 0.01;
+  static const _runtimeMinimumCombinedLoad = 0.08;
+  static const _runtimeMinimumActiveChannels = 2;
   static const _pressureAttentionMs = 5000;
   static const _pressureWarningMs = 10000;
   static const _pressurePersistentMs = 20000;
@@ -217,16 +223,22 @@ class LocalRiskEngine {
       reset();
     }
     final timestamp = math.max(left.timestampMs, right.timestampMs);
+    final motionState =
+        _stationary(left) && _stationary(right) ? 'stationary' : 'moving';
     final leftTotal = _validTotal(left);
     final rightTotal = _validTotal(right);
-    final contact = _hasContact(left) && _hasContact(right);
+    final baselineContact =
+        _hasBaselineContact(left) && _hasBaselineContact(right);
+    final runtimeContact =
+        leftTotal + rightTotal >= _runtimeMinimumCombinedLoad &&
+            (_hasRuntimeContact(left) || _hasRuntimeContact(right));
     final pressureAvailable =
         _validCount(left, 6, false) >= 4 && _validCount(right, 6, false) >= 4;
     final loadRatio = math.log((leftTotal + 1e-6) / (rightTotal + 1e-6));
     final leftForefoot = _forefootRatio(left);
     final rightForefoot = _forefootRatio(right);
 
-    if (!_emptyTemperatureReferenceReady && !_wearingSeen && !contact) {
+    if (!_emptyTemperatureReferenceReady && !_wearingSeen && !baselineContact) {
       _emptyStartedAtMs ??= timestamp;
       if (timestamp - _emptyStartedAtMs! >= emptyWarmupMs &&
           _calibrationSampleDue(timestamp, _lastEmptySampleAtMs)) {
@@ -237,14 +249,14 @@ class LocalRiskEngine {
         }
       }
     }
-    if (contact) {
+    if (baselineContact) {
       _wearingSeen = true;
     }
 
     if (!baselineReady &&
         left.pressureChannelsValid &&
         right.pressureChannelsValid &&
-        contact &&
+        baselineContact &&
         _stationary(left) &&
         _stationary(right) &&
         _calibrationSampleDue(timestamp, _lastBaselineSampleAtMs)) {
@@ -303,6 +315,7 @@ class LocalRiskEngine {
         loadBias: baselineReady ? loadRatio - _baselineLoadRatio! : null,
         loadDiff: (leftTotal - rightTotal).abs(),
         calibrationStage: calibrationStage,
+        motionState: motionState,
         temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
         temperatureRiskEnabled: false,
         temperatureRiskReason: 'baseline_not_ready',
@@ -346,7 +359,7 @@ class LocalRiskEngine {
       );
     }
     final adjustedBias = loadRatio - _baselineLoadRatio!;
-    if (pressureAvailable && contact) {
+    if (pressureAvailable && runtimeContact) {
       candidates['bias'] = (
         type: adjustedBias >= 0 ? 'left_load_bias' : 'right_load_bias',
         side: adjustedBias >= 0 ? 'left' : 'right',
@@ -417,16 +430,14 @@ class LocalRiskEngine {
         : active.first;
     String? target;
     String? pattern;
-    final motorRisks = active.where((item) => item.riskLevel >= 3).toList();
+    final motorRisks = motionState == 'stationary'
+        ? active.where((item) => item.riskLevel >= 3).toList()
+        : <RiskState>[];
     if (motorRisks.isNotEmpty) {
       final sides = motorRisks.map((item) => item.riskSide).toSet();
       target =
           sides.length > 1 || sides.contains('both') ? 'both' : sides.first;
-      pattern = motorRisks.any((item) => item.riskType == 'forefoot_high')
-          ? 'long'
-          : motorRisks.any((item) => item.riskType.contains('load_bias'))
-              ? 'double'
-              : 'short';
+      pattern = 'long';
       final signature = motorRisks
           .map((item) => '${item.riskType}:${item.riskSide}')
           .join('|');
@@ -452,6 +463,7 @@ class LocalRiskEngine {
       loadBias: adjustedBias,
       loadDiff: (leftTotal - rightTotal).abs(),
       calibrationStage: calibrationStage,
+      motionState: motionState,
       motorTarget: target,
       motorPattern: pattern,
       temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
@@ -526,15 +538,21 @@ class LocalRiskEngine {
             frame.pressureChannelValid(index) ? frame.pressure[index] : 0.0,
       ).fold(0.0, (sum, value) => sum + value);
 
-  static bool _hasContact(FootFrame frame) =>
-      _validTotal(frame) >= _minimumFootLoad &&
+  static bool _hasBaselineContact(FootFrame frame) =>
+      _validTotal(frame) >= _baselineMinimumFootLoad &&
+      _activePressureChannels(frame, _baselineContactFloor) >=
+          _baselineMinimumActiveChannels;
+
+  static bool _hasRuntimeContact(FootFrame frame) =>
+      _activePressureChannels(frame, _runtimeContactFloor) >=
+      _runtimeMinimumActiveChannels;
+
+  static int _activePressureChannels(FootFrame frame, double floor) =>
       List.generate(
-            6,
-            (index) =>
-                frame.pressureChannelValid(index) &&
-                frame.pressure[index] >= _contactFloor,
-          ).where((value) => value).length >=
-          2;
+        6,
+        (index) =>
+            frame.pressureChannelValid(index) && frame.pressure[index] >= floor,
+      ).where((value) => value).length;
 
   static double _forefootRatio(FootFrame frame) {
     final total = _validTotal(frame);
@@ -552,7 +570,7 @@ class LocalRiskEngine {
             4,
             (index) =>
                 frame.pressureChannelValid(index) &&
-                frame.pressure[index] >= _contactFloor,
+                frame.pressure[index] >= _runtimeContactFloor,
           ).where((value) => value).length >=
           2 &&
       List.generate(

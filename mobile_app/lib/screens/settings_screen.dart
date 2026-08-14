@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../data/api_client.dart';
 import '../services/local_tts_service.dart';
+import '../services/offline_monitoring_store.dart';
 
 typedef BackendHealthCheck = Future<bool> Function(String baseUrl);
 typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
@@ -19,6 +20,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.settings,
     required this.onChanged,
+    this.onCalibrationReset,
     this.healthCheck,
     this.calibrationStatusLoader,
     this.calibrationResetter,
@@ -27,6 +29,7 @@ class SettingsScreen extends StatefulWidget {
 
   final AppSettings settings;
   final ValueChanged<AppSettings> onChanged;
+  final VoidCallback? onCalibrationReset;
   final BackendHealthCheck? healthCheck;
   final CalibrationStatusLoader? calibrationStatusLoader;
   final CalibrationResetter? calibrationResetter;
@@ -76,7 +79,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _save() {
-    final urlError = diagnosticReplayEnabled ? _backendUrlError() : null;
+    final urlError = _backendUrlError();
     if (urlError != null) {
       setState(() {
         _backendStatus = urlError;
@@ -161,7 +164,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<CalibrationStatus> _defaultResetCalibration(String baseUrl) async {
     final api = FootGuardApiClient(baseUrl: baseUrl);
     try {
-      return await api.resetCalibration();
+      final status = await api.resetCalibration();
+      await OfflineMonitoringStore().clearBaseline();
+      return status;
     } finally {
       api.close();
     }
@@ -200,7 +205,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text('重新学习个人基线？'),
         content: const Text(
           '更换体验者或重新穿鞋后都需要重新建立本次穿戴基线。'
-          '确认后请双脚平行自然站立约 8–12 秒。'
+          '确认后先保持双脚完全离开鞋垫，完成空载温度采集；'
+          '听到提示后再穿鞋，并自然站立完成个人基线采集。'
           '重新校准不会删除历史事件，但会结束当前风险并使待执行马达命令失效。',
         ),
         actions: [
@@ -227,8 +233,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('已开始新体验者标定，请双脚平行自然站立')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已开始空载温度采集，请保持双脚完全离开鞋垫')),
+      );
+      widget.onCalibrationReset?.call();
     } catch (error) {
       if (!mounted) return;
       setState(() => _calibrationError = '重新校准失败：$error');
@@ -305,56 +313,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 12),
+        const _InfoPanel(
+          icon: Icons.cloud_outlined,
+          title: '后端连接',
+          body: '真机填写电脑局域网地址；该地址只控制数据上传、历史与 AI，不会切换 BLE 数据源。',
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: backend,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          onChanged: (_) => setState(() {
+            _backendStatus = null;
+            _backendOnline = false;
+            _calibrationStatus = null;
+            _calibrationError = null;
+          }),
+          decoration: InputDecoration(
+            labelText: 'FastAPI 后端地址',
+            helperText: '真机填写电脑局域网地址；模拟器可用 http://10.0.2.2:8000',
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              tooltip: '检测连接',
+              onPressed: _testingBackend ? null : _testBackend,
+              icon: _testingBackend
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.wifi_tethering_outlined),
+            ),
+          ),
+        ),
+        if (_backendStatus != null) ...[
+          const SizedBox(height: 8),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              _backendStatus!,
+              key: const ValueKey('backend-status'),
+              style: TextStyle(
+                color: _backendOnline
+                    ? const Color(0xFF147D73)
+                    : Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
         if (diagnosticReplayEnabled) ...[
-          const SizedBox(height: 12),
           const _InfoPanel(
             icon: Icons.build_circle_outlined,
             title: '隐藏诊断入口',
-            body: '仅用于联调后端和真实 CSV 回放，不是正式用户功能。',
+            body: '仅用于真实 CSV 回放，不是正式用户功能。',
           ),
           const SizedBox(height: 12),
-          TextField(
-            controller: backend,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            onChanged: (_) => setState(() {
-              _backendStatus = null;
-              _backendOnline = false;
-              _calibrationStatus = null;
-              _calibrationError = null;
-            }),
-            decoration: InputDecoration(
-              labelText: 'FastAPI 后端地址',
-              helperText: '真机填写电脑局域网地址；模拟器可用 http://10.0.2.2:8000',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                tooltip: '检测连接',
-                onPressed: _testingBackend ? null : _testBackend,
-                icon: _testingBackend
-                    ? const SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.wifi_tethering_outlined),
-              ),
-            ),
-          ),
-          if (_backendStatus != null) ...[
-            const SizedBox(height: 8),
-            Semantics(
-              liveRegion: true,
-              child: Text(
-                _backendStatus!,
-                key: const ValueKey('backend-status'),
-                style: TextStyle(
-                  color: _backendOnline
-                      ? const Color(0xFF147D73)
-                      : Theme.of(context).colorScheme.error,
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(height: 16),
         ],
         if (diagnosticReplayEnabled)
           DropdownButtonFormField<FootDataMode>(
@@ -474,8 +488,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ? '点击刷新，从后端读取当前学习进度。'
                       : _calibrationStatus!.baselineReady
                           ? '本次穿戴基线已完成，压力风险与马达已启用'
-                          : '学习中：${_calibrationStatus!.sampleCount}/'
-                              '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
+                          : _calibrationStatus!.sampleCount >=
+                                  _calibrationStatus!.requiredSamples
+                              ? '最低样本数已达到，正在校验承重稳定性，请继续自然站立'
+                              : '学习中：${_calibrationStatus!.sampleCount}/'
+                                  '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
                   key: const ValueKey('calibration-status'),
                 ),
                 if (_calibrationStatus != null &&
