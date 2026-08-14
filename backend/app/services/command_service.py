@@ -66,24 +66,24 @@ def ensure_combined_motor_command(
     )
     if existing_for_event is not None:
         return existing_for_event
-    sides = {risk.risk_side for risk in actionable if risk.risk_side in {"left", "right"}}
+    sides = {
+        side
+        for risk in actionable
+        for side in (
+            ("left", "right")
+            if risk.risk_side == "both"
+            else (risk.risk_side,)
+            if risk.risk_side in {"left", "right"}
+            else ()
+        )
+    }
     if not sides:
         return None
     target = "both" if sides == {"left", "right"} else next(iter(sides))
-    primary = next((risk for risk in actionable if risk.risk_type == "forefoot_high"), None)
-    primary = primary or next(
-        (
-            risk
-            for risk in actionable
-            if risk.risk_type in {"left_load_bias", "right_load_bias"}
-        ),
-        None,
-    )
-    primary = primary or next(
-        (risk for risk in actionable if risk.risk_type == "temperature_asymmetry"),
-        None,
-    )
-    primary = primary or actionable[0]
+    primary = sorted(
+        actionable,
+        key=lambda risk: (-risk.risk_level, -risk.duration_ms),
+    )[0]
     pattern = MOTOR_PERSISTENT_PATTERN
     duration_ms = MOTOR_PERSISTENT_DURATION_MS
     reason_code = primary.risk_type

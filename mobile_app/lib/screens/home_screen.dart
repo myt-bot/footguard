@@ -59,7 +59,7 @@ class HomeScreen extends StatelessWidget {
         const _FeatureTile(
             icon: Icons.vibration_rounded,
             title: '马达振动提醒',
-            subtitle: '风险侧双振提醒、ACK 确认与恢复效果记录'),
+            subtitle: '风险侧震动提醒、真实执行与恢复效果记录'),
       ],
     );
   }

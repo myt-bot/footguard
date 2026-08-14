@@ -41,7 +41,7 @@ class LocalRiskResult {
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v6-low-load-baseline';
+  static const ruleVersion = 'local-rules-v7-regional-pressure';
   static const requiredSamples = 40;
   static const emptyRequiredSamples = 60;
   static const emptyWarmupMs = 15000;
@@ -63,6 +63,10 @@ class LocalRiskEngine {
   final List<double> _loadRatios = [];
   final List<double> _leftForefootRatios = [];
   final List<double> _rightForefootRatios = [];
+  final List<double> _leftMedialRatios = [];
+  final List<double> _leftLateralRatios = [];
+  final List<double> _rightMedialRatios = [];
+  final List<double> _rightLateralRatios = [];
   final List<List<double?>> _temperatureDeltas = [];
   final Map<String, int> _signalStartedAt = {};
   final Set<String> _latchedSignals = {};
@@ -71,6 +75,10 @@ class LocalRiskEngine {
   double? _baselineLoadRatio;
   double? _baselineLeftForefoot;
   double? _baselineRightForefoot;
+  double? _baselineLeftMedial;
+  double? _baselineLeftLateral;
+  double? _baselineRightMedial;
+  double? _baselineRightLateral;
   List<double?> _baselineTemperature = List.filled(4, null);
   final List<List<double?>> _emptyTemperatureDeltas = [];
   int? _emptyStartedAtMs;
@@ -103,6 +111,10 @@ class LocalRiskEngine {
     _loadRatios.clear();
     _leftForefootRatios.clear();
     _rightForefootRatios.clear();
+    _leftMedialRatios.clear();
+    _leftLateralRatios.clear();
+    _rightMedialRatios.clear();
+    _rightLateralRatios.clear();
     _temperatureDeltas.clear();
     _signalStartedAt.clear();
     _latchedSignals.clear();
@@ -111,6 +123,10 @@ class LocalRiskEngine {
     _baselineLoadRatio = null;
     _baselineLeftForefoot = null;
     _baselineRightForefoot = null;
+    _baselineLeftMedial = null;
+    _baselineLeftLateral = null;
+    _baselineRightMedial = null;
+    _baselineRightLateral = null;
     _baselineTemperature = List.filled(4, null);
     _emptyTemperatureDeltas.clear();
     _emptyStartedAtMs = null;
@@ -135,6 +151,10 @@ class LocalRiskEngine {
         'load_ratio': _baselineLoadRatio,
         'left_forefoot': _baselineLeftForefoot,
         'right_forefoot': _baselineRightForefoot,
+        'left_medial': _baselineLeftMedial,
+        'left_lateral': _baselineLeftLateral,
+        'right_medial': _baselineRightMedial,
+        'right_lateral': _baselineRightLateral,
         'temperature_delta': _baselineTemperature,
         'empty_temperature_delta': _emptyTemperature,
         'empty_temperature_mad': _emptyTemperatureMad,
@@ -155,6 +175,11 @@ class LocalRiskEngine {
     _baselineLoadRatio = (value['load_ratio'] as num?)?.toDouble();
     _baselineLeftForefoot = (value['left_forefoot'] as num?)?.toDouble();
     _baselineRightForefoot = (value['right_forefoot'] as num?)?.toDouble();
+    _baselineLeftMedial = (value['left_medial'] as num?)?.toDouble() ?? 0.30;
+    _baselineLeftLateral = (value['left_lateral'] as num?)?.toDouble() ?? 0.17;
+    _baselineRightMedial = (value['right_medial'] as num?)?.toDouble() ?? 0.30;
+    _baselineRightLateral =
+        (value['right_lateral'] as num?)?.toDouble() ?? 0.17;
     _leftDeviceId = value['left_device_id'] as String?;
     _rightDeviceId = value['right_device_id'] as String?;
     _createdAtMs = value['created_at_ms'] as int?;
@@ -237,6 +262,10 @@ class LocalRiskEngine {
     final loadRatio = math.log((leftTotal + 1e-6) / (rightTotal + 1e-6));
     final leftForefoot = _forefootRatio(left);
     final rightForefoot = _forefootRatio(right);
+    final leftMedial = _regionalRatio(left, const [0, 3]);
+    final leftLateral = _regionalRatio(left, const [1]);
+    final rightMedial = _regionalRatio(right, const [0, 3]);
+    final rightLateral = _regionalRatio(right, const [1]);
 
     if (!_emptyTemperatureReferenceReady && !_wearingSeen && !baselineContact) {
       _emptyStartedAtMs ??= timestamp;
@@ -263,6 +292,10 @@ class LocalRiskEngine {
       _loadRatios.add(loadRatio);
       _leftForefootRatios.add(leftForefoot);
       _rightForefootRatios.add(rightForefoot);
+      _leftMedialRatios.add(leftMedial);
+      _leftLateralRatios.add(leftLateral);
+      _rightMedialRatios.add(rightMedial);
+      _rightLateralRatios.add(rightLateral);
       _temperatureDeltas.add(_temperatureDelta(left, right));
       _lastBaselineSampleAtMs = timestamp;
       if (_loadRatios.length >= requiredSamples) {
@@ -272,6 +305,10 @@ class LocalRiskEngine {
           _baselineLoadRatio = _median(_loadRatios);
           _baselineLeftForefoot = _median(_leftForefootRatios);
           _baselineRightForefoot = _median(_rightForefootRatios);
+          _baselineLeftMedial = _median(_leftMedialRatios);
+          _baselineLeftLateral = _median(_leftLateralRatios);
+          _baselineRightMedial = _median(_rightMedialRatios);
+          _baselineRightLateral = _median(_rightLateralRatios);
           _leftDeviceId = left.deviceId;
           _rightDeviceId = right.deviceId;
           _createdAtMs = timestamp;
@@ -293,6 +330,10 @@ class LocalRiskEngine {
           _loadRatios.removeAt(0);
           _leftForefootRatios.removeAt(0);
           _rightForefootRatios.removeAt(0);
+          _leftMedialRatios.removeAt(0);
+          _leftLateralRatios.removeAt(0);
+          _rightMedialRatios.removeAt(0);
+          _rightLateralRatios.removeAt(0);
           _temperatureDeltas.removeAt(0);
         }
       }
@@ -380,6 +421,39 @@ class LocalRiskEngine {
         enter: rightDelta >= 0.08 && _forefootSupported(right),
         stay: rightDelta >= 0.05 && _forefootSupported(right),
       );
+      for (final item in [
+        (
+          'medial_left',
+          'medial_load_concentration',
+          'left',
+          leftMedial - _baselineLeftMedial!
+        ),
+        (
+          'lateral_left',
+          'lateral_load_concentration',
+          'left',
+          leftLateral - _baselineLeftLateral!
+        ),
+        (
+          'medial_right',
+          'medial_load_concentration',
+          'right',
+          rightMedial - _baselineRightMedial!
+        ),
+        (
+          'lateral_right',
+          'lateral_load_concentration',
+          'right',
+          rightLateral - _baselineRightLateral!
+        ),
+      ]) {
+        candidates[item.$1] = (
+          type: item.$2,
+          side: item.$3,
+          enter: item.$4 >= 0.10,
+          stay: item.$4 >= 0.06,
+        );
+      }
     }
 
     final active = <RiskState>[];
@@ -416,9 +490,36 @@ class LocalRiskEngine {
       }
     }
 
+    final leftForefootMatches = active
+        .where(
+          (item) => item.riskType == 'forefoot_high' && item.riskSide == 'left',
+        )
+        .toList(growable: false);
+    final rightForefootMatches = active
+        .where(
+          (item) =>
+              item.riskType == 'forefoot_high' && item.riskSide == 'right',
+        )
+        .toList(growable: false);
+    final leftForefootRisk =
+        leftForefootMatches.isEmpty ? null : leftForefootMatches.first;
+    final rightForefootRisk =
+        rightForefootMatches.isEmpty ? null : rightForefootMatches.first;
+    if (leftForefootRisk != null && rightForefootRisk != null) {
+      active.remove(leftForefootRisk);
+      active.remove(rightForefootRisk);
+      active.add(RiskState(
+        riskType: 'forefoot_high',
+        riskSide: 'both',
+        riskLevel:
+            math.min(leftForefootRisk.riskLevel, rightForefootRisk.riskLevel),
+        durationMs:
+            math.min(leftForefootRisk.durationMs, rightForefootRisk.durationMs),
+      ));
+    }
     active.sort((a, b) {
-      final priority = _riskPriority(b).compareTo(_riskPriority(a));
-      return priority != 0 ? priority : b.riskLevel.compareTo(a.riskLevel);
+      final level = b.riskLevel.compareTo(a.riskLevel);
+      return level != 0 ? level : b.durationMs.compareTo(a.durationMs);
     });
     final primary = active.isEmpty
         ? const RiskState(
@@ -473,12 +574,6 @@ class LocalRiskEngine {
           : 'fewer_than_two_trusted_channels',
     );
   }
-
-  static int _riskPriority(RiskState risk) => risk.isPressure
-      ? pressureRiskPriority(risk.riskType)
-      : risk.isTemperature
-          ? 0
-          : -1;
 
   bool _calibrationSampleDue(int timestampMs, int? lastSampleAtMs) =>
       lastSampleAtMs == null ||
@@ -563,6 +658,17 @@ class LocalRiskEngine {
               frame.pressureChannelValid(index) ? frame.pressure[index] : 0.0,
         ).fold(0.0, (sum, value) => sum + value) /
         total;
+  }
+
+  static double _regionalRatio(FootFrame frame, List<int> indices) {
+    final forefoot = List.generate(4, (index) => index)
+        .where(frame.pressureChannelValid)
+        .fold<double>(0.0, (sum, index) => sum + frame.pressure[index]);
+    if (forefoot <= 1e-9) return 0.0;
+    return indices
+            .where(frame.pressureChannelValid)
+            .fold<double>(0.0, (sum, index) => sum + frame.pressure[index]) /
+        forefoot;
   }
 
   static bool _forefootSupported(FootFrame frame) =>

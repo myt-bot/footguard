@@ -353,7 +353,7 @@ def test_combined_motor_uses_persistent_side_union_once(app) -> None:
         assert command.target == "both"
         assert command.pattern == "long"
         assert command.duration_ms == 1_500
-        assert command.reason_code == "forefoot_high"
+        assert command.reason_code == "right_load_bias"
 
 
 def test_temperature_motor_targets_hotter_side_once_at_persistent_level(app) -> None:

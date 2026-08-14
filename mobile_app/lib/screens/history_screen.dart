@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/api_client.dart';
 import '../models/offline_intervention.dart';
+import '../models/gait_summary.dart';
 import '../models/session_advice.dart';
 import '../services/offline_monitoring_store.dart';
 
@@ -18,6 +19,8 @@ class HistoryScreen extends StatefulWidget {
 }
 
 enum _HistoryFilter { all, active, finished }
+
+enum _HistoryView { risks, gait }
 
 class _HistoryPayload {
   const _HistoryPayload({
@@ -38,6 +41,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   final OfflineMonitoringStore _store = OfflineMonitoringStore();
   late Future<_HistoryPayload> payload;
   _HistoryFilter filter = _HistoryFilter.all;
+  _HistoryView view = _HistoryView.risks;
 
   @override
   void initState() {
@@ -89,7 +93,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '只保留事件、组成风险、持续时间、马达/ACK、干预前后数值和恢复结果。',
+                  '汇总站立风险、干预前后变化和完整行走评估。',
                   style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
                 ),
                 const SizedBox(height: 16),
@@ -112,10 +116,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: _SummaryTile(
-                        label: '马达 / ACK',
-                        value: result.summary == null
-                            ? '${data.where((event) => event.interventionStartedAtMs != null).length} / ${data.fold<int>(0, (sum, event) => sum + event.ackCount)}'
-                            : '${result.summary!.motorExecutedCount} / ${result.summary!.motorAckCount}',
+                        label: '已执行干预',
+                        value:
+                            '${result.summary?.motorExecutedCount ?? data.where((event) => event.interventionStartedAtMs != null).length} 次',
                         icon: Icons.warning_amber_rounded,
                         color: const Color(0xFFE07A36),
                       ),
@@ -132,20 +135,49 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   ],
                 ),
                 const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    _filterChip(_HistoryFilter.all, '全部'),
-                    _filterChip(_HistoryFilter.active, '进行中'),
-                    _filterChip(_HistoryFilter.finished, '已结束'),
+                SegmentedButton<_HistoryView>(
+                  segments: const [
+                    ButtonSegment(
+                      value: _HistoryView.risks,
+                      icon: Icon(Icons.warning_amber_rounded),
+                      label: Text('风险事件'),
+                    ),
+                    ButtonSegment(
+                      value: _HistoryView.gait,
+                      icon: Icon(Icons.directions_walk_rounded),
+                      label: Text('步态记录'),
+                    ),
                   ],
+                  selected: {view},
+                  onSelectionChanged: (value) =>
+                      setState(() => view = value.first),
                 ),
-                const SizedBox(height: 8),
-                if (filtered.isEmpty)
-                  const _EmptyFilter()
+                const SizedBox(height: 12),
+                if (view == _HistoryView.risks) ...[
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      _filterChip(_HistoryFilter.all, '全部'),
+                      _filterChip(_HistoryFilter.active, '进行中'),
+                      _filterChip(_HistoryFilter.finished, '已结束'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (filtered.isEmpty)
+                    const _EmptyFilter()
+                  else
+                    for (final event in filtered) ...[
+                      _HistoryEventCard(event: event),
+                      const SizedBox(height: 10),
+                    ],
+                ] else if (result.summary?.latestGaitEpisodes.isEmpty ?? true)
+                  const _Message(
+                    icon: Icons.directions_walk_rounded,
+                    text: '暂无完整行走记录',
+                  )
                 else
-                  for (final event in filtered) ...[
-                    _HistoryEventCard(event: event),
+                  for (final episode in result.summary!.latestGaitEpisodes) ...[
+                    _GaitEpisodeCard(episode: episode),
                     const SizedBox(height: 10),
                   ],
               ],
@@ -367,7 +399,6 @@ List<RiskEventRecord> _eventsFromOfflineInterventions(
         interventionStartedAtMs: interventionAt,
         motorTarget: item.command.target,
         motorPattern: item.command.pattern,
-        ackCount: executedAcks.length,
       );
     }).toList(growable: false);
 
@@ -461,7 +492,7 @@ class _HistoryEventCard extends StatelessWidget {
             const Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                '本次同时存在',
+                '本次事件期间出现',
                 style: TextStyle(fontWeight: FontWeight.w800),
               ),
             ),
@@ -536,7 +567,6 @@ class _HistoryEventCard extends StatelessWidget {
                       ? '马达：未执行'
                       : '马达：已执行一次${event.motorTarget == null ? '' : '（${_sideLabel(event.motorTarget!)}）'}',
                 ),
-                Text('设备 ACK：${event.ackCount} 条'),
                 if (event.interventionStartedAtMs != null)
                   Text('干预时间：${_formatClock(event.interventionStartedAtMs!)}'),
               ],
@@ -555,6 +585,98 @@ class _HistoryEventCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _GaitEpisodeCard extends StatelessWidget {
+  const _GaitEpisodeCard({required this.episode});
+
+  final GaitEpisodeSummary episode;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.directions_walk_rounded),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _formatDate(episode.startedAtMs),
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  _StatusPill(
+                    label: episode.issues.isEmpty ? '未见明显问题' : '需要关注',
+                    active: episode.issues.isNotEmpty,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 20,
+                runSpacing: 10,
+                children: [
+                  _DetailValue(label: '落脚', value: '${episode.stepCount} 次'),
+                  _DetailValue(
+                    label: '左右落脚',
+                    value: '${episode.leftSteps} / ${episode.rightSteps}',
+                  ),
+                  _DetailValue(
+                    label: '估算步频',
+                    value: '${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟',
+                  ),
+                  _DetailValue(
+                    label: '负荷不对称',
+                    value: _formatPercent(episode.loadAsymmetry),
+                  ),
+                  _DetailValue(
+                    label: '步时变异',
+                    value: _formatPercent(episode.stepIntervalCv),
+                  ),
+                ],
+              ),
+              if (episode.issues.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Divider(height: 1),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: episode.issues
+                      .map(
+                        (issue) => Chip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text(_gaitIssueLabel(issue)),
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+
+  static String _gaitIssueLabel(GaitIssue issue) {
+    final side = issue.side == 'left'
+        ? '左脚'
+        : issue.side == 'right'
+            ? '右脚'
+            : '';
+    return switch (issue.issueType) {
+      'walking_load_asymmetry' => '$side行走负荷偏高',
+      'walking_forefoot_concentration' => '$side前掌反复受压',
+      'walking_medial_concentration' => '$side内侧反复受压',
+      'walking_lateral_concentration' => '$side外侧反复受压',
+      'step_timing_instability' => '步时波动较大',
+      _ => '行走趋势异常',
+    };
   }
 }
 
@@ -938,11 +1060,11 @@ class _Message extends StatelessWidget {
   const _Message({
     required this.icon,
     required this.text,
-    required this.onRetry,
+    this.onRetry,
   });
   final IconData icon;
   final String text;
-  final Future<void> Function() onRetry;
+  final Future<void> Function()? onRetry;
   @override
   Widget build(BuildContext context) => Center(
         child: Column(
@@ -951,8 +1073,10 @@ class _Message extends StatelessWidget {
             Icon(icon, size: 52, color: const Color(0xFF78909C)),
             const SizedBox(height: 12),
             Text(text, textAlign: TextAlign.center),
-            const SizedBox(height: 12),
-            OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
+            if (onRetry != null) ...[
+              const SizedBox(height: 12),
+              OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
+            ],
           ],
         ),
       );

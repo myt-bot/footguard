@@ -24,14 +24,12 @@ class RiskBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final displayedRisks = activeRisks.isEmpty ? [risk] : activeRisks;
-    final pressureRisks = displayedRisks
-        .where((item) => item.isPressure)
-        .toList(growable: false)
-      ..sort((a, b) {
-        final priority = pressureRiskPriority(b.riskType)
-            .compareTo(pressureRiskPriority(a.riskType));
-        return priority != 0 ? priority : b.riskLevel.compareTo(a.riskLevel);
-      });
+    final pressureRisks =
+        displayedRisks.where((item) => item.isPressure).toList(growable: false)
+          ..sort((a, b) {
+            final level = b.riskLevel.compareTo(a.riskLevel);
+            return level != 0 ? level : b.durationMs.compareTo(a.durationMs);
+          });
     final temperatureRisks = displayedRisks
         .where((item) => item.isTemperature)
         .toList(growable: false);
@@ -45,6 +43,7 @@ class RiskBanner extends StatelessWidget {
                 riskLevel: 0,
                 durationMs: 0,
               );
+    final multiplePressureRisks = pressureRisks.length > 1;
     final (color, icon, title) = !baselineReady && risk.isNormal
         ? (const Color(0xFF39758C), Icons.tune_rounded, '本次穿戴基线学习中')
         : !pressureAvailable && risk.isNormal
@@ -85,6 +84,7 @@ class RiskBanner extends StatelessWidget {
                     primary.isIncomplete ? '双足数据不完整' : _riskLabel(primary),
                   ),
               };
+    final resolvedTitle = multiplePressureRisks ? '多项压力风险' : title;
     final observation = recoveryObservation;
     final observing = observation?.status == 'observing';
     final seconds =
@@ -122,7 +122,7 @@ class RiskBanner extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      title,
+                      resolvedTitle,
                       style: Theme.of(context)
                           .textTheme
                           .titleMedium
@@ -144,10 +144,10 @@ class RiskBanner extends StatelessWidget {
               ),
             ],
           ),
-          if (pressureRisks.length > 1) ...[
+          if (multiplePressureRisks) ...[
             const SizedBox(height: 10),
             const Text(
-              '同时存在',
+              '当前检测到',
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
@@ -155,7 +155,6 @@ class RiskBanner extends StatelessWidget {
               spacing: 6,
               runSpacing: 6,
               children: pressureRisks
-                  .skip(1)
                   .map(
                     (item) => Chip(
                       visualDensity: VisualDensity.compact,
@@ -260,6 +259,10 @@ class RiskBanner extends StatelessWidget {
             : item.riskSide == 'left'
                 ? '左脚前掌'
                 : '右脚前掌',
+        'medial_load_concentration' =>
+          '${item.riskSide == 'left' ? '左脚' : '右脚'}内侧',
+        'lateral_load_concentration' =>
+          '${item.riskSide == 'left' ? '左脚' : '右脚'}外侧',
         _ => '压力指标',
       };
 

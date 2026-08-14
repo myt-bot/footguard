@@ -67,6 +67,26 @@ class RiskEvent(Base):
     risk_components_json: Mapped[str] = mapped_column(String(1024), default="[]")
 
 
+class GaitEpisode(Base):
+    __tablename__ = "gait_episodes"
+
+    episode_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    reset_at_ms: Mapped[int] = mapped_column(Integer, index=True)
+    started_at_ms: Mapped[int] = mapped_column(Integer, index=True)
+    ended_at_ms: Mapped[int] = mapped_column(Integer, index=True)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    step_count: Mapped[int] = mapped_column(Integer)
+    left_steps: Mapped[int] = mapped_column(Integer)
+    right_steps: Mapped[int] = mapped_column(Integer)
+    cadence_spm: Mapped[float] = mapped_column(Float)
+    step_interval_cv: Mapped[float] = mapped_column(Float)
+    left_load_index: Mapped[float] = mapped_column(Float)
+    right_load_index: Mapped[float] = mapped_column(Float)
+    load_asymmetry: Mapped[float] = mapped_column(Float)
+    metrics_json: Mapped[str] = mapped_column(String(1024), default="{}")
+    issues_json: Mapped[str] = mapped_column(String(2048), default="[]")
+
+
 class Command(Base):
     __tablename__ = "commands"
 
@@ -135,6 +155,9 @@ class CalibrationProfile(Base):
     right_distribution_json: Mapped[str] = mapped_column(String(512))
     left_forefoot_mad: Mapped[float] = mapped_column(Float)
     right_forefoot_mad: Mapped[float] = mapped_column(Float)
+    regional_share_mad_json: Mapped[str] = mapped_column(
+        String(256), default="[0,0,0,0]"
+    )
     pressure_asymmetry_json: Mapped[str] = mapped_column(String(512))
     pressure_channel_trust_json: Mapped[str] = mapped_column(String(128))
     temperature_delta_json: Mapped[str] = mapped_column(String(256))

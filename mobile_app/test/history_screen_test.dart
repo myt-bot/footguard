@@ -20,6 +20,37 @@ http.Response _supportingResponse(http.Request request) {
           'motor_command_count': 1,
           'motor_executed_count': 1,
           'motor_ack_count': 1,
+          'gait_episode_count': 1,
+          'latest_gait_episodes': [
+            {
+              'episode_id': 'gait_7_1000_7000',
+              'started_at_ms': 1000,
+              'ended_at_ms': 7000,
+              'duration_ms': 6000,
+              'step_count': 8,
+              'left_steps': 4,
+              'right_steps': 4,
+              'cadence_spm': 80.0,
+              'step_interval_cv': 0.12,
+              'left_load_index': 1.4,
+              'right_load_index': 0.9,
+              'load_asymmetry': 0.217,
+              'left_forefoot_ratio': 0.55,
+              'right_forefoot_ratio': 0.52,
+              'left_medial_ratio': 0.30,
+              'right_medial_ratio': 0.28,
+              'left_lateral_ratio': 0.18,
+              'right_lateral_ratio': 0.20,
+              'issues': [
+                {
+                  'issue_type': 'walking_load_asymmetry',
+                  'side': 'left',
+                  'value': 0.217,
+                  'threshold': 0.25,
+                },
+              ],
+            },
+          ],
         }),
       ),
       200,
@@ -139,13 +170,16 @@ void main() {
     expect(find.text('历史事件与会话建议'), findsOneWidget);
     expect(find.text('最近会话 AI 建议'), findsOneWidget);
     expect(find.text('2 条'), findsOneWidget);
-    expect(find.text('1 / 1'), findsOneWidget);
+    expect(find.text('1 次'), findsOneWidget);
     expect(find.text('左侧负载持续偏高'), findsOneWidget);
     expect(find.text('同区温度趋势异常'), findsOneWidget);
     expect(find.text('已恢复'), findsOneWidget);
     expect(find.text('进行中'), findsWidgets);
     expect(requestedPaths, isNot(contains('/api/v1/analytics/timeseries')));
 
+    await tester.ensureVisible(find.text('左侧负载持续偏高'));
+    await tester.drag(find.byType(ListView), const Offset(0, -120));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('左侧负载持续偏高'));
     await tester.pumpAndSettle();
 
@@ -325,7 +359,7 @@ void main() {
     await tester.tap(find.text('组合风险事件'));
     await tester.pumpAndSettle();
 
-    expect(find.text('本次同时存在'), findsOneWidget);
+    expect(find.text('本次事件期间出现'), findsOneWidget);
     expect(find.text('左侧负载持续偏高 · 左脚'), findsOneWidget);
     expect(find.text('前掌负荷持续集中 · 左脚'), findsOneWidget);
     expect(find.textContaining('7.6 秒'), findsOneWidget);
@@ -359,5 +393,41 @@ void main() {
 
     expect(find.text('最近会话建议：继续观察左前掌区域。'), findsOneWidget);
     expect(find.textContaining('不是当前风险'), findsOneWidget);
+  });
+
+  testWidgets('history shows the latest completed gait assessment', (
+    tester,
+  ) async {
+    final api = FootGuardApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        if (request.url.path == '/api/v1/events') {
+          return http.Response('[]', 200);
+        }
+        return _supportingResponse(request);
+      }),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HistoryScreen(
+            backendUrl: 'http://example.test',
+            apiClient: api,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('步态记录'));
+    await tester.drag(find.byType(ListView), const Offset(0, -80));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('步态记录'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('8 次'), findsOneWidget);
+    expect(find.text('80 步/分钟'), findsOneWidget);
+    expect(find.text('21.7%'), findsOneWidget);
+    expect(find.textContaining('左脚行走负荷偏高'), findsOneWidget);
   });
 }

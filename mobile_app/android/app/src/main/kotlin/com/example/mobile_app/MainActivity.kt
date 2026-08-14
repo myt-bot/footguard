@@ -65,7 +65,7 @@ class MainActivity : FlutterActivity() {
                         } else {
                             val status = textToSpeech?.speak(
                                 text,
-                                TextToSpeech.QUEUE_FLUSH,
+                                TextToSpeech.QUEUE_ADD,
                                 null,
                                 "footguard-${System.currentTimeMillis()}",
                             )

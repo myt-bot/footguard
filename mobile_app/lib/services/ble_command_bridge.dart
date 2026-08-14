@@ -132,7 +132,7 @@ class BleCommandBridge {
       final allExecuted = _receivedAcks.values.every(
         (value) => value.status == 'executed',
       );
-      final suffix = _activeIsLocal ? '，设备执行记录已保存' : '，ACK已上传后端';
+      final suffix = _activeIsLocal ? '，设备执行记录已保存' : '，执行结果已记录';
       final result = allExecuted
           ? '设备返回executed$suffix'
           : '设备返回${_receivedAcks.values.map((value) => '${value.status}/${value.errorCode}').join('、')}$suffix';

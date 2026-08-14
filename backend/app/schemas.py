@@ -99,6 +99,8 @@ class RiskState(StrictModel):
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "medial_load_concentration",
+        "lateral_load_concentration",
         "temperature_asymmetry",
         "data_incomplete",
     ]
@@ -118,6 +120,7 @@ class AiAdviceRequest(StrictModel):
     temperature_available: bool = True
     left_connected: bool = True
     right_connected: bool = True
+    gait: "GaitSummary | None" = None
 
 
 class AiAdviceResponse(StrictModel):
@@ -169,6 +172,41 @@ class AiChatResponse(StrictModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class GaitIssue(StrictModel):
+    issue_type: Literal[
+        "walking_load_asymmetry",
+        "walking_forefoot_concentration",
+        "walking_medial_concentration",
+        "walking_lateral_concentration",
+        "step_timing_instability",
+    ]
+    side: Literal["left", "right", "both", "none"]
+    value: float = Field(ge=0)
+    threshold: float = Field(ge=0)
+
+
+class GaitEpisodeSummary(StrictModel):
+    episode_id: str
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int = Field(ge=0)
+    duration_ms: int = Field(ge=0)
+    step_count: int = Field(ge=0)
+    left_steps: int = Field(ge=0)
+    right_steps: int = Field(ge=0)
+    cadence_spm: float = Field(ge=0)
+    step_interval_cv: float = Field(ge=0)
+    left_load_index: float = Field(ge=0)
+    right_load_index: float = Field(ge=0)
+    load_asymmetry: float = Field(ge=0)
+    left_forefoot_ratio: float = Field(ge=0, le=1)
+    right_forefoot_ratio: float = Field(ge=0, le=1)
+    left_medial_ratio: float = Field(ge=0, le=1)
+    right_medial_ratio: float = Field(ge=0, le=1)
+    left_lateral_ratio: float = Field(ge=0, le=1)
+    right_lateral_ratio: float = Field(ge=0, le=1)
+    issues: list[GaitIssue] = Field(default_factory=list)
+
+
 class GaitSummary(StrictModel):
     state: Literal["stationary", "walking", "insufficient_data"]
     window_ms: int = Field(ge=0)
@@ -176,6 +214,7 @@ class GaitSummary(StrictModel):
     left_steps: int = Field(ge=0)
     right_steps: int = Field(ge=0)
     cadence_spm: float | None = Field(default=None, ge=0)
+    last_completed_episode: GaitEpisodeSummary | None = None
 
 
 class RealtimeResponse(StrictModel):
@@ -230,10 +269,22 @@ class RegionalAnalysis(StrictModel):
     left_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
     right_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
     left_pressure_channel_status: list[
-        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+        Literal[
+            "ok",
+            "runtime_recovered",
+            "uncovered_in_baseline",
+            "raw_invalid",
+            "residual_suspect",
+        ]
     ] = Field(min_length=6, max_length=6)
     right_pressure_channel_status: list[
-        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+        Literal[
+            "ok",
+            "runtime_recovered",
+            "uncovered_in_baseline",
+            "raw_invalid",
+            "residual_suspect",
+        ]
     ] = Field(min_length=6, max_length=6)
     temperature_available: bool = False
     left_temperature_valid: list[bool] = Field(min_length=4, max_length=4)
@@ -260,6 +311,8 @@ class DeviceCommand(StrictModel):
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "medial_load_concentration",
+        "lateral_load_concentration",
         "temperature_asymmetry",
         "risk_persisted",
         "cancel",
@@ -369,6 +422,8 @@ class RiskComponentFeedback(StrictModel):
         "effective", "partial", "ineffective", "unknown", "observation_only"
     ] = "unknown"
     pressure_intervention: bool = True
+    metric_code: str | None = None
+    metric_unit: str | None = None
 
 
 class SessionSummary(StrictModel):
@@ -392,6 +447,8 @@ class SessionSummary(StrictModel):
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     sensor_summary: dict[str, float] = Field(default_factory=dict)
     latest_events: list[RiskEventOut] = Field(default_factory=list)
+    gait_episode_count: int = Field(default=0, ge=0)
+    latest_gait_episodes: list[GaitEpisodeSummary] = Field(default_factory=list)
 
 
 class SessionAdviceResponse(StrictModel):

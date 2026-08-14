@@ -9,6 +9,7 @@ import '../data/ble_foot_data_source.dart';
 import '../data/csv_replay_data_source.dart';
 import '../data/foot_data_source.dart';
 import '../data/mock_foot_data_source.dart';
+import '../models/gait_summary.dart';
 import '../services/ble_connection_service.dart';
 import '../services/ble_command_bridge.dart';
 import '../services/calibration_speech_coordinator.dart';
@@ -42,6 +43,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   final RiskNotificationService _notifications = RiskNotificationService();
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   int _handledNoticeSequence = 0;
+  int _handledGaitNoticeSequence = 0;
 
   FootDataSource _source(FootGuardApiClient api) =>
       switch (widget.settings.dataMode) {
@@ -82,6 +84,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   void _handleControllerChanges() {
     _handleCalibrationSpeech();
     _handleNotice();
+    _handleGaitNotice();
   }
 
   void _handleCalibrationSpeech() {
@@ -98,6 +101,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   }
 
   void _handleNotice() {
+    if (widget.calibrationSpeech.active) return;
     if (controller.noticeSequence == _handledNoticeSequence ||
         controller.riskNoticeMessage == null) {
       return;
@@ -130,6 +134,22 @@ class _RealtimeScreenState extends State<RealtimeScreen>
     });
   }
 
+  void _handleGaitNotice() {
+    if (widget.calibrationSpeech.active ||
+        controller.gaitNoticeSequence == _handledGaitNoticeSequence ||
+        controller.gaitNoticeMessage == null) {
+      return;
+    }
+    _handledGaitNoticeSequence = controller.gaitNoticeSequence;
+    final message = controller.gaitNoticeMessage!;
+    if (widget.settings.voiceEnabled) {
+      unawaited(widget.ttsSpeaker.speak(message));
+    }
+    if (_lifecycleState != AppLifecycleState.resumed) {
+      _notifications.show(title: 'FootGuard 行走评估', body: message);
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -154,19 +174,19 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   }
 
   bool _showPressureAbnormality(String side) {
-    return _riskAppliesToSide(side) &&
-        controller.activeRisks.any(
-          (risk) =>
-              const {
-                'left_load_bias',
-                'right_load_bias',
-                'forefoot_high',
-              }.contains(risk.riskType) &&
-              (risk.riskSide == side || risk.riskSide == 'both'),
-        );
+    final analysis = controller.regionalAnalysis;
+    if (analysis?.baselineReady != true ||
+        analysis?.pressureAvailable != true) {
+      return false;
+    }
+    final scores = side == 'left'
+        ? analysis!.leftPressureScores
+        : analysis!.rightPressureScores;
+    return scores.any((score) => score >= 0.25);
   }
 
   Future<void> _restartCalibration() async {
+    await widget.ttsSpeaker.stop();
     widget.calibrationSpeech.start();
     try {
       await controller.restartWearingCalibration();
@@ -363,6 +383,12 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             ),
             const SizedBox(height: 12),
             _MetricsCard(controller: controller),
+            if (controller.gait.lastCompletedEpisode != null) ...[
+              const SizedBox(height: 12),
+              _GaitAssessmentCard(
+                episode: controller.gait.lastCompletedEpisode!,
+              ),
+            ],
             const SizedBox(height: 12),
             Card(
               elevation: 0,
@@ -569,8 +595,14 @@ class _MetricsCard extends StatelessWidget {
                 value: controller.footMotionStatusLabel('right'),
               ),
               _Metric(label: '基础步态', value: controller.gaitStatusLabel),
-              _Metric(label: '近12秒落脚', value: controller.gaitStepLabel),
-              _Metric(label: '估算步频', value: controller.gaitCadenceLabel),
+              _Metric(
+                label: controller.gait.state == 'walking' ? '近12秒落脚' : '最近一次落脚',
+                value: controller.gaitStepLabel,
+              ),
+              _Metric(
+                label: controller.gait.state == 'walking' ? '实时估算步频' : '最近估算步频',
+                value: controller.gaitCadenceLabel,
+              ),
               _Metric(
                   label: '后端', value: controller.backendOnline ? '在线' : '离线'),
               _Metric(label: '数据源', value: controller.source.label),
@@ -578,6 +610,75 @@ class _MetricsCard extends StatelessWidget {
           ),
         ),
       );
+}
+
+class _GaitAssessmentCard extends StatelessWidget {
+  const _GaitAssessmentCard({required this.episode});
+
+  final GaitEpisodeSummary episode;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.directions_walk_rounded),
+                  SizedBox(width: 8),
+                  Text(
+                    '最近一次完整行走评估',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${episode.stepCount} 次落脚 · ${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟 · '
+                '负荷不对称 ${(episode.loadAsymmetry * 100).toStringAsFixed(0)}%',
+              ),
+              const SizedBox(height: 8),
+              if (episode.issues.isEmpty)
+                const Text(
+                  '本次有效行走未发现达到工程阈值的负荷或步时问题。',
+                  style: TextStyle(color: Color(0xFF147D73)),
+                )
+              else
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: episode.issues
+                      .map(
+                        (issue) => Chip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text(_issueLabel(issue)),
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+            ],
+          ),
+        ),
+      );
+
+  static String _issueLabel(GaitIssue issue) {
+    final side = issue.side == 'left'
+        ? '左脚'
+        : issue.side == 'right'
+            ? '右脚'
+            : '';
+    return switch (issue.issueType) {
+      'walking_load_asymmetry' => '$side行走负荷偏高',
+      'walking_forefoot_concentration' => '$side前掌反复受压',
+      'walking_medial_concentration' => '$side内侧反复受压',
+      'walking_lateral_concentration' => '$side外侧反复受压',
+      'step_timing_instability' => '步时波动较大',
+      _ => '行走趋势异常',
+    };
+  }
 }
 
 class _Metric extends StatelessWidget {

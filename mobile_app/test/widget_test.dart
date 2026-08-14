@@ -51,7 +51,7 @@ void main() {
   });
 
   testWidgets(
-    'risk banner prioritizes local pressure and separates temperature',
+    'risk banner lists every pressure component and separates temperature',
     (tester) async {
       await tester.pumpWidget(
         const MaterialApp(
@@ -89,7 +89,8 @@ void main() {
       );
 
       expect(find.text('左脚内侧局部负荷集中'), findsOneWidget);
-      expect(find.text('同时存在'), findsOneWidget);
+      expect(find.text('多项压力风险'), findsOneWidget);
+      expect(find.text('当前检测到'), findsOneWidget);
       expect(find.text('左侧负载持续偏高'), findsOneWidget);
       expect(find.text('右脚同区温度趋势异常'), findsOneWidget);
       expect(find.textContaining('不计入15秒压力改善'), findsOneWidget);

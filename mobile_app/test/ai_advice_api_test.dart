@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/data/api_client.dart';
 import 'package:footguard/models/device_command.dart';
+import 'package:footguard/models/gait_summary.dart';
 import 'package:footguard/models/risk_state.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -16,6 +17,8 @@ void main() {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       expect(body['risk']['risk_type'], 'left_load_bias');
       expect(body['temperature_delta_max_c'], 2.6);
+      expect(body['gait']['state'], 'stationary');
+      expect(body['gait']['last_completed_episode']['step_count'], 8);
       return http.Response.bytes(
         utf8.encode(jsonEncode({
           'protocol_version': 1,
@@ -49,6 +52,33 @@ void main() {
       temperatureAvailable: true,
       leftConnected: true,
       rightConnected: true,
+      gait: const GaitSummary(
+        state: 'stationary',
+        windowMs: 12000,
+        stepCount: 0,
+        leftSteps: 0,
+        rightSteps: 0,
+        lastCompletedEpisode: GaitEpisodeSummary(
+          episodeId: 'gait_7_1000_7000',
+          startedAtMs: 1000,
+          endedAtMs: 7000,
+          durationMs: 6000,
+          stepCount: 8,
+          leftSteps: 4,
+          rightSteps: 4,
+          cadenceSpm: 80,
+          stepIntervalCv: 0.12,
+          leftLoadIndex: 1.2,
+          rightLoadIndex: 1.0,
+          loadAsymmetry: 0.091,
+          leftForefootRatio: 0.55,
+          rightForefootRatio: 0.52,
+          leftMedialRatio: 0.30,
+          rightMedialRatio: 0.28,
+          leftLateralRatio: 0.18,
+          rightLateralRatio: 0.20,
+        ),
+      ),
     );
 
     expect(result.sourceLabel, 'DeepSeek 云端解释');

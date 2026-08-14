@@ -42,10 +42,16 @@ def _sensor_snapshot(
     right_pressure = [right.p1, right.p2, right.p3, right.p4, right.p5, right.p6]
     left_total = sum(left_pressure)
     right_total = sum(right_pressure)
+    left_forefoot = sum(left_pressure[:4])
+    right_forefoot = sum(right_pressure[:4])
     return {
         "load_ratio_abs": abs(log((left_total + 1e-6) / (right_total + 1e-6))),
-        "left_forefoot_ratio": sum(left_pressure[:4]) / max(left_total, 1e-6),
-        "right_forefoot_ratio": sum(right_pressure[:4]) / max(right_total, 1e-6),
+        "left_forefoot_ratio": left_forefoot / max(left_total, 1e-6),
+        "right_forefoot_ratio": right_forefoot / max(right_total, 1e-6),
+        "left_medial_ratio": (left_pressure[0] + left_pressure[3]) / max(left_forefoot, 1e-6),
+        "right_medial_ratio": (right_pressure[0] + right_pressure[3]) / max(right_forefoot, 1e-6),
+        "left_lateral_ratio": left_pressure[1] / max(left_forefoot, 1e-6),
+        "right_lateral_ratio": right_pressure[1] / max(right_forefoot, 1e-6),
         "temperature_delta_max_c": max(
             abs(a - b)
             for a, b in zip(
@@ -73,11 +79,26 @@ def component_feedback(
             "load_ratio_abs"
             if component.risk_type in {"left_load_bias", "right_load_bias"}
             else f"{component.risk_side}_forefoot_ratio"
+            if component.risk_type == "forefoot_high" and component.risk_side != "both"
+            else "forefoot_both_ratio"
             if component.risk_type == "forefoot_high"
+            else f"{component.risk_side}_medial_ratio"
+            if component.risk_type == "medial_load_concentration"
+            else f"{component.risk_side}_lateral_ratio"
+            if component.risk_type == "lateral_load_concentration"
             else "temperature_delta_max_c"
         )
         before_value = before.get(key) if before else None
         after_value = after.get(key) if after else None
+        if key == "forefoot_both_ratio":
+            before_value = max(
+                before.get("left_forefoot_ratio", 0.0),
+                before.get("right_forefoot_ratio", 0.0),
+            ) if before else None
+            after_value = max(
+                after.get("left_forefoot_ratio", 0.0),
+                after.get("right_forefoot_ratio", 0.0),
+            ) if after else None
         improvement = (
             (before_value - after_value) / before_value
             if pressure_intervention
@@ -106,6 +127,8 @@ def component_feedback(
                 improvement_ratio=improvement,
                 effect_label=effect,
                 pressure_intervention=pressure_intervention,
+                metric_code=key,
+                metric_unit="celsius" if component.risk_type == "temperature_asymmetry" else "ratio",
             )
         )
     return result

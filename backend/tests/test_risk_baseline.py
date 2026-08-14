@@ -12,6 +12,7 @@ from backend.app.services.risk_service import (
     _current_risks,
     _empty_baseline,
     _empty_temperature_reference,
+    _gait_episode_from_segment,
     _gait_summary,
     _pressure_metric_from_window,
     _prebaseline_residual_suspect_channels,
@@ -277,9 +278,61 @@ def test_load_bias_and_forefoot_risk_are_reported_together() -> None:
     assert {(risk.risk_type, risk.risk_side) for risk in risks} == {
         ("left_load_bias", "left"),
         ("forefoot_high", "left"),
+        ("medial_load_concentration", "left"),
     }
     assert risks[0].risk_type == "forefoot_high"
     assert all(risk.risk_level == 2 for risk in risks)
+
+
+def test_medial_and_lateral_concentration_are_independent_of_forefoot_total() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    left_lateral = (0.04, 0.30, 0.05, 0.04, 0.13, 0.44)
+    right_medial = (0.20, 0.02, 0.04, 0.17, 0.15, 0.42)
+    lateral_risks, _ = _current_risks(
+        [
+            _metric(100 + index, left_distribution=left_lateral)
+            for index in range(55)
+        ],
+        baseline,
+    )
+    medial_risks, _ = _current_risks(
+        [
+            _metric(200 + index, right_distribution=right_medial)
+            for index in range(55)
+        ],
+        baseline,
+    )
+
+    assert ("lateral_load_concentration", "left") in {
+        (item.risk_type, item.risk_side) for item in lateral_risks
+    }
+    assert ("medial_load_concentration", "right") in {
+        (item.risk_type, item.risk_side) for item in medial_risks
+    }
+
+
+def test_bilateral_forefoot_risk_is_consolidated() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    forefoot = (0.16, 0.18, 0.30, 0.16, 0.10, 0.10)
+    risks, _ = _current_risks(
+        [
+            _metric(
+                300 + index,
+                left_distribution=forefoot,
+                right_distribution=forefoot,
+            )
+            for index in range(55)
+        ],
+        baseline,
+    )
+
+    forefoot_risks = [item for item in risks if item.risk_type == "forefoot_high"]
+    assert len(forefoot_risks) == 1
+    assert forefoot_risks[0].risk_side == "both"
 
 
 @pytest.mark.parametrize(
@@ -605,6 +658,159 @@ def test_gait_summary_reports_stationary_without_false_steps() -> None:
     assert gait.state == "stationary"
     assert gait.step_count == 0
     assert gait.cadence_spm is None
+
+
+def test_gait_summary_retains_last_completed_walk_while_stationary() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    walking = [
+        replace(
+            _metric(
+                100 + index,
+                left_total=0.45 if index % 6 < 3 else 0.10,
+                right_total=0.10 if index % 6 < 3 else 0.45,
+                motion_state="moving",
+            ),
+            log_load_ratio=1.50 if index % 6 < 3 else -1.50,
+        )
+        for index in range(60)
+    ]
+    stationary = [
+        _metric(160 + index, motion_state="stationary")
+        for index in range(12)
+    ]
+
+    gait = _gait_summary(walking + stationary, baseline)
+
+    assert gait.state == "stationary"
+    assert gait.step_count == 0
+    assert gait.last_completed_episode is not None
+    assert gait.last_completed_episode.step_count >= 6
+
+
+def test_old_gait_events_do_not_revive_after_one_new_motion_frame() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    walking = [
+        replace(
+            _metric(
+                100 + index,
+                left_total=0.45 if index % 6 < 3 else 0.10,
+                right_total=0.10 if index % 6 < 3 else 0.45,
+                motion_state="moving",
+            ),
+            log_load_ratio=1.50 if index % 6 < 3 else -1.50,
+        )
+        for index in range(45)
+    ]
+    pause = [
+        _metric(145 + index, motion_state="stationary")
+        for index in range(15)
+    ]
+    nudge = _metric(160, motion_state="moving")
+
+    gait = _gait_summary(walking + pause + [nudge], baseline)
+
+    assert gait.state != "walking"
+
+
+def _gait_episode_metrics(
+    *,
+    intervals_ms: tuple[int, ...] = (600, 600, 600, 600, 600, 600, 600),
+    left_total: float = 0.45,
+    right_total: float = 0.45,
+    left_distribution: tuple[float, ...] = LEFT_DISTRIBUTION,
+    right_distribution: tuple[float, ...] = RIGHT_DISTRIBUTION,
+) -> list[PairMetric]:
+    timestamps = [0]
+    for interval in intervals_ms:
+        timestamps.append(timestamps[-1] + interval)
+    return [
+        replace(
+            _metric(
+                index,
+                left_total=left_total if index % 2 == 0 else 0.10,
+                right_total=0.10 if index % 2 == 0 else right_total,
+                left_distribution=left_distribution,
+                right_distribution=right_distribution,
+                motion_state="moving",
+            ),
+            timestamp_ms=timestamp,
+            log_load_ratio=1.50 if index % 2 == 0 else -1.50,
+        )
+        for index, timestamp in enumerate(timestamps)
+    ]
+
+
+def test_gait_episode_detects_walking_load_asymmetry() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(left_total=0.75, right_total=0.30), baseline
+    )
+
+    assert episode is not None
+    issue = next(
+        item for item in episode.issues
+        if item.issue_type == "walking_load_asymmetry"
+    )
+    assert issue.side == "left"
+    assert episode.left_load_index > episode.right_load_index
+
+
+def test_gait_episode_detects_repeated_regional_concentration() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    medial_forefoot = (0.30, 0.10, 0.05, 0.25, 0.10, 0.20)
+
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(left_distribution=medial_forefoot), baseline
+    )
+
+    assert episode is not None
+    assert any(
+        item.issue_type == "walking_medial_concentration"
+        and item.side == "left"
+        for item in episode.issues
+    )
+
+
+def test_gait_episode_detects_step_timing_instability() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(
+            intervals_ms=(300, 900, 300, 900, 300, 900, 300, 900)
+        ),
+        baseline,
+    )
+
+    assert episode is not None
+    assert any(
+        item.issue_type == "step_timing_instability" for item in episode.issues
+    )
+
+
+def test_low_cadence_is_displayed_without_becoming_an_issue() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(intervals_ms=(2500, 2500, 2500, 2500, 2500)),
+        baseline,
+    )
+
+    assert episode is not None
+    assert episode.cadence_spm == pytest.approx(24.0)
+    assert all(item.issue_type != "low_cadence" for item in episode.issues)
 
 
 def test_discontinuous_standing_samples_do_not_form_a_baseline() -> None:

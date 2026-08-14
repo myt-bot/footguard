@@ -143,7 +143,6 @@ class RiskEventRecord {
     this.componentFeedback = const [],
     this.motorTarget,
     this.motorPattern,
-    this.ackCount = 0,
   });
 
   final String eventId;
@@ -163,7 +162,6 @@ class RiskEventRecord {
   final List<RiskComponentFeedbackRecord> componentFeedback;
   final String? motorTarget;
   final String? motorPattern;
-  final int ackCount;
   final String status;
 
   bool get hasLoadDiffComparison =>
@@ -205,8 +203,6 @@ class RiskEventRecord {
             const [],
         motorTarget: json['motor_target'] as String?,
         motorPattern: json['motor_pattern'] as String?,
-        ackCount: json['ack_count'] as int? ??
-            (json['intervention_started_at_ms'] == null ? 0 : 1),
         status: json['status'] as String,
       );
 
@@ -229,7 +225,6 @@ class RiskEventRecord {
             componentFeedback.map((item) => item.toJson()).toList(),
         'motor_target': motorTarget,
         'motor_pattern': motorPattern,
-        'ack_count': ackCount,
         'status': status,
       };
 }
@@ -240,6 +235,8 @@ class RiskComponentFeedbackRecord {
     required this.riskSide,
     required this.effectLabel,
     required this.pressureIntervention,
+    this.metricCode,
+    this.metricUnit,
     this.beforeValue,
     this.afterValue,
     this.improvementRatio,
@@ -252,6 +249,8 @@ class RiskComponentFeedbackRecord {
   final double? improvementRatio;
   final String effectLabel;
   final bool pressureIntervention;
+  final String? metricCode;
+  final String? metricUnit;
 
   factory RiskComponentFeedbackRecord.fromJson(Map<String, dynamic> json) =>
       RiskComponentFeedbackRecord(
@@ -262,6 +261,8 @@ class RiskComponentFeedbackRecord {
         improvementRatio: (json['improvement_ratio'] as num?)?.toDouble(),
         effectLabel: json['effect_label'] as String? ?? 'unknown',
         pressureIntervention: json['pressure_intervention'] as bool? ?? true,
+        metricCode: json['metric_code'] as String?,
+        metricUnit: json['metric_unit'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -272,6 +273,8 @@ class RiskComponentFeedbackRecord {
         'improvement_ratio': improvementRatio,
         'effect_label': effectLabel,
         'pressure_intervention': pressureIntervention,
+        'metric_code': metricCode,
+        'metric_unit': metricUnit,
       };
 }
 
@@ -282,7 +285,8 @@ class SessionSummary {
     required this.highestRiskLevel,
     required this.motorCommandCount,
     required this.motorExecutedCount,
-    required this.motorAckCount,
+    this.gaitEpisodeCount = 0,
+    this.latestGaitEpisodes = const [],
     this.lastDataAtMs,
   });
 
@@ -292,7 +296,8 @@ class SessionSummary {
   final int highestRiskLevel;
   final int motorCommandCount;
   final int motorExecutedCount;
-  final int motorAckCount;
+  final int gaitEpisodeCount;
+  final List<GaitEpisodeSummary> latestGaitEpisodes;
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) => SessionSummary(
         sessionStatus: json['session_status'] as String? ?? 'empty',
@@ -301,7 +306,12 @@ class SessionSummary {
         highestRiskLevel: json['highest_risk_level'] as int? ?? 0,
         motorCommandCount: json['motor_command_count'] as int? ?? 0,
         motorExecutedCount: json['motor_executed_count'] as int? ?? 0,
-        motorAckCount: json['motor_ack_count'] as int? ?? 0,
+        gaitEpisodeCount: json['gait_episode_count'] as int? ?? 0,
+        latestGaitEpisodes:
+            (json['latest_gait_episodes'] as List<dynamic>? ?? const [])
+                .cast<Map<String, dynamic>>()
+                .map(GaitEpisodeSummary.fromJson)
+                .toList(growable: false),
       );
 
   Map<String, dynamic> toJson() => {
@@ -311,7 +321,9 @@ class SessionSummary {
         'highest_risk_level': highestRiskLevel,
         'motor_command_count': motorCommandCount,
         'motor_executed_count': motorExecutedCount,
-        'motor_ack_count': motorAckCount,
+        'gait_episode_count': gaitEpisodeCount,
+        'latest_gait_episodes':
+            latestGaitEpisodes.map((item) => item.toJson()).toList(),
       };
 }
 
@@ -633,6 +645,7 @@ class FootGuardApiClient {
     required bool temperatureAvailable,
     required bool leftConnected,
     required bool rightConnected,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -649,6 +662,7 @@ class FootGuardApiClient {
             'temperature_available': temperatureAvailable,
             'left_connected': leftConnected,
             'right_connected': rightConnected,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));
@@ -666,6 +680,7 @@ class FootGuardApiClient {
     bool temperatureAvailable = true,
     bool leftConnected = true,
     bool rightConnected = true,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -683,6 +698,7 @@ class FootGuardApiClient {
             'temperature_available': temperatureAvailable,
             'left_connected': leftConnected,
             'right_connected': rightConnected,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));
@@ -704,6 +720,7 @@ class FootGuardApiClient {
     required String motionState,
     required bool leftConnected,
     required bool rightConnected,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -723,6 +740,7 @@ class FootGuardApiClient {
             'right_connected': rightConnected,
             'valid_temperature_pairs': validTemperaturePairs,
             'motion_state': motionState,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));

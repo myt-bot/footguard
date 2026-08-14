@@ -17,6 +17,7 @@ from ..models import (
     CalibrationState,
     Command,
     CommandAck,
+    GaitEpisode,
     InterventionFeedback,
     RiskEvent,
     SensorFrame,
@@ -28,6 +29,7 @@ from ..schemas import (
     SessionSummary,
 )
 from ..services.risk_service import calibration_status
+from ..services.risk_service import gait_episode_from_model
 from ..services.session_service import recovery_observation
 from ..services.session_metrics import component_feedback
 from ..services.ai_advisor_service import generate_session_advice
@@ -85,12 +87,18 @@ def _session_sensor_summary(rows: list[SensorFrame]) -> dict[str, float]:
         left_pressure = [left.p1, left.p2, left.p3, left.p4, left.p5, left.p6]
         right_pressure = [right.p1, right.p2, right.p3, right.p4, right.p5, right.p6]
         left_total, right_total = sum(left_pressure), sum(right_pressure)
+        left_forefoot = sum(left_pressure[:4])
+        right_forefoot = sum(right_pressure[:4])
         values.append({
             "left_total": left_total,
             "right_total": right_total,
             "load_ratio_abs": abs(log((left_total + 1e-6) / (right_total + 1e-6))),
-            "left_forefoot_ratio": sum(left_pressure[:4]) / max(left_total, 1e-6),
-            "right_forefoot_ratio": sum(right_pressure[:4]) / max(right_total, 1e-6),
+            "left_forefoot_ratio": left_forefoot / max(left_total, 1e-6),
+            "right_forefoot_ratio": right_forefoot / max(right_total, 1e-6),
+            "left_medial_ratio": (left_pressure[0] + left_pressure[3]) / max(left_forefoot, 1e-6),
+            "right_medial_ratio": (right_pressure[0] + right_pressure[3]) / max(right_forefoot, 1e-6),
+            "left_lateral_ratio": left_pressure[1] / max(left_forefoot, 1e-6),
+            "right_lateral_ratio": right_pressure[1] / max(right_forefoot, 1e-6),
             "temperature_delta_max_c": max(abs(a - b) for a, b in zip(
                 [left.t1, left.t2, left.t3, left.t4],
                 [right.t1, right.t2, right.t3, right.t4],
@@ -147,6 +155,14 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         .order_by(SensorFrame.timestamp_ms.desc())
         .limit(4000)
     ))
+    gait_models = list(
+        session.scalars(
+            select(GaitEpisode)
+            .where(GaitEpisode.reset_at_ms >= window_start_ms)
+            .order_by(GaitEpisode.ended_at_ms.desc())
+            .limit(8)
+        )
+    )
     return SessionSummary(
         session_status=status,
         data_source=latest.source if latest else "none",
@@ -166,6 +182,10 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         recovery_counts=dict(recoveries),
         sensor_summary=_session_sensor_summary(session_rows),
         latest_events=[_event_out(session, event) for event in events[:8]],
+        gait_episode_count=session.query(GaitEpisode).filter(
+            GaitEpisode.reset_at_ms >= window_start_ms
+        ).count(),
+        latest_gait_episodes=[gait_episode_from_model(item) for item in gait_models],
     )
 
 

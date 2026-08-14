@@ -71,7 +71,14 @@ def _chat_fallback(payload: AiChatRequest) -> str:
             if not payload.temperature_available
             else "有效温度点暂未达到风险阈值。"
         )
-        text = f"当前压力规则未发现持续异常。{temperature}请继续观察趋势和足部皮肤状态。"
+        gait_text = ""
+        if payload.gait and payload.gait.last_completed_episode:
+            episode = payload.gait.last_completed_episode
+            gait_text = (
+                f"最近一次有效行走记录 {episode.step_count} 次落脚，"
+                f"估算步频 {episode.cadence_spm:.0f} 步/分钟。"
+            )
+        text = f"当前压力规则未发现持续异常。{temperature}{gait_text}请继续观察趋势和足部皮肤状态。"
     else:
         text = f"{_explanation(payload)}{_advice(payload)}"
     return text if MEDICAL_BOUNDARY in text else f"{text}{MEDICAL_BOUNDARY}"
@@ -83,6 +90,8 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
             "role": "system",
             "content": (
                 "你是足安智垫辅助监测状态助手。只依据结构化状态回答用户问题，"
+                "明确区分当前状态与最近一次完整行走；步频偏低本身不等于异常，"
+                "重点解释左右负荷不对称、反复区域受压和步时稳定性。"
                 "不得诊断疾病、虚构数值或决定马达动作。用简洁中文输出 JSON，"
                 f"只包含 answer 字符串，末尾说明：{MEDICAL_BOUNDARY}"
             ),
@@ -103,9 +112,30 @@ def _session_fallback(summary: SessionSummary) -> str:
         "left_load_bias": "左侧双足负载分配异常",
         "right_load_bias": "右侧双足负载分配异常",
         "forefoot_high": "前掌持续负荷集中",
+        "medial_load_concentration": "内侧局部负荷集中",
+        "lateral_load_concentration": "外侧局部负荷集中",
         "temperature_asymmetry": "同区温度趋势异常",
     }
     sensors = summary.sensor_summary
+    gait_text = ""
+    if summary.latest_gait_episodes:
+        latest_gait = summary.latest_gait_episodes[0]
+        issue_labels = {
+            "walking_load_asymmetry": "左右行走负荷不对称",
+            "walking_forefoot_concentration": "行走时前掌反复受压",
+            "walking_medial_concentration": "行走时内侧反复受压",
+            "walking_lateral_concentration": "行走时外侧反复受压",
+            "step_timing_instability": "步时波动较大",
+        }
+        issues = "、".join(
+            issue_labels[item.issue_type] for item in latest_gait.issues
+        )
+        gait_text = (
+            f"最近一次有效行走记录 {latest_gait.step_count} 次落脚，"
+            f"估算步频 {latest_gait.cadence_spm:.0f} 步/分钟。"
+        )
+        if issues:
+            gait_text += f"工程趋势包括{issues}。"
     sensor_text = ""
     if sensors:
         left_total = sensors.get("left_total_mean")
@@ -135,7 +165,7 @@ def _session_fallback(summary: SessionSummary) -> str:
             if not summary.temperature_available
             else "有效温度点未记录持续风险。"
         )
-        text = f"最近会话未记录持续压力风险。{temperature}{sensor_text}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
+        text = f"最近会话未记录持续压力风险。{temperature}{sensor_text}{gait_text}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
     else:
         frequent = "、".join(
             f"{risk_labels.get(name, name)} {count} 次"
@@ -148,7 +178,7 @@ def _session_fallback(summary: SessionSummary) -> str:
             f"最近会话记录 {summary.event_count} 次风险事件，分布为{frequent}。"
             f"马达确认执行 {summary.motor_executed_count} 次；恢复评价中有效 {effective} 次、"
             f"部分有效 {partial} 次、未恢复 {ineffective} 次。"
-            f"{sensor_text}"
+            f"{sensor_text}{gait_text}"
             "建议优先复查反复出现的一侧和区域，并结合皮肤外观与鞋内摩擦情况观察。"
         )
     if summary.session_status != "live" and summary.session_status != "empty":
@@ -163,6 +193,8 @@ def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
             "content": (
                 "你是足安智垫的会话总结助手。仅依据结构化会话统计给出简洁中文辅助建议，"
                 "区分当前实时状态与最近历史，不得把历史风险描述为当前风险，不得诊断疾病、"
+                "结合完整行走记录解释左右减负、反复受压区域和步时稳定性，"
+                "不得把低步频单独描述为病理异常。"
                 "预测溃疡、虚构数值或决定马达动作。输出 JSON 且只包含 advice 字符串，"
                 f"末尾必须说明：{MEDICAL_BOUNDARY}"
             ),
@@ -209,7 +241,12 @@ def _risk_target(payload: AiAdviceRequest) -> str:
             return ("left",) if risk.risk_side == "left" else ()
         if risk.risk_type == "right_load_bias":
             return ("right",) if risk.risk_side == "right" else ()
-        if risk.risk_type in {"forefoot_high", "temperature_asymmetry"}:
+        if risk.risk_type in {
+            "forefoot_high",
+            "medial_load_concentration",
+            "lateral_load_concentration",
+            "temperature_asymmetry",
+        }:
             if risk.risk_side == "both":
                 return ("left", "right")
             return (risk.risk_side,) if risk.risk_side in {"left", "right"} else ()
@@ -234,7 +271,15 @@ def _candidate_pattern(payload: AiAdviceRequest, target: str) -> str:
     ]
     if target == "none" or not risks:
         return "off"
-    if any(risk.risk_type == "forefoot_high" for risk in risks):
+    if any(
+        risk.risk_type
+        in {
+            "forefoot_high",
+            "medial_load_concentration",
+            "lateral_load_concentration",
+        }
+        for risk in risks
+    ):
         pattern = "long"
     elif any(risk.risk_type in {"left_load_bias", "right_load_bias"} for risk in risks):
         pattern = "double"
@@ -277,6 +322,13 @@ def _explanation(payload: AiAdviceRequest) -> str:
         return f"检测到右脚承重相对偏高并达到风险等级 {risk.risk_level}{detail}。"
     if risk.risk_type == "forefoot_high":
         return f"检测到前掌区域相对压力持续偏高，当前风险等级为 {risk.risk_level}。"
+    if risk.risk_type in {
+        "medial_load_concentration",
+        "lateral_load_concentration",
+    }:
+        region = "内侧" if risk.risk_type.startswith("medial") else "外侧"
+        side = "左脚" if risk.risk_side == "left" else "右脚"
+        return f"检测到{side}{region}局部负荷持续集中，当前风险等级为 {risk.risk_level}。"
     if risk.risk_type == "temperature_asymmetry":
         detail = (
             f"，最大同区温差约 {payload.temperature_delta_max_c:.1f}℃"
@@ -307,6 +359,14 @@ def _advice(payload: AiAdviceRequest) -> str:
     if risk_type == "forefoot_high":
         return (
             "请减轻前掌持续受力，短暂休息并检查鞋垫与鞋内异物，随后观察压力是否回落。"
+            f"{MEDICAL_BOUNDARY}"
+        )
+    if risk_type in {
+        "medial_load_concentration",
+        "lateral_load_concentration",
+    }:
+        return (
+            "请短暂休息并减轻对应区域受力，检查袜鞋、鞋垫贴合和皮肤状态，随后观察局部负荷是否回落。"
             f"{MEDICAL_BOUNDARY}"
         )
     if risk_type == "temperature_asymmetry":

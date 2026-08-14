@@ -18,6 +18,7 @@ import 'frame_pairing_service.dart';
 import 'ble_command_bridge.dart';
 import 'local_risk_engine.dart';
 import 'offline_monitoring_store.dart';
+import 'risk_speech_coordinator.dart';
 
 class MonitoringController extends ChangeNotifier {
   MonitoringController({
@@ -52,11 +53,12 @@ class MonitoringController extends ChangeNotifier {
   bool _calibrationResetting = false;
   DateTime? _lastSessionAdviceAt;
   LocalRiskResult? _localResult;
-  String? _lastNoticeSignature;
-  int? _noticeClearStartedAt;
+  final RiskSpeechCoordinator _riskSpeechCoordinator = RiskSpeechCoordinator();
+  String? _announcedGaitEpisodeId;
   String? _pendingLocalEventId;
   OfflineIntervention? _activeOfflineIntervention;
   int _noticeSequence = 0;
+  int _gaitNoticeSequence = 0;
   int? _handledBackendResetAtMs;
 
   FootFrame? left;
@@ -89,6 +91,7 @@ class MonitoringController extends ChangeNotifier {
   bool sessionAdviceLoading = false;
   RecoveryObservation? recoveryObservation;
   String? riskNoticeMessage;
+  String? gaitNoticeMessage;
   String aiQuestionStatus = '请选择一个常见问题';
   String aiChatStatus = '可询问当前状态、设备检查或日常观察建议';
   String calibrationStage = 'empty_reference';
@@ -104,6 +107,7 @@ class MonitoringController extends ChangeNotifier {
   bool get aiChatLoading => _aiChatLoading;
   bool get calibrationResetting => _calibrationResetting;
   int get noticeSequence => _noticeSequence;
+  int get gaitNoticeSequence => _gaitNoticeSequence;
   int get offlinePairCount => _pendingUploadPairs.length;
   String get ruleVersion => LocalRiskEngine.ruleVersion;
   bool get bothFeetConnected => _bothFeetConnected;
@@ -127,13 +131,22 @@ class MonitoringController extends ChangeNotifier {
         _ => '数据不足',
       };
 
-  String get gaitStepLabel => gait.state == 'walking'
-      ? '${gait.stepCount}（左 ${gait.leftSteps} / 右 ${gait.rightSteps}）'
-      : '--';
+  String get gaitStepLabel {
+    final episode = gait.lastCompletedEpisode;
+    if (gait.state == 'walking') {
+      return '${gait.stepCount}（左 ${gait.leftSteps} / 右 ${gait.rightSteps}）';
+    }
+    return episode == null
+        ? '--'
+        : '${episode.stepCount}（左 ${episode.leftSteps} / 右 ${episode.rightSteps}）';
+  }
 
-  String get gaitCadenceLabel => gait.cadenceSpm == null
-      ? '--'
-      : '${gait.cadenceSpm!.toStringAsFixed(0)} 步/分钟';
+  String get gaitCadenceLabel {
+    final cadence = gait.state == 'walking'
+        ? gait.cadenceSpm
+        : gait.lastCompletedEpisode?.cadenceSpm;
+    return cadence == null ? '--' : '${cadence.toStringAsFixed(0)} 步/分钟';
+  }
 
   Future<void> start() async {
     final savedPairs = await _offlineStore.loadPairs();
@@ -477,6 +490,7 @@ class MonitoringController extends ChangeNotifier {
           leftMotionState = snapshot.leftMotionState;
           rightMotionState = snapshot.rightMotionState;
           gait = snapshot.gait;
+          _updateGaitNotice();
           risk = snapshot.risk;
           activeRisks = snapshot.activeRisks;
           regionalAnalysis = snapshot.regionalAnalysis;
@@ -590,7 +604,7 @@ class MonitoringController extends ChangeNotifier {
       motorStatus = '已执行 ${command.target} ${command.pattern} 马达振动';
       motorCommand = null;
     } catch (error) {
-      motorStatus = '马达 ACK 失败：$error';
+      motorStatus = '马达确认失败：$error';
     }
     notifyListeners();
   }
@@ -641,6 +655,7 @@ class MonitoringController extends ChangeNotifier {
         temperatureAvailable: regionalAnalysis?.temperatureAvailable ?? false,
         leftConnected: left != null,
         rightConnected: right != null,
+        gait: gait,
       );
       if (_currentMonitoringSignature == signature) {
         aiQuestionAnswer = answer;
@@ -690,6 +705,7 @@ class MonitoringController extends ChangeNotifier {
         motionState: motionState,
         leftConnected: left != null,
         rightConnected: right != null,
+        gait: gait,
       );
       aiChatStatus =
           aiChatAnswer!.usedFallback ? '云端暂不可用，已使用当前状态对应的本地回答' : '回答已更新';
@@ -732,6 +748,9 @@ class MonitoringController extends ChangeNotifier {
   Future<void> restartWearingCalibration() async {
     if (_calibrationResetting) return;
     calibrationStage = 'empty_reference';
+    _riskSpeechCoordinator.reset();
+    _announcedGaitEpisodeId = null;
+    gaitNoticeMessage = null;
     _calibrationResetting = true;
     notifyListeners();
     _localRiskEngine.reset();
@@ -869,21 +888,39 @@ class MonitoringController extends ChangeNotifier {
               (!item.isPressure || motionState != 'moving'),
         )
         .toList(growable: false);
-    if (actionable.isEmpty) {
-      _noticeClearStartedAt ??= now;
-      if (now - _noticeClearStartedAt! >= 5000) {
-        _lastNoticeSignature = null;
-        _noticeClearStartedAt = null;
-      }
+    final newlyActionable = _riskSpeechCoordinator.takeNew(actionable, now);
+    if (newlyActionable.isEmpty) return;
+    riskNoticeMessage = newlyActionable.map(riskVoiceMessage).join('；');
+    _noticeSequence += 1;
+  }
+
+  void _updateGaitNotice() {
+    final episode = gait.lastCompletedEpisode;
+    if (episode == null ||
+        episode.issues.isEmpty ||
+        episode.episodeId == _announcedGaitEpisodeId) {
       return;
     }
-    _noticeClearStartedAt = null;
-    final signature =
-        actionable.map((item) => '${item.riskType}:${item.riskSide}').join('|');
-    if (_lastNoticeSignature != null) return;
-    _lastNoticeSignature = signature;
-    riskNoticeMessage = actionable.map(riskVoiceMessage).join('；');
-    _noticeSequence += 1;
+    _announcedGaitEpisodeId = episode.episodeId;
+    gaitNoticeMessage =
+        '本次行走检测到${episode.issues.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
+    _gaitNoticeSequence += 1;
+  }
+
+  static String _gaitIssueVoiceLabel(GaitIssue issue) {
+    final side = issue.side == 'left'
+        ? '左脚'
+        : issue.side == 'right'
+            ? '右脚'
+            : '';
+    return switch (issue.issueType) {
+      'walking_load_asymmetry' => '$side行走负荷持续偏高',
+      'walking_forefoot_concentration' => '$side前掌反复受压',
+      'walking_medial_concentration' => '$side内侧反复受压',
+      'walking_lateral_concentration' => '$side外侧反复受压',
+      'step_timing_instability' => '步时波动较大',
+      _ => '行走负荷趋势异常',
+    };
   }
 
   void _tickRecoveryObservation() {

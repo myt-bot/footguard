@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from math import exp, log, sqrt
-from statistics import median
+from statistics import median, pstdev
 from time import time
 
 from sqlalchemy import select, update
@@ -34,6 +34,10 @@ from ..config import (
     FOREFOOT_MAX_THRESHOLD,
     FOREFOOT_NOISE_MULTIPLIER,
     GAIT_ANALYSIS_WINDOW_MS,
+    GAIT_ACTIVE_RECENCY_MS,
+    GAIT_EPISODE_END_HOLD_MS,
+    GAIT_EPISODE_MIN_STEPS,
+    GAIT_LOAD_ASYMMETRY_THRESHOLD,
     GAIT_LOAD_SHIFT_THRESHOLD,
     GAIT_MAX_ADAPTIVE_THRESHOLD,
     GAIT_MAX_CADENCE_SPM,
@@ -41,7 +45,10 @@ from ..config import (
     GAIT_MIN_MOVING_RATIO,
     GAIT_MIN_STEP_CANDIDATES,
     GAIT_MIN_WINDOW_MS,
+    GAIT_REGION_DELTA_THRESHOLD,
+    GAIT_REGION_REPEAT_RATIO,
     GAIT_STEP_REFRACTORY_MS,
+    GAIT_STEP_INTERVAL_CV_THRESHOLD,
     IMU_ACCEL_STATIONARY_TOLERANCE_MS2,
     IMU_ACCEL_DELTA_MOVING_MS2,
     IMU_GRAVITY_MS2,
@@ -68,6 +75,9 @@ from ..config import (
     REGIONAL_ASYMMETRY_FOR_SEVERE,
     REGIONAL_MIN_CHANNEL_EVIDENCE,
     REGIONAL_MIN_VISIBLE_SCORE,
+    REGIONAL_NOISE_MULTIPLIER,
+    REGIONAL_RATIO_DELTA_THRESHOLD,
+    REGIONAL_RATIO_EXIT_THRESHOLD,
     REGIONAL_SHARE_DELTA_FOR_SEVERE,
     REARFOOT_MIN_VALID_CHANNELS,
     RISK_MIN_TOTAL_PRESSURE,
@@ -86,6 +96,7 @@ from ..config import (
 from ..models import (
     CalibrationProfile,
     Command,
+    GaitEpisode,
     InterventionFeedback,
     RiskEvent,
     SensorFrame,
@@ -102,6 +113,8 @@ from ..repositories.event_repository import active_event, feedback_for_event
 from ..repositories.sensor_repository import latest_frame, recent_frames, to_schema
 from ..schemas import (
     CalibrationStatus,
+    GaitEpisodeSummary,
+    GaitIssue,
     GaitSummary,
     RegionalAnalysis,
     RealtimeResponse,
@@ -150,6 +163,7 @@ class BaselineProfile:
     load_ratio_mad: float
     left_forefoot_mad: float
     right_forefoot_mad: float
+    regional_share_mad: tuple[float, ...]
     pressure_channel_trust: tuple[bool, ...]
     temperature_valid: tuple[bool, ...]
     pressure_channel_contact_trust: tuple[bool, ...] = (True,) * 12
@@ -387,57 +401,22 @@ def _pair_history(
     return sorted(metrics, key=lambda item: item.timestamp_ms)
 
 
-def _gait_summary(
-    metrics: list[PairMetric], baseline: BaselineProfile
-) -> GaitSummary:
-    if not metrics:
-        return GaitSummary(
-            state="insufficient_data",
-            window_ms=0,
-            step_count=0,
-            left_steps=0,
-            right_steps=0,
-        )
-    latest_at_ms = metrics[-1].timestamp_ms
-    recent = [
-        metric
-        for metric in metrics
-        if metric.timestamp_ms >= latest_at_ms - GAIT_ANALYSIS_WINDOW_MS
-    ]
-    segment = [recent[-1]]
-    for metric in reversed(recent[:-1]):
-        if segment[-1].timestamp_ms - metric.timestamp_ms > RISK_CONTINUITY_GAP_MS:
-            break
-        segment.append(metric)
-    segment.reverse()
-    window_ms = max(0, segment[-1].timestamp_ms - segment[0].timestamp_ms)
-    empty = {
-        "window_ms": window_ms,
-        "step_count": 0,
-        "left_steps": 0,
-        "right_steps": 0,
-    }
-    if window_ms < GAIT_MIN_WINDOW_MS or segment[-1].motion_state == "unavailable":
-        return GaitSummary(state="insufficient_data", **empty)
-    if segment[-1].motion_state == "stationary":
-        return GaitSummary(state="stationary", **empty)
-
-    moving_ratio = sum(
-        metric.motion_state == "moving" for metric in segment
-    ) / len(segment)
-    center = (
-        baseline.load_ratio
-        if baseline.ready
-        else median(metric.log_load_ratio for metric in segment)
+def _gait_step_events(
+    segment: list[PairMetric], baseline: BaselineProfile
+) -> list[tuple[int, str, PairMetric]]:
+    if not segment:
+        return []
+    center = baseline.load_ratio if baseline.ready else median(
+        metric.log_load_ratio for metric in segment
     )
     adaptive_threshold = min(
         GAIT_MAX_ADAPTIVE_THRESHOLD,
         baseline.load_ratio_mad * 4.0 if baseline.ready else 0.0,
     )
     threshold = max(GAIT_LOAD_SHIFT_THRESHOLD, adaptive_threshold)
-    events: list[tuple[int, str]] = []
+    events: list[tuple[int, str, PairMetric]] = []
     current_side: str | None = None
-    last_event_at_ms = 0
+    last_event_at_ms: int | None = None
     for metric in segment:
         if metric.motion_state != "moving" or not metric.pressure_valid:
             continue
@@ -452,12 +431,25 @@ def _gait_summary(
         if (
             side is not None
             and side != current_side
-            and metric.timestamp_ms - last_event_at_ms >= GAIT_STEP_REFRACTORY_MS
+            and (
+                last_event_at_ms is None
+                or metric.timestamp_ms - last_event_at_ms
+                >= GAIT_STEP_REFRACTORY_MS
+            )
         ):
-            events.append((metric.timestamp_ms, side))
+            events.append((metric.timestamp_ms, side, metric))
             current_side = side
             last_event_at_ms = metric.timestamp_ms
+    return events
 
+
+def _gait_episode_from_segment(
+    segment: list[PairMetric], baseline: BaselineProfile
+) -> GaitEpisodeSummary | None:
+    if not segment:
+        return None
+    events = _gait_step_events(segment, baseline)
+    window_ms = segment[-1].timestamp_ms - segment[0].timestamp_ms
     intervals = [
         events[index][0] - events[index - 1][0]
         for index in range(1, len(events))
@@ -466,21 +458,301 @@ def _gait_summary(
         <= 3_000
     ]
     cadence_spm = 60_000.0 / median(intervals) if intervals else None
-    gait_is_valid = (
-        moving_ratio >= GAIT_MIN_MOVING_RATIO
-        and len(events) >= GAIT_MIN_STEP_CANDIDATES
+    moving_ratio = sum(item.motion_state == "moving" for item in segment) / len(segment)
+    if not (
+        window_ms >= GAIT_MIN_WINDOW_MS
+        and moving_ratio >= GAIT_MIN_MOVING_RATIO
+        and len(events) >= GAIT_EPISODE_MIN_STEPS
         and cadence_spm is not None
         and GAIT_MIN_CADENCE_SPM <= cadence_spm <= GAIT_MAX_CADENCE_SPM
+    ):
+        return None
+
+    side_events = {
+        side: [metric for _, event_side, metric in events if event_side == side]
+        for side in ("left", "right")
+    }
+    load_indexes = {"left": 0.0, "right": 0.0}
+    for index, (event_at_ms, side, metric) in enumerate(events):
+        previous_at_ms = events[index - 1][0] if index > 0 else None
+        next_at_ms = events[index + 1][0] if index + 1 < len(events) else None
+        if previous_at_ms is None and next_at_ms is None:
+            support_ms = 0
+        elif previous_at_ms is None:
+            support_ms = next_at_ms - event_at_ms
+        elif next_at_ms is None:
+            support_ms = event_at_ms - previous_at_ms
+        else:
+            support_ms = (next_at_ms - previous_at_ms) / 2
+        load_indexes[side] += (
+            _estimated_total(metric, baseline, side) * support_ms / 1000.0
+        )
+    load_sum = load_indexes["left"] + load_indexes["right"]
+    load_asymmetry = (
+        abs(load_indexes["left"] - load_indexes["right"]) / load_sum
+        if load_sum > 1e-9
+        else 0.0
     )
-    if not gait_is_valid:
-        return GaitSummary(state="insufficient_data", **empty)
-    return GaitSummary(
-        state="walking",
-        window_ms=window_ms,
+    interval_mean = sum(intervals) / len(intervals) if intervals else 0.0
+    step_interval_cv = (
+        pstdev(intervals) / interval_mean
+        if len(intervals) >= 2 and interval_mean > 0
+        else 0.0
+    )
+    region_indices = {
+        "forefoot": (0, 1, 2, 3),
+        "medial": (0, 3),
+        "lateral": (1,),
+    }
+
+    def share(metric: PairMetric, side: str, region: str) -> float:
+        distribution = (
+            metric.left_distribution if side == "left" else metric.right_distribution
+        )
+        value = sum(distribution[index] for index in region_indices[region])
+        return (
+            value
+            if region == "forefoot"
+            else value / max(sum(distribution[:4]), 1e-9)
+        )
+
+    shares = {
+        (side, region): median(share(metric, side, region) for metric in side_events[side])
+        if side_events[side]
+        else 0.0
+        for side in ("left", "right")
+        for region in region_indices
+    }
+    baseline_shares = {
+        (side, region): (
+            sum(
+                (baseline.left_distribution if side == "left" else baseline.right_distribution)[index]
+                for index in indices
+            )
+            if region == "forefoot"
+            else _regional_distribution_share(
+                baseline.left_distribution if side == "left" else baseline.right_distribution,
+                region,
+            )
+        )
+        for side in ("left", "right")
+        for region, indices in region_indices.items()
+    }
+    issues: list[GaitIssue] = []
+    if (
+        all(len(side_events[side]) >= 3 for side in ("left", "right"))
+        and load_asymmetry >= GAIT_LOAD_ASYMMETRY_THRESHOLD
+    ):
+        issues.append(
+            GaitIssue(
+                issue_type="walking_load_asymmetry",
+                side="left" if load_indexes["left"] > load_indexes["right"] else "right",
+                value=round(load_asymmetry, 4),
+                threshold=GAIT_LOAD_ASYMMETRY_THRESHOLD,
+            )
+        )
+    for region, issue_type in (
+        ("forefoot", "walking_forefoot_concentration"),
+        ("medial", "walking_medial_concentration"),
+        ("lateral", "walking_lateral_concentration"),
+    ):
+        for side in ("left", "right"):
+            samples = side_events[side]
+            if len(samples) < 3:
+                continue
+            delta = shares[(side, region)] - baseline_shares[(side, region)]
+            repeated = sum(
+                share(metric, side, region) - baseline_shares[(side, region)]
+                >= GAIT_REGION_DELTA_THRESHOLD
+                for metric in samples
+            ) / len(samples)
+            if delta >= GAIT_REGION_DELTA_THRESHOLD and repeated >= GAIT_REGION_REPEAT_RATIO:
+                issues.append(
+                    GaitIssue(
+                        issue_type=issue_type,
+                        side=side,
+                        value=round(delta, 4),
+                        threshold=GAIT_REGION_DELTA_THRESHOLD,
+                    )
+                )
+    if len(intervals) >= 6 and step_interval_cv >= GAIT_STEP_INTERVAL_CV_THRESHOLD:
+        issues.append(
+            GaitIssue(
+                issue_type="step_timing_instability",
+                side="none",
+                value=round(step_interval_cv, 4),
+                threshold=GAIT_STEP_INTERVAL_CV_THRESHOLD,
+            )
+        )
+    return GaitEpisodeSummary(
+        episode_id=f"gait_{segment[-1].sync_id}_{events[0][0]}_{events[-1][0]}",
+        started_at_ms=events[0][0],
+        ended_at_ms=events[-1][0],
+        duration_ms=events[-1][0] - events[0][0],
         step_count=len(events),
-        left_steps=sum(side == "left" for _, side in events),
-        right_steps=sum(side == "right" for _, side in events),
+        left_steps=len(side_events["left"]),
+        right_steps=len(side_events["right"]),
         cadence_spm=round(cadence_spm, 1),
+        step_interval_cv=round(step_interval_cv, 4),
+        left_load_index=round(load_indexes["left"], 4),
+        right_load_index=round(load_indexes["right"], 4),
+        load_asymmetry=round(load_asymmetry, 4),
+        left_forefoot_ratio=round(shares[("left", "forefoot")], 4),
+        right_forefoot_ratio=round(shares[("right", "forefoot")], 4),
+        left_medial_ratio=round(shares[("left", "medial")], 4),
+        right_medial_ratio=round(shares[("right", "medial")], 4),
+        left_lateral_ratio=round(shares[("left", "lateral")], 4),
+        right_lateral_ratio=round(shares[("right", "lateral")], 4),
+        issues=issues,
+    )
+
+
+def _episode_to_model(episode: GaitEpisodeSummary, reset_at_ms: int) -> GaitEpisode:
+    metrics = episode.model_dump(exclude={"episode_id", "issues"})
+    return GaitEpisode(
+        episode_id=episode.episode_id,
+        reset_at_ms=reset_at_ms,
+        started_at_ms=episode.started_at_ms,
+        ended_at_ms=episode.ended_at_ms,
+        duration_ms=episode.duration_ms,
+        step_count=episode.step_count,
+        left_steps=episode.left_steps,
+        right_steps=episode.right_steps,
+        cadence_spm=episode.cadence_spm,
+        step_interval_cv=episode.step_interval_cv,
+        left_load_index=episode.left_load_index,
+        right_load_index=episode.right_load_index,
+        load_asymmetry=episode.load_asymmetry,
+        metrics_json=json.dumps(metrics, separators=(",", ":")),
+        issues_json=json.dumps(
+            [item.model_dump(mode="json") for item in episode.issues],
+            separators=(",", ":"),
+        ),
+    )
+
+
+def gait_episode_from_model(model: GaitEpisode) -> GaitEpisodeSummary:
+    metrics = json.loads(model.metrics_json or "{}")
+    return GaitEpisodeSummary(
+        episode_id=model.episode_id,
+        started_at_ms=model.started_at_ms,
+        ended_at_ms=model.ended_at_ms,
+        duration_ms=model.duration_ms,
+        step_count=model.step_count,
+        left_steps=model.left_steps,
+        right_steps=model.right_steps,
+        cadence_spm=model.cadence_spm,
+        step_interval_cv=model.step_interval_cv,
+        left_load_index=model.left_load_index,
+        right_load_index=model.right_load_index,
+        load_asymmetry=model.load_asymmetry,
+        left_forefoot_ratio=metrics.get("left_forefoot_ratio", 0.0),
+        right_forefoot_ratio=metrics.get("right_forefoot_ratio", 0.0),
+        left_medial_ratio=metrics.get("left_medial_ratio", 0.0),
+        right_medial_ratio=metrics.get("right_medial_ratio", 0.0),
+        left_lateral_ratio=metrics.get("left_lateral_ratio", 0.0),
+        right_lateral_ratio=metrics.get("right_lateral_ratio", 0.0),
+        issues=[
+            GaitIssue.model_validate(item)
+            for item in json.loads(model.issues_json or "[]")
+        ],
+    )
+
+
+def _latest_saved_gait_episode(
+    session: Session | None, reset_at_ms: int
+) -> GaitEpisodeSummary | None:
+    if session is None:
+        return None
+    model = session.scalar(
+        select(GaitEpisode)
+        .where(GaitEpisode.reset_at_ms >= reset_at_ms)
+        .order_by(GaitEpisode.ended_at_ms.desc())
+        .limit(1)
+    )
+    return gait_episode_from_model(model) if model is not None else None
+
+
+def _gait_summary(
+    metrics: list[PairMetric],
+    baseline: BaselineProfile,
+    *,
+    session: Session | None = None,
+    record: bool = False,
+) -> GaitSummary:
+    if not metrics:
+        return GaitSummary(
+            state="insufficient_data",
+            window_ms=0,
+            step_count=0,
+            left_steps=0,
+            right_steps=0,
+        )
+    state = calibration_state(session) if session is not None else None
+    reset_at_ms = state.reset_at_ms if state and state.reset_at_ms else 0
+    latest_at_ms = metrics[-1].timestamp_ms
+    recent = [
+        item
+        for item in metrics
+        if item.timestamp_ms >= latest_at_ms - GAIT_ANALYSIS_WINDOW_MS
+    ]
+    live_episode = _gait_episode_from_segment(recent, baseline)
+    live_events = _gait_step_events(recent, baseline)
+    live_valid = (
+        live_episode is not None
+        and metrics[-1].motion_state == "moving"
+        and bool(live_events)
+        and latest_at_ms - live_events[-1][0] <= GAIT_ACTIVE_RECENCY_MS
+    )
+
+    completed: GaitEpisodeSummary | None = None
+    last_moving_index = next(
+        (
+            index
+            for index in range(len(metrics) - 1, -1, -1)
+            if metrics[index].motion_state == "moving"
+        ),
+        None,
+    )
+    if (
+        last_moving_index is not None
+        and latest_at_ms - metrics[last_moving_index].timestamp_ms
+        >= GAIT_EPISODE_END_HOLD_MS
+    ):
+        end_ms = metrics[last_moving_index].timestamp_ms
+        completed_segment = [
+            item
+            for item in metrics
+            if end_ms - GAIT_ANALYSIS_WINDOW_MS <= item.timestamp_ms <= end_ms
+        ]
+        completed = _gait_episode_from_segment(completed_segment, baseline)
+        if completed is not None and record and session is not None:
+            if session.get(GaitEpisode, completed.episode_id) is None:
+                session.add(_episode_to_model(completed, reset_at_ms))
+                session.commit()
+    last_completed = completed or _latest_saved_gait_episode(session, reset_at_ms)
+    window_ms = recent[-1].timestamp_ms - recent[0].timestamp_ms if recent else 0
+    if live_valid and live_episode is not None:
+        return GaitSummary(
+            state="walking",
+            window_ms=window_ms,
+            step_count=live_episode.step_count,
+            left_steps=live_episode.left_steps,
+            right_steps=live_episode.right_steps,
+            cadence_spm=live_episode.cadence_spm,
+            last_completed_episode=last_completed,
+        )
+    return GaitSummary(
+        state=(
+            "stationary"
+            if metrics[-1].motion_state == "stationary"
+            else "insufficient_data"
+        ),
+        window_ms=window_ms,
+        step_count=0,
+        left_steps=0,
+        right_steps=0,
+        last_completed_episode=last_completed,
     )
 
 
@@ -661,6 +933,7 @@ def _empty_baseline(sample_count: int = 0) -> BaselineProfile:
         load_ratio_mad=0.0,
         left_forefoot_mad=0.0,
         right_forefoot_mad=0.0,
+        regional_share_mad=(0.0,) * 4,
         pressure_channel_trust=(True,) * 12,
         temperature_valid=(False,) * 4,
         pressure_channel_contact_trust=(True,) * 12,
@@ -842,6 +1115,19 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
     load_ratio = median(load_ratio_values)
     left_forefoot = [metric.left_forefoot_ratio for metric in inliers]
     right_forefoot = [metric.right_forefoot_ratio for metric in inliers]
+    regional_series = [
+        [
+            _regional_distribution_share(metric.left_distribution, region)
+            for metric in inliers
+        ]
+        for region in ("medial", "lateral")
+    ] + [
+        [
+            _regional_distribution_share(metric.right_distribution, region)
+            for metric in inliers
+        ]
+        for region in ("medial", "lateral")
+    ]
     channel_series = [
         [getattr(metric, side)[index] for metric in inliers]
         for side in ("left_pressure", "right_pressure")
@@ -882,6 +1168,7 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         load_ratio_mad=_mad(load_ratio_values, load_ratio),
         left_forefoot_mad=_mad(left_forefoot),
         right_forefoot_mad=_mad(right_forefoot),
+        regional_share_mad=tuple(_mad(values) for values in regional_series),
         pressure_channel_trust=channel_trust,
         temperature_valid=temperature_valid,
         pressure_channel_contact_trust=channel_trust,
@@ -912,6 +1199,7 @@ def _profile_to_model(
         right_distribution_json=json.dumps(profile.right_distribution),
         left_forefoot_mad=profile.left_forefoot_mad,
         right_forefoot_mad=profile.right_forefoot_mad,
+        regional_share_mad_json=json.dumps(profile.regional_share_mad),
         pressure_asymmetry_json=json.dumps(profile.pressure_asymmetry),
         pressure_channel_trust_json=json.dumps(profile.pressure_channel_trust),
         temperature_delta_json=json.dumps(profile.temperature_delta_c),
@@ -950,6 +1238,9 @@ def _profile_from_model(model: CalibrationProfile) -> BaselineProfile:
         load_ratio_mad=model.load_ratio_mad,
         left_forefoot_mad=model.left_forefoot_mad,
         right_forefoot_mad=model.right_forefoot_mad,
+        regional_share_mad=_json_tuple(
+            "regional_share_mad_json", (0.0,) * 4
+        ),
         pressure_channel_trust=pressure_channel_trust,
         temperature_valid=tuple(json.loads(model.temperature_valid_json)),
         pressure_channel_contact_trust=pressure_channel_trust,
@@ -1122,6 +1413,103 @@ def _forefoot_delta(
         if usable[index]
     ) / baseline_total
     return current_forefoot - baseline_forefoot
+
+
+def _regional_indices(region: str) -> tuple[int, ...]:
+    return (0, 3) if region == "medial" else (1,)
+
+
+def _regional_distribution_share(
+    distribution: tuple[float, ...], region: str
+) -> float:
+    forefoot = sum(distribution[:4])
+    return (
+        sum(distribution[index] for index in _regional_indices(region))
+        / max(forefoot, 1e-9)
+    )
+
+
+def _regional_mad_index(side: str, region: str) -> int:
+    return (0 if side == "left" else 2) + (0 if region == "medial" else 1)
+
+
+def _regional_threshold(
+    baseline: BaselineProfile,
+    side: str,
+    region: str,
+    *,
+    exit_threshold: bool = False,
+) -> float:
+    engineering = (
+        REGIONAL_RATIO_EXIT_THRESHOLD
+        if exit_threshold
+        else REGIONAL_RATIO_DELTA_THRESHOLD
+    )
+    noise = (
+        baseline.regional_share_mad[_regional_mad_index(side, region)]
+        * REGIONAL_NOISE_MULTIPLIER
+    )
+    return max(engineering, noise)
+
+
+def _regional_delta(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    side: str,
+    region: str,
+) -> float:
+    pressure = metric.left_pressure if side == "left" else metric.right_pressure
+    distribution = (
+        baseline.left_distribution if side == "left" else baseline.right_distribution
+    )
+    usable = tuple(
+        _runtime_pressure_channel_usable(metric, baseline, side, index)
+        for index in range(6)
+    )
+    current_forefoot = sum(pressure[index] for index in range(4) if usable[index])
+    if current_forefoot <= 1e-9:
+        return 0.0
+    indices = _regional_indices(region)
+    current_share = sum(
+        pressure[index] for index in indices if usable[index]
+    ) / current_forefoot
+    baseline_forefoot = sum(
+        (
+            distribution[index]
+            if distribution[index] >= BASELINE_ACTIVE_PRESSURE_FLOOR
+            else DEFAULT_PRESSURE_DISTRIBUTION[index]
+        )
+        for index in range(4)
+        if usable[index]
+    )
+    baseline_share = sum(
+        (
+            distribution[index]
+            if distribution[index] >= BASELINE_ACTIVE_PRESSURE_FLOOR
+            else DEFAULT_PRESSURE_DISTRIBUTION[index]
+        )
+        for index in indices
+        if usable[index]
+    ) / max(baseline_forefoot, 1e-9)
+    return current_share - baseline_share
+
+
+def _regional_supported(
+    metric: PairMetric,
+    baseline: BaselineProfile,
+    side: str,
+    region: str,
+) -> bool:
+    pressure = metric.left_pressure if side == "left" else metric.right_pressure
+    return (
+        _pressure_contact_count(metric, baseline, side)
+        >= PRESSURE_CONTACT_MIN_ACTIVE_CHANNELS
+        and any(
+            _runtime_pressure_channel_usable(metric, baseline, side, index)
+            and pressure[index] >= PRESSURE_CONTACT_ACTIVE_FLOOR
+            for index in _regional_indices(region)
+        )
+    )
 
 
 def _runtime_pressure_channel_usable(
@@ -1433,6 +1821,16 @@ def _signal(
     ):
         return "forefoot_high", "right"
 
+    for side in ("left", "right"):
+        for region, risk_type in (
+            ("medial", "medial_load_concentration"),
+            ("lateral", "lateral_load_concentration"),
+        ):
+            if _regional_supported(metric, baseline, side, region) and _regional_delta(
+                metric, baseline, side, region
+            ) >= _regional_threshold(baseline, side, region):
+                return risk_type, side
+
     return None
 
 
@@ -1465,6 +1863,14 @@ def _signals(
             metric, baseline, side
         ) >= _forefoot_threshold(baseline, side):
             result.append(("forefoot_high", side))
+        for region, risk_type in (
+            ("medial", "medial_load_concentration"),
+            ("lateral", "lateral_load_concentration"),
+        ):
+            if _regional_supported(metric, baseline, side, region) and _regional_delta(
+                metric, baseline, side, region
+            ) >= _regional_threshold(baseline, side, region):
+                result.append((risk_type, side))
     return result
 
 
@@ -1538,21 +1944,40 @@ def _current_risks(
             _pressure_metric_from_window(recent_metrics, index), baseline
         )
     }
-    priority = {
-        "forefoot_high": 0,
-        "left_load_bias": 1,
-        "right_load_bias": 1,
-        "temperature_asymmetry": 2,
-    }
     risks = [
         state
-        for signal in sorted(candidates, key=lambda item: (priority[item[0]], item[1]))
+        for signal in sorted(candidates)
         # Candidate discovery is bounded for responsiveness, but duration is
         # evaluated against the full post-reset history. Using only the last
         # 100 pairs caps a sustained risk at about 19.8 seconds and can make
         # the displayed duration move backwards as the window slides.
         if (state := _risk_state_for_signal(metrics, baseline, signal)) is not None
     ]
+    forefoot = {
+        item.risk_side: item
+        for item in risks
+        if item.risk_type == "forefoot_high" and item.risk_side in {"left", "right"}
+    }
+    if set(forefoot) == {"left", "right"}:
+        risks = [item for item in risks if item.risk_type != "forefoot_high"]
+        risks.append(
+            RiskState(
+                risk_type="forefoot_high",
+                risk_side="both",
+                risk_level=min(forefoot["left"].risk_level, forefoot["right"].risk_level),
+                duration_ms=min(
+                    forefoot["left"].duration_ms, forefoot["right"].duration_ms
+                ),
+            )
+        )
+    risks.sort(
+        key=lambda item: (
+            -item.risk_level,
+            -item.duration_ms,
+            item.risk_type,
+            item.risk_side,
+        )
+    )
     return risks, latest
 
 
@@ -1586,10 +2011,27 @@ def _signal_is_active(
             baseline, exit_threshold=True
         )
     if risk_type == "forefoot_high":
+        if risk_side == "both":
+            return all(
+                _forefoot_supported(metric, baseline, side)
+                and _forefoot_delta(metric, baseline, side)
+                >= _forefoot_threshold(baseline, side, exit_threshold=True)
+                for side in ("left", "right")
+            )
         if not _forefoot_supported(metric, baseline, risk_side):
             return False
         return _forefoot_delta(metric, baseline, risk_side) >= _forefoot_threshold(
             baseline, risk_side, exit_threshold=True
+        )
+    if risk_type in {
+        "medial_load_concentration",
+        "lateral_load_concentration",
+    }:
+        region = "medial" if risk_type.startswith("medial") else "lateral"
+        return _regional_supported(metric, baseline, risk_side, region) and _regional_delta(
+            metric, baseline, risk_side, region
+        ) >= _regional_threshold(
+            baseline, risk_side, region, exit_threshold=True
         )
     return False
 
@@ -1835,14 +2277,12 @@ def _regional_analysis(
     right_scores: list[float] = []
     left_analysis_valid = [
         metric.left_pressure_valid[index]
-        and baseline.pressure_channel_trust[index]
-        and baseline.pressure_channel_contact_trust[index]
+        and _runtime_pressure_channel_usable(metric, baseline, "left", index)
         for index in range(6)
     ]
     right_analysis_valid = [
         metric.right_pressure_valid[index]
-        and baseline.pressure_channel_trust[6 + index]
-        and baseline.pressure_channel_contact_trust[6 + index]
+        and _runtime_pressure_channel_usable(metric, baseline, "right", index)
         for index in range(6)
     ]
     left_distribution = _estimated_distribution(metric, baseline, "left")
@@ -1936,6 +2376,8 @@ def _regional_analysis(
             if not metric.left_pressure_valid[index]
             else "residual_suspect"
             if residual_suspects[index]
+            else "runtime_recovered"
+            if left_analysis_valid[index] and not resolved_baseline_trust[index]
             else "uncovered_in_baseline"
             if not resolved_baseline_trust[index]
             else "ok"
@@ -1946,6 +2388,8 @@ def _regional_analysis(
             if not metric.right_pressure_valid[index]
             else "residual_suspect"
             if residual_suspects[6 + index]
+            else "runtime_recovered"
+            if right_analysis_valid[index] and not resolved_baseline_trust[6 + index]
             else "uncovered_in_baseline"
             if not resolved_baseline_trust[6 + index]
             else "ok"
@@ -2146,7 +2590,19 @@ def _risk_difference(
     if risk_type in {"left_load_bias", "right_load_bias"}:
         return abs(_adjusted_load_bias(metric, baseline))
     if risk_type == "forefoot_high":
+        if risk_side == "both":
+            return max(
+                0.0,
+                _forefoot_delta(metric, baseline, "left"),
+                _forefoot_delta(metric, baseline, "right"),
+            )
         return max(0.0, _forefoot_delta(metric, baseline, risk_side))
+    if risk_type in {
+        "medial_load_concentration",
+        "lateral_load_concentration",
+    }:
+        region = "medial" if risk_type.startswith("medial") else "lateral"
+        return max(0.0, _regional_delta(metric, baseline, risk_side, region))
     if risk_type == "temperature_asymmetry":
         corrected = _temperature_delta_from_baseline(metric, baseline)
         return max((abs(value) for value in corrected if value is not None), default=0.0)
@@ -2346,6 +2802,8 @@ def _record_risk(
 
 
 def _combined_side(risks: list[RiskState]) -> str:
+    if any(risk.risk_side == "both" for risk in risks):
+        return "both"
     sides = {risk.risk_side for risk in risks if risk.risk_side in {"left", "right"}}
     if sides == {"left", "right"}:
         return "both"
@@ -2551,7 +3009,12 @@ def evaluate_risk(
     )
     active_risks, metric = _current_risks(risk_metrics, analysis_baseline)
     risk, _ = _current_risk(risk_metrics[-100:], analysis_baseline)
-    gait = _gait_summary(risk_metrics, analysis_baseline)
+    gait = _gait_summary(
+        risk_metrics,
+        analysis_baseline,
+        session=session,
+        record=record,
+    )
     if active_risks:
         risk = active_risks[0]
     if record:

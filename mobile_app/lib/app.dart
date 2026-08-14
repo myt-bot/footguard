@@ -64,6 +64,7 @@ class _FootGuardAppState extends State<FootGuardApp> {
   }
 
   void _handleCalibrationReset() {
+    unawaited(_ttsSpeaker.stop());
     _calibrationSpeech.start();
     setState(() {
       _calibrationEpoch += 1;
