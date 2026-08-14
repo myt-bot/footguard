@@ -27,6 +27,28 @@ static bool s_fsr_ready;
 static bool s_ntc_ready;
 static bool s_mpu6050_ready;
 static bool s_initialized;
+static double s_temperature_cache[FOOTGUARD_TEMPERATURE_CHANNEL_COUNT];
+static bool s_temperature_has_sample[FOOTGUARD_TEMPERATURE_CHANNEL_COUNT];
+static bool s_temperature_valid[FOOTGUARD_TEMPERATURE_CHANNEL_COUNT];
+static uint32_t s_temperature_frames_until_refresh;
+
+static void refresh_temperature_cache(void)
+{
+    for (size_t channel = 0;
+         channel < FOOTGUARD_TEMPERATURE_CHANNEL_COUNT;
+         ++channel) {
+        footguard_ntc_reading_t ntc;
+
+        s_temperature_valid[channel] = false;
+        if (footguard_ntc_read_channel(channel, &ntc) == ESP_OK &&
+            ntc.temperature_c >= FOOTGUARD_NTC_PLAUSIBLE_MIN_C &&
+            ntc.temperature_c <= FOOTGUARD_NTC_PLAUSIBLE_MAX_C) {
+            s_temperature_cache[channel] = ntc.temperature_c;
+            s_temperature_has_sample[channel] = true;
+            s_temperature_valid[channel] = true;
+        }
+    }
+}
 
 esp_err_t footguard_real_sensor_init(void)
 {
@@ -113,15 +135,22 @@ esp_err_t footguard_real_sensor_make_data(
     }
 
     if (s_ntc_ready) {
+        if (s_temperature_frames_until_refresh == 0U) {
+            refresh_temperature_cache();
+            s_temperature_frames_until_refresh =
+                FOOTGUARD_TEMPERATURE_FRAME_DIVISOR - 1U;
+        } else {
+            --s_temperature_frames_until_refresh;
+        }
+
         for (size_t channel = 0;
              channel < FOOTGUARD_TEMPERATURE_CHANNEL_COUNT;
              ++channel) {
-            footguard_ntc_reading_t ntc;
-
-            if (footguard_ntc_read_channel(channel, &ntc) == ESP_OK &&
-                ntc.temperature_c >= FOOTGUARD_NTC_PLAUSIBLE_MIN_C &&
-                ntc.temperature_c <= FOOTGUARD_NTC_PLAUSIBLE_MAX_C) {
-                sensor_data->temperature_c[channel] = ntc.temperature_c;
+            if (s_temperature_has_sample[channel]) {
+                sensor_data->temperature_c[channel] =
+                    s_temperature_cache[channel];
+            }
+            if (s_temperature_valid[channel]) {
                 sensor_data->quality_flags &=
                     ~(FOOTGUARD_QUALITY_TEMPERATURE_T1_INVALID << channel);
             }

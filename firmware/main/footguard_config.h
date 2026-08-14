@@ -4,7 +4,12 @@
 #include "footguard_protocol.h"
 
 #define FOOTGUARD_FIRMWARE_NAME "FootGuard"
-#define FOOTGUARD_FIRMWARE_VERSION "0.1.0"
+#define FOOTGUARD_FIRMWARE_VERSION "0.2.0"
+
+#define FOOTGUARD_SENSOR_RATE_HZ 20U
+#define FOOTGUARD_SENSOR_PERIOD_MS 50U
+#define FOOTGUARD_TEMPERATURE_FRAME_DIVISOR 4U
+#define FOOTGUARD_SENSOR_ACQUISITION_BUDGET_US 40000LL
 
 #define FOOTGUARD_VARIANT_LEFT 0
 #define FOOTGUARD_VARIANT_RIGHT 1
@@ -31,5 +36,16 @@ _Static_assert(sizeof(FOOTGUARD_FIRMWARE_VERSION) - 1U <= 12U,
                "Firmware version exceeds the protocol limit");
 _Static_assert(sizeof(FOOTGUARD_DEVICE_ID) - 1U <= 16U,
                "Device ID exceeds the protocol limit");
+_Static_assert(1000U % FOOTGUARD_SENSOR_RATE_HZ == 0U,
+               "Sensor rate must divide one second exactly");
+_Static_assert(FOOTGUARD_SENSOR_PERIOD_MS ==
+                   1000U / FOOTGUARD_SENSOR_RATE_HZ,
+               "Sensor rate and period do not match");
+_Static_assert(FOOTGUARD_TEMPERATURE_FRAME_DIVISOR > 0U,
+               "Temperature frame divisor must be positive");
+_Static_assert(FOOTGUARD_SENSOR_RATE_HZ %
+                       FOOTGUARD_TEMPERATURE_FRAME_DIVISOR ==
+                   0U,
+               "Temperature frame divisor must divide the sensor rate");
 
 #endif

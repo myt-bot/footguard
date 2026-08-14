@@ -14,7 +14,7 @@ ESP32 只向 App 提供：
 - DeviceStatus；
 - 马达 AckEvent。
 
-App 向 ESP32 提供 TimeSync 和 DeviceCommand。风险类型、历史、恢复评价和 AI 均不写入固件协议。后续固件将压力/MPU 提升到约 20 Hz，但 60 字节布局不变，App 解析器不得假设固定 200ms 间隔。
+App 向 ESP32 提供 TimeSync 和 DeviceCommand。风险类型、历史、恢复评价和 AI 均不写入固件协议。固件 `0.2.0` 将压力/MPU 提升到 20 Hz，温度保持 5 Hz 并在中间帧复用最近采样；60 字节布局不变，App 解析器不得假设固定 200ms 间隔，也不得把相邻帧相同的温度值误判为卡死。
 
 ## App 任务
 

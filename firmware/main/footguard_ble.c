@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
@@ -16,7 +17,6 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 #include "footguard_config.h"
-#include "footguard_fsr.h"
 #include "footguard_gatt.h"
 #include "footguard_protocol.h"
 #include "footguard_real_sensor.h"
@@ -24,8 +24,7 @@
 
 enum {
     SENSOR_DATA_REQUIRED_MTU = FOOTGUARD_SENSOR_FRAME_SIZE + 3,
-    SENSOR_PERIOD_MS = 200,
-    SENSOR_LOG_INTERVAL = 25,
+    SENSOR_LOG_INTERVAL = FOOTGUARD_SENSOR_RATE_HZ * 5U,
     DEFAULT_ATT_MTU = 23
 };
 
@@ -327,6 +326,8 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 static void sensor_task(void *arg)
 {
     uint32_t notified_count = 0;
+    uint32_t acquisition_overrun_count = 0;
+    uint32_t consecutive_acquisition_overruns = 0;
     int last_notify_error = 0;
 
     (void)arg;
@@ -337,7 +338,10 @@ static void sensor_task(void *arg)
         footguard_time_snapshot_t time_snapshot;
         footguard_sensor_data_t sensor_data;
         int rc;
+        int64_t acquisition_elapsed_us;
+        int64_t acquisition_started_us;
         uint32_t packet_seq;
+        TickType_t wait_ticks;
         uint64_t remainder_ms;
         uint64_t wait_ms;
 
@@ -350,15 +354,23 @@ static void sensor_task(void *arg)
 
         footguard_time_get_snapshot(&time_snapshot);
         if (!time_snapshot.time_synced) {
-            vTaskDelay(pdMS_TO_TICKS(SENSOR_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(FOOTGUARD_SENSOR_PERIOD_MS));
             continue;
         }
 
-        remainder_ms = time_snapshot.timestamp_ms % SENSOR_PERIOD_MS;
+        remainder_ms =
+            time_snapshot.timestamp_ms % FOOTGUARD_SENSOR_PERIOD_MS;
         wait_ms = remainder_ms == 0U
-                      ? SENSOR_PERIOD_MS
-                      : SENSOR_PERIOD_MS - remainder_ms;
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+                      ? FOOTGUARD_SENSOR_PERIOD_MS
+                      : FOOTGUARD_SENSOR_PERIOD_MS - remainder_ms;
+        wait_ticks = pdMS_TO_TICKS((uint32_t)wait_ms);
+        if ((uint64_t)wait_ticks * portTICK_PERIOD_MS < wait_ms) {
+            ++wait_ticks;
+        }
+        if (wait_ticks == 0U) {
+            wait_ticks = 1U;
+        }
+        vTaskDelay(wait_ticks);
 
         state = get_state();
         if (!state.streaming) {
@@ -369,12 +381,36 @@ static void sensor_task(void *arg)
             continue;
         }
         packet_seq = (uint32_t)(time_snapshot.timestamp_ms /
-                                SENSOR_PERIOD_MS);
+                                FOOTGUARD_SENSOR_PERIOD_MS);
+        acquisition_started_us = esp_timer_get_time();
         if (footguard_real_sensor_make_data(packet_seq,
                                             &time_snapshot,
                                             &sensor_data) != ESP_OK) {
             ESP_LOGE(TAG, "Real SensorData acquisition failed");
             continue;
+        }
+        acquisition_elapsed_us = esp_timer_get_time() - acquisition_started_us;
+        if (acquisition_elapsed_us >
+            FOOTGUARD_SENSOR_ACQUISITION_BUDGET_US) {
+            ++acquisition_overrun_count;
+            ++consecutive_acquisition_overruns;
+            if (consecutive_acquisition_overruns == 1U ||
+                consecutive_acquisition_overruns % 20U == 0U) {
+                ESP_LOGW(TAG,
+                         "Sensor acquisition exceeded 40 ms: elapsed=%" PRId64
+                         "us consecutive=%" PRIu32 " total=%" PRIu32,
+                         acquisition_elapsed_us,
+                         consecutive_acquisition_overruns,
+                         acquisition_overrun_count);
+            }
+        } else {
+            if (consecutive_acquisition_overruns > 0U) {
+                ESP_LOGI(TAG,
+                         "Sensor acquisition timing recovered after %" PRIu32
+                         " overrun(s)",
+                         consecutive_acquisition_overruns);
+            }
+            consecutive_acquisition_overruns = 0U;
         }
         if (!footguard_protocol_encode_sensor_data(&sensor_data,
                                                    frame,
@@ -397,34 +433,24 @@ static void sensor_task(void *arg)
         last_notify_error = 0;
         ++notified_count;
         if (notified_count % SENSOR_LOG_INTERVAL == 0U) {
-            int fsr_raw[FOOTGUARD_FSR_CHANNEL_COUNT];
-
-            for (size_t channel = 0;
-                 channel < FOOTGUARD_FSR_CHANNEL_COUNT;
-                 ++channel) {
-                if (footguard_fsr_read_raw_channel(channel,
-                                                   &fsr_raw[channel]) != ESP_OK) {
-                    fsr_raw[channel] = -1;
-                }
-            }
-
             ESP_LOGI(TAG,
                      "Real SensorData: count=%" PRIu32
                      " seq=%" PRIu32
                      " flags=0x%08" PRIX32
-                     " fsr_raw=(%d,%d,%d,%d,%d,%d)"
+                     " pressure=(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f)"
                      " temp=(%.2f,%.2f,%.2f,%.2f)C"
                      " accel=(%.2f,%.2f,%.2f)m/s2"
-                     " gyro=(%.2f,%.2f,%.2f)dps",
+                     " gyro=(%.2f,%.2f,%.2f)dps"
+                     " acquisition=%" PRId64 "us overruns=%" PRIu32,
                      notified_count,
                      packet_seq,
                      sensor_data.quality_flags,
-                     fsr_raw[0],
-                     fsr_raw[1],
-                     fsr_raw[2],
-                     fsr_raw[3],
-                     fsr_raw[4],
-                     fsr_raw[5],
+                     sensor_data.pressure[0],
+                     sensor_data.pressure[1],
+                     sensor_data.pressure[2],
+                     sensor_data.pressure[3],
+                     sensor_data.pressure[4],
+                     sensor_data.pressure[5],
                      sensor_data.temperature_c[0],
                      sensor_data.temperature_c[1],
                      sensor_data.temperature_c[2],
@@ -434,7 +460,9 @@ static void sensor_task(void *arg)
                      sensor_data.acceleration_m_s2[2],
                      sensor_data.gyroscope_deg_s[0],
                      sensor_data.gyroscope_deg_s[1],
-                     sensor_data.gyroscope_deg_s[2]);
+                     sensor_data.gyroscope_deg_s[2],
+                     acquisition_elapsed_us,
+                     acquisition_overrun_count);
         }
     }
 }
@@ -531,6 +559,10 @@ esp_err_t footguard_ble_start(void)
     }
 
     nimble_port_freertos_init(host_task);
-    ESP_LOGI(TAG, "NimBLE initialized with 5 Hz real SensorData");
+    ESP_LOGI(TAG,
+             "NimBLE initialized: pressure/IMU=%u Hz temperature=%u Hz",
+             FOOTGUARD_SENSOR_RATE_HZ,
+             FOOTGUARD_SENSOR_RATE_HZ /
+                 FOOTGUARD_TEMPERATURE_FRAME_DIVISOR);
     return ESP_OK;
 }
