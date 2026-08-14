@@ -1,0 +1,271 @@
+{
+  "timezone": "Asia/Shanghai (UTC+08:00)",
+  "date": "2026-08-14",
+  "sessions": {
+    "person_a_session_01": {
+      "window": [
+        "21:08:00",
+        "21:18:21"
+      ],
+      "row_count": 5038,
+      "notes": [
+        "Personal baseline did not lock; use the normal interval only as a session reference.",
+        "Frames after 21:16:25 are sparse and must not set production thresholds.",
+        "21:10:05-21:11:14 is unloaded and excluded."
+      ],
+      "intervals": [
+        {
+          "label": "exclude_prebaseline",
+          "start": "21:08:00",
+          "end": "21:11:25",
+          "confidence": "exclude",
+          "note": ""
+        },
+        {
+          "label": "normal_reference",
+          "start": "21:11:25",
+          "end": "21:13:15",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "transition",
+          "start": "21:13:15",
+          "end": "21:13:45",
+          "confidence": "exclude",
+          "note": ""
+        },
+        {
+          "label": "left_load_bias",
+          "start": "21:13:45",
+          "end": "21:14:10",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:14:10",
+          "end": "21:14:30",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_load_bias",
+          "start": "21:14:30",
+          "end": "21:14:50",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:14:50",
+          "end": "21:15:00",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "left_forefoot_high",
+          "start": "21:15:00",
+          "end": "21:15:20",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:15:20",
+          "end": "21:15:30",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_forefoot_high",
+          "start": "21:15:30",
+          "end": "21:16:00",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:16:00",
+          "end": "21:16:05",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "both_forefoot_high",
+          "start": "21:16:05",
+          "end": "21:16:25",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:16:25",
+          "end": "21:17:12",
+          "confidence": "medium",
+          "note": ""
+        },
+        {
+          "label": "right_medial_load",
+          "start": "21:17:16",
+          "end": "21:17:30",
+          "confidence": "medium",
+          "note": ""
+        },
+        {
+          "label": "right_lateral_load",
+          "start": "21:17:42",
+          "end": "21:17:55",
+          "confidence": "medium",
+          "note": ""
+        },
+        {
+          "label": "left_medial_load",
+          "start": "21:18:08",
+          "end": "21:18:13",
+          "confidence": "low",
+          "note": ""
+        },
+        {
+          "label": "left_lateral_load",
+          "start": "21:18:13",
+          "end": "21:18:21",
+          "confidence": "low",
+          "note": ""
+        }
+      ]
+    },
+    "person_b_session_01": {
+      "window": [
+        "21:40:00",
+        "21:44:30"
+      ],
+      "row_count": 2678,
+      "notes": [
+        "Baseline completed. This is the primary threshold-tuning session.",
+        "Some movement occurred before left load bias; labeled transition windows are excluded."
+      ],
+      "intervals": [
+        {
+          "label": "normal_reference",
+          "start": "21:40:00",
+          "end": "21:40:15",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "transition",
+          "start": "21:40:15",
+          "end": "21:40:25",
+          "confidence": "exclude",
+          "note": ""
+        },
+        {
+          "label": "left_load_bias",
+          "start": "21:40:25",
+          "end": "21:40:45",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:40:45",
+          "end": "21:40:55",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_load_bias",
+          "start": "21:40:55",
+          "end": "21:41:10",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:41:10",
+          "end": "21:41:30",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "left_forefoot_high",
+          "start": "21:41:30",
+          "end": "21:41:45",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:41:45",
+          "end": "21:42:00",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_forefoot_high",
+          "start": "21:42:00",
+          "end": "21:42:20",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:42:20",
+          "end": "21:42:40",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "both_forefoot_high",
+          "start": "21:42:40",
+          "end": "21:42:55",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "recovery",
+          "start": "21:42:55",
+          "end": "21:43:10",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "left_medial_load",
+          "start": "21:43:10",
+          "end": "21:43:25",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "transition",
+          "start": "21:43:25",
+          "end": "21:43:30",
+          "confidence": "exclude",
+          "note": ""
+        },
+        {
+          "label": "left_lateral_load",
+          "start": "21:43:30",
+          "end": "21:43:50",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_medial_load",
+          "start": "21:43:55",
+          "end": "21:44:10",
+          "confidence": "high",
+          "note": ""
+        },
+        {
+          "label": "right_lateral_load",
+          "start": "21:44:10",
+          "end": "21:44:30",
+          "confidence": "high",
+          "note": ""
+        }
+      ]
+    }
+  }
+}
