@@ -39,8 +39,11 @@ class LocalRiskResult {
 }
 
 class LocalRiskEngine {
-  static const ruleVersion = 'local-rules-v4-10-20-15-30';
+  static const ruleVersion = 'local-rules-v5-200ms-calibration';
   static const requiredSamples = 40;
+  static const emptyRequiredSamples = 60;
+  static const emptyWarmupMs = 15000;
+  static const calibrationSampleIntervalMs = 200;
   static const _contactFloor = 0.01;
   static const _minimumFootLoad = 0.08;
   static const _pressureAttentionMs = 5000;
@@ -65,6 +68,8 @@ class LocalRiskEngine {
   List<double?> _baselineTemperature = List.filled(4, null);
   final List<List<double?>> _emptyTemperatureDeltas = [];
   int? _emptyStartedAtMs;
+  int? _lastEmptySampleAtMs;
+  int? _lastBaselineSampleAtMs;
   bool _wearingSeen = false;
   bool _emptyTemperatureReferenceReady = false;
   List<double> _emptyTemperature = List.filled(4, 0.0);
@@ -103,6 +108,8 @@ class LocalRiskEngine {
     _baselineTemperature = List.filled(4, null);
     _emptyTemperatureDeltas.clear();
     _emptyStartedAtMs = null;
+    _lastEmptySampleAtMs = null;
+    _lastBaselineSampleAtMs = null;
     _wearingSeen = false;
     _emptyTemperatureReferenceReady = false;
     _emptyTemperature = List.filled(4, 0.0);
@@ -221,9 +228,11 @@ class LocalRiskEngine {
 
     if (!_emptyTemperatureReferenceReady && !_wearingSeen && !contact) {
       _emptyStartedAtMs ??= timestamp;
-      if (timestamp - _emptyStartedAtMs! >= 15000) {
+      if (timestamp - _emptyStartedAtMs! >= emptyWarmupMs &&
+          _calibrationSampleDue(timestamp, _lastEmptySampleAtMs)) {
         _emptyTemperatureDeltas.add(_temperatureDelta(left, right));
-        if (_emptyTemperatureDeltas.length >= 60) {
+        _lastEmptySampleAtMs = timestamp;
+        if (_emptyTemperatureDeltas.length >= emptyRequiredSamples) {
           _finishEmptyTemperatureReference();
         }
       }
@@ -237,11 +246,13 @@ class LocalRiskEngine {
         right.pressureChannelsValid &&
         contact &&
         _stationary(left) &&
-        _stationary(right)) {
+        _stationary(right) &&
+        _calibrationSampleDue(timestamp, _lastBaselineSampleAtMs)) {
       _loadRatios.add(loadRatio);
       _leftForefootRatios.add(leftForefoot);
       _rightForefootRatios.add(rightForefoot);
       _temperatureDeltas.add(_temperatureDelta(left, right));
+      _lastBaselineSampleAtMs = timestamp;
       if (_loadRatios.length >= requiredSamples) {
         if (_mad(_loadRatios) <= 0.12 &&
             _mad(_leftForefootRatios) <= 0.08 &&
@@ -456,6 +467,10 @@ class LocalRiskEngine {
       : risk.isTemperature
           ? 0
           : -1;
+
+  bool _calibrationSampleDue(int timestampMs, int? lastSampleAtMs) =>
+      lastSampleAtMs == null ||
+      timestampMs - lastSampleAtMs >= calibrationSampleIntervalMs;
 
   void _finishEmptyTemperatureReference() {
     _emptyTemperature = List.generate(4, (index) {

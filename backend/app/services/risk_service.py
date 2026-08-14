@@ -23,6 +23,7 @@ from ..config import (
     BASELINE_MIN_FOOT_PRESSURE,
     BASELINE_MIN_SAMPLES,
     BASELINE_STABLE_GAP_MS,
+    CALIBRATION_SAMPLE_INTERVAL_MS,
     CALIBRATION_INVALID_MASK,
     CONTINUITY_GAP_MS,
     DEFAULT_PRESSURE_DISTRIBUTION,
@@ -577,7 +578,9 @@ def _empty_temperature_reference(
     # The warm-up period is deliberately discarded so glue/contact drift is
     # not mistaken for an assembly offset.
     warmup_end = run[0].timestamp_ms + 15_000
-    stable = [metric for metric in run if metric.timestamp_ms >= warmup_end]
+    stable = _time_gated_calibration_samples(
+        [metric for metric in run if metric.timestamp_ms >= warmup_end]
+    )
     if len(stable) < 60:
         return (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, ("unstable",) * 4
     stable = stable[:60]
@@ -628,6 +631,22 @@ def _is_baseline_candidate(metric: PairMetric) -> bool:
     )
 
 
+def _time_gated_calibration_samples(
+    metrics: list[PairMetric],
+) -> list[PairMetric]:
+    sampled: list[PairMetric] = []
+    last_sample_at_ms: int | None = None
+    for metric in metrics:
+        if (
+            last_sample_at_ms is None
+            or metric.timestamp_ms - last_sample_at_ms
+            >= CALIBRATION_SAMPLE_INTERVAL_MS
+        ):
+            sampled.append(metric)
+            last_sample_at_ms = metric.timestamp_ms
+    return sampled
+
+
 def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
     # Lock the first stable bilateral-bearing window. Using the newest window
     # would slowly redefine a sustained abnormal posture as the new normal.
@@ -652,7 +671,10 @@ def _baseline_profile(metrics: list[PairMetric]) -> BaselineProfile:
         current_run.append(metric)
     if current_run:
         runs.append(current_run)
-    candidates = max(runs, key=len, default=[])[:BASELINE_CALIBRATION_WINDOW_SAMPLES]
+    sampled_runs = [_time_gated_calibration_samples(run) for run in runs]
+    candidates = max(sampled_runs, key=len, default=[])[
+        :BASELINE_CALIBRATION_WINDOW_SAMPLES
+    ]
     if len(candidates) < BASELINE_MIN_SAMPLES:
         return _empty_baseline(len(candidates))
 

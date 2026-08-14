@@ -95,6 +95,94 @@ void main() {
     },
   );
 
+  test('20 Hz frames need about eight seconds to build wearing baseline', () {
+    final engine = LocalRiskEngine();
+    const standing = [0.03, 0.03, 0.03, 0.03, 0.05, 0.05];
+
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence <= 40; sequence += 1) {
+      result = engine.evaluate([
+        frame(
+          'left',
+          sequence,
+          standing,
+          timestampMs: 100000 + sequence * 50,
+        ),
+        frame(
+          'right',
+          sequence,
+          standing,
+          timestampMs: 100013 + sequence * 50,
+        ),
+      ]);
+    }
+
+    expect(result!.baselineReady, isFalse);
+    expect(result.baselineSamples, 11);
+
+    for (var sequence = 41; sequence <= 156; sequence += 1) {
+      result = engine.evaluate([
+        frame(
+          'left',
+          sequence,
+          standing,
+          timestampMs: 100000 + sequence * 50,
+        ),
+        frame(
+          'right',
+          sequence,
+          standing,
+          timestampMs: 100013 + sequence * 50,
+        ),
+      ]);
+    }
+
+    expect(result!.baselineReady, isTrue);
+    expect(result.baselineSamples, LocalRiskEngine.requiredSamples);
+  });
+
+  test('20 Hz empty reference keeps 15 second warmup and 200 ms samples', () {
+    final engine = LocalRiskEngine();
+    const unloaded = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence <= 340; sequence += 1) {
+      result = engine.evaluate([
+        frame(
+          'left',
+          sequence,
+          unloaded,
+          timestampMs: 200000 + sequence * 50,
+        ),
+        frame(
+          'right',
+          sequence,
+          unloaded,
+          timestampMs: 200011 + sequence * 50,
+        ),
+      ]);
+    }
+    expect(result!.calibrationStage, 'empty_reference');
+
+    for (var sequence = 341; sequence <= 536; sequence += 1) {
+      result = engine.evaluate([
+        frame(
+          'left',
+          sequence,
+          unloaded,
+          timestampMs: 200000 + sequence * 50,
+        ),
+        frame(
+          'right',
+          sequence,
+          unloaded,
+          timestampMs: 200011 + sequence * 50,
+        ),
+      ]);
+    }
+    expect(result!.calibrationStage, 'put_on');
+  });
+
   test(
     'uses timestamps rather than a fixed sample interval for motor timing',
     () {
@@ -106,13 +194,13 @@ void main() {
             'left',
             sequence,
             standing,
-            timestampMs: 100000 + sequence * 53,
+            timestampMs: 100000 + sequence * 200,
           ),
           frame(
             'right',
             sequence,
             standing,
-            timestampMs: 100017 + sequence * 53,
+            timestampMs: 100017 + sequence * 200,
           ),
         ]);
       }
