@@ -26,6 +26,16 @@ void main() {
       'step_count': 0,
       'left_steps': 0,
       'right_steps': 0,
+      'evidence_episode_count': 3,
+      'evidence_step_count': 24,
+      'confirmed_issues': [
+        {
+          'issue_type': 'walking_load_asymmetry',
+          'side': 'left',
+          'value': 0.34,
+          'threshold': 0.30,
+        },
+      ],
       'last_completed_episode': {
         'episode_id': 'gait_7_1000_7000',
         'started_at_ms': 1000,
@@ -59,5 +69,8 @@ void main() {
     expect(gait.state, 'stationary');
     expect(gait.lastCompletedEpisode?.stepCount, 8);
     expect(gait.lastCompletedEpisode?.issues.single.side, 'left');
+    expect(gait.evidenceEpisodeCount, 3);
+    expect(gait.evidenceStepCount, 24);
+    expect(gait.confirmedIssues.single.issueType, 'walking_load_asymmetry');
   });
 }

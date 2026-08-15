@@ -7,6 +7,9 @@ class GaitSummary {
     required this.rightSteps,
     this.cadenceSpm,
     this.lastCompletedEpisode,
+    this.confirmedIssues = const [],
+    this.evidenceEpisodeCount = 0,
+    this.evidenceStepCount = 0,
   });
 
   const GaitSummary.insufficient()
@@ -16,7 +19,10 @@ class GaitSummary {
         leftSteps = 0,
         rightSteps = 0,
         cadenceSpm = null,
-        lastCompletedEpisode = null;
+        lastCompletedEpisode = null,
+        confirmedIssues = const [],
+        evidenceEpisodeCount = 0,
+        evidenceStepCount = 0;
 
   final String state;
   final int windowMs;
@@ -25,6 +31,9 @@ class GaitSummary {
   final int rightSteps;
   final double? cadenceSpm;
   final GaitEpisodeSummary? lastCompletedEpisode;
+  final List<GaitIssue> confirmedIssues;
+  final int evidenceEpisodeCount;
+  final int evidenceStepCount;
 
   factory GaitSummary.fromJson(Map<String, dynamic> json) => GaitSummary(
         state: json['state'] as String? ?? 'insufficient_data',
@@ -38,6 +47,13 @@ class GaitSummary {
             : GaitEpisodeSummary.fromJson(
                 json['last_completed_episode'] as Map<String, dynamic>,
               ),
+        confirmedIssues:
+            (json['confirmed_issues'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(GaitIssue.fromJson)
+                .toList(growable: false),
+        evidenceEpisodeCount: json['evidence_episode_count'] as int? ?? 0,
+        evidenceStepCount: json['evidence_step_count'] as int? ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -48,6 +64,40 @@ class GaitSummary {
         'right_steps': rightSteps,
         'cadence_spm': cadenceSpm,
         'last_completed_episode': lastCompletedEpisode?.toJson(),
+        'confirmed_issues':
+            confirmedIssues.map((item) => item.toJson()).toList(),
+        'evidence_episode_count': evidenceEpisodeCount,
+        'evidence_step_count': evidenceStepCount,
+      };
+}
+
+class GaitTrendSummary {
+  const GaitTrendSummary({
+    this.evidenceEpisodeCount = 0,
+    this.evidenceStepCount = 0,
+    this.confirmedIssues = const [],
+  });
+
+  final int evidenceEpisodeCount;
+  final int evidenceStepCount;
+  final List<GaitIssue> confirmedIssues;
+
+  factory GaitTrendSummary.fromJson(Map<String, dynamic> json) =>
+      GaitTrendSummary(
+        evidenceEpisodeCount: json['evidence_episode_count'] as int? ?? 0,
+        evidenceStepCount: json['evidence_step_count'] as int? ?? 0,
+        confirmedIssues:
+            (json['confirmed_issues'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(GaitIssue.fromJson)
+                .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'evidence_episode_count': evidenceEpisodeCount,
+        'evidence_step_count': evidenceStepCount,
+        'confirmed_issues':
+            confirmedIssues.map((item) => item.toJson()).toList(),
       };
 }
 

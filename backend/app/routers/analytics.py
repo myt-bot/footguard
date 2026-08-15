@@ -17,7 +17,6 @@ from ..models import (
     CalibrationState,
     Command,
     CommandAck,
-    GaitEpisode,
     InterventionFeedback,
     RiskEvent,
     SensorFrame,
@@ -26,14 +25,19 @@ from ..schemas import (
     RiskEventOut,
     RiskState,
     SessionAdviceResponse,
+    SessionQuestionRequest,
+    SessionQuestionResponse,
     SessionSummary,
 )
 from ..services.risk_service import calibration_status
-from ..services.risk_service import gait_episode_from_model
+from ..services.risk_service import gait_history_summary
 from ..services.session_service import recovery_observation
-from ..services.session_metrics import component_feedback
-from ..services.ai_advisor_service import generate_session_advice
-from ..repositories.calibration_repository import BASELINE_STATE_KEY
+from ..services.session_metrics import component_feedback, summarize_improvements
+from ..services.ai_advisor_service import (
+    generate_session_advice,
+    generate_session_question_answer,
+)
+from ..repositories.calibration_repository import BASELINE_STATE_KEY, calibration_profile
 
 router = APIRouter(prefix="/api/v1", tags=["analytics"])
 
@@ -155,12 +159,40 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         .order_by(SensorFrame.timestamp_ms.desc())
         .limit(4000)
     ))
-    gait_models = list(
-        session.scalars(
-            select(GaitEpisode)
-            .where(GaitEpisode.reset_at_ms >= window_start_ms)
-            .order_by(GaitEpisode.ended_at_ms.desc())
-            .limit(8)
+    gait_episodes, gait_trend = gait_history_summary(
+        session, window_start_ms, limit=200
+    )
+    event_outputs = [_event_out(session, event) for event in events]
+    pressure_feedback = [
+        item
+        for event in event_outputs
+        for item in event.component_feedback
+        if item.pressure_intervention
+    ]
+    component_recoveries = Counter(item.effect_label for item in pressure_feedback)
+    if component_recoveries:
+        recoveries = component_recoveries
+    profile = calibration_profile(session)
+    pressure_untrusted_channels: list[str] = []
+    if profile is not None:
+        try:
+            trust = list(json.loads(profile.pressure_channel_trust_json))
+            if len(trust) == 6:
+                trust *= 2
+            pressure_untrusted_channels = [
+                f"{'left' if index < 6 else 'right'}:P{index % 6 + 1}"
+                for index, trusted in enumerate(trust[:12])
+                if not trusted
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pressure_untrusted_channels = []
+    temperature_valid_pairs = (
+        0
+        if latest_left is None or latest_right is None
+        else sum(
+            not latest_left.quality_flags & (1 << (6 + index))
+            and not latest_right.quality_flags & (1 << (6 + index))
+            for index in range(4)
         )
     )
     return SessionSummary(
@@ -180,18 +212,28 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         motor_executed_count=sum(command.status == "executed" for command in commands),
         motor_ack_count=ack_count,
         recovery_counts=dict(recoveries),
+        improvement_summary=summarize_improvements(pressure_feedback),
         sensor_summary=_session_sensor_summary(session_rows),
-        latest_events=[_event_out(session, event) for event in events[:8]],
-        gait_episode_count=session.query(GaitEpisode).filter(
-            GaitEpisode.reset_at_ms >= window_start_ms
-        ).count(),
-        latest_gait_episodes=[gait_episode_from_model(item) for item in gait_models],
+        pressure_untrusted_channels=pressure_untrusted_channels,
+        temperature_valid_pairs=temperature_valid_pairs,
+        latest_events=event_outputs[:8],
+        gait_episode_count=len(gait_episodes),
+        latest_gait_episodes=gait_episodes[:8],
+        gait_trend=gait_trend,
     )
 
 
 @router.post("/ai/session-advice", response_model=SessionAdviceResponse)
 def session_advice(session: Session = Depends(get_db)) -> SessionAdviceResponse:
     return generate_session_advice(latest_session(session))
+
+
+@router.post("/ai/session-question", response_model=SessionQuestionResponse)
+def session_question(
+    payload: SessionQuestionRequest,
+    session: Session = Depends(get_db),
+) -> SessionQuestionResponse:
+    return generate_session_question_answer(latest_session(session), payload)
 
 
 @router.get("/analytics/summary")

@@ -35,6 +35,8 @@ from ..config import (
     FOREFOOT_NOISE_MULTIPLIER,
     GAIT_ANALYSIS_WINDOW_MS,
     GAIT_ACTIVE_RECENCY_MS,
+    GAIT_CONFIRMED_EPISODE_COUNT,
+    GAIT_CONFIRMED_MIN_STEPS,
     GAIT_EPISODE_END_HOLD_MS,
     GAIT_EPISODE_MIN_STEPS,
     GAIT_LOAD_ASYMMETRY_THRESHOLD,
@@ -43,6 +45,7 @@ from ..config import (
     GAIT_MAX_CADENCE_SPM,
     GAIT_MIN_CADENCE_SPM,
     GAIT_MIN_MOVING_RATIO,
+    GAIT_MIN_SIDE_STEPS,
     GAIT_MIN_STEP_CANDIDATES,
     GAIT_MIN_WINDOW_MS,
     GAIT_REGION_DELTA_THRESHOLD,
@@ -70,6 +73,9 @@ from ..config import (
     PERSISTENT_AFTER_MS,
     PRESSURE_SMOOTHING_WINDOW_SAMPLES,
     RECOVERY_EFFECTIVE_RATIO,
+    RECOVERY_AFTER_WINDOW_MS,
+    RECOVERY_BEFORE_WINDOW_MS,
+    RECOVERY_MIN_VALID_PAIRS,
     RECOVERY_OBSERVATION_MS,
     RECOVERY_PARTIAL_RATIO,
     REGIONAL_ASYMMETRY_FOR_SEVERE,
@@ -116,6 +122,7 @@ from ..schemas import (
     GaitEpisodeSummary,
     GaitIssue,
     GaitSummary,
+    GaitTrendSummary,
     RegionalAnalysis,
     RealtimeResponse,
     RiskState,
@@ -404,11 +411,9 @@ def _pair_history(
 def _gait_step_events(
     segment: list[PairMetric], baseline: BaselineProfile
 ) -> list[tuple[int, str, PairMetric]]:
-    if not segment:
+    if not segment or not baseline.ready:
         return []
-    center = baseline.load_ratio if baseline.ready else median(
-        metric.log_load_ratio for metric in segment
-    )
+    center = baseline.load_ratio
     adaptive_threshold = min(
         GAIT_MAX_ADAPTIVE_THRESHOLD,
         baseline.load_ratio_mad * 4.0 if baseline.ready else 0.0,
@@ -418,9 +423,36 @@ def _gait_step_events(
     current_side: str | None = None
     last_event_at_ms: int | None = None
     for metric in segment:
-        if metric.motion_state != "moving" or not metric.pressure_valid:
+        credible_channels = []
+        for side in ("left", "right"):
+            raw_valid = (
+                metric.left_pressure_valid
+                if side == "left"
+                else metric.right_pressure_valid
+            )
+            offset = 0 if side == "left" else 6
+            credible_channels.append(
+                sum(
+                    raw_valid[index]
+                    and baseline.pressure_channel_trust[offset + index]
+                    and baseline.pressure_channel_contact_trust[offset + index]
+                    for index in range(6)
+                )
+            )
+        if (
+            metric.motion_state != "moving"
+            or not metric.pressure_valid
+            or any(
+                count < PRESSURE_MIN_VALID_CHANNELS_PER_FOOT
+                for count in credible_channels
+            )
+        ):
             continue
-        shifted_ratio = metric.log_load_ratio - center
+        left_total = _estimated_total(metric, baseline, "left")
+        right_total = _estimated_total(metric, baseline, "right")
+        if left_total <= 1e-9 or right_total <= 1e-9:
+            continue
+        shifted_ratio = log((left_total + 1e-6) / (right_total + 1e-6)) - center
         side = (
             "left"
             if shifted_ratio >= threshold
@@ -506,9 +538,7 @@ def _gait_episode_from_segment(
     }
 
     def share(metric: PairMetric, side: str, region: str) -> float:
-        distribution = (
-            metric.left_distribution if side == "left" else metric.right_distribution
-        )
+        distribution = _estimated_distribution(metric, baseline, side)
         value = sum(distribution[index] for index in region_indices[region])
         return (
             value
@@ -540,7 +570,10 @@ def _gait_episode_from_segment(
     }
     issues: list[GaitIssue] = []
     if (
-        all(len(side_events[side]) >= 3 for side in ("left", "right"))
+        all(
+            len(side_events[side]) >= GAIT_MIN_SIDE_STEPS
+            for side in ("left", "right")
+        )
         and load_asymmetry >= GAIT_LOAD_ASYMMETRY_THRESHOLD
     ):
         issues.append(
@@ -551,14 +584,14 @@ def _gait_episode_from_segment(
                 threshold=GAIT_LOAD_ASYMMETRY_THRESHOLD,
             )
         )
-    for region, issue_type in (
-        ("forefoot", "walking_forefoot_concentration"),
-        ("medial", "walking_medial_concentration"),
-        ("lateral", "walking_lateral_concentration"),
-    ):
+    # The forefoot signal is the only regional walking signal promoted to a
+    # formal finding. Medial/lateral shares remain in the episode metrics for
+    # engineering review, but their single-step variation is too sensitive to
+    # turns and the current sparse sensor layout for user-facing alerts.
+    for region, issue_type in (("forefoot", "walking_forefoot_concentration"),):
         for side in ("left", "right"):
             samples = side_events[side]
-            if len(samples) < 3:
+            if len(samples) < GAIT_MIN_SIDE_STEPS:
                 continue
             delta = shares[(side, region)] - baseline_shares[(side, region)]
             repeated = sum(
@@ -575,17 +608,8 @@ def _gait_episode_from_segment(
                         threshold=GAIT_REGION_DELTA_THRESHOLD,
                     )
                 )
-    if len(intervals) >= 6 and step_interval_cv >= GAIT_STEP_INTERVAL_CV_THRESHOLD:
-        issues.append(
-            GaitIssue(
-                issue_type="step_timing_instability",
-                side="none",
-                value=round(step_interval_cv, 4),
-                threshold=GAIT_STEP_INTERVAL_CV_THRESHOLD,
-            )
-        )
     return GaitEpisodeSummary(
-        episode_id=f"gait_{segment[-1].sync_id}_{events[0][0]}_{events[-1][0]}",
+        episode_id=f"gait_{segment[-1].sync_id}_{events[0][0]}",
         started_at_ms=events[0][0],
         ended_at_ms=events[-1][0],
         duration_ms=events[-1][0] - events[0][0],
@@ -659,18 +683,157 @@ def gait_episode_from_model(model: GaitEpisode) -> GaitEpisodeSummary:
     )
 
 
+def _episode_matches(left: GaitEpisodeSummary, right: GaitEpisodeSummary) -> bool:
+    if left.episode_id == right.episode_id:
+        return True
+    overlap = max(
+        0,
+        min(left.ended_at_ms, right.ended_at_ms)
+        - max(left.started_at_ms, right.started_at_ms),
+    )
+    shorter = max(1, min(left.duration_ms, right.duration_ms))
+    return overlap / shorter >= 0.80 or (
+        abs(left.started_at_ms - right.started_at_ms) <= 1_000
+        and abs(left.ended_at_ms - right.ended_at_ms) <= 1_000
+    )
+
+
+def _saved_gait_episodes(
+    session: Session | None, reset_at_ms: int, *, limit: int = 50
+) -> list[GaitEpisodeSummary]:
+    if session is None:
+        return []
+    models = list(
+        session.scalars(
+            select(GaitEpisode)
+            .where(GaitEpisode.reset_at_ms >= reset_at_ms)
+            .order_by(GaitEpisode.ended_at_ms.desc(), GaitEpisode.step_count.desc())
+            .limit(limit)
+        )
+    )
+    result: list[GaitEpisodeSummary] = []
+    for model in models:
+        episode = gait_episode_from_model(model)
+        if any(_episode_matches(episode, saved) for saved in result):
+            continue
+        result.append(episode)
+    return result
+
+
+def _persist_gait_episode(
+    session: Session, episode: GaitEpisodeSummary, reset_at_ms: int
+) -> None:
+    matching_models = [
+        model
+        for model in session.scalars(
+            select(GaitEpisode).where(GaitEpisode.reset_at_ms >= reset_at_ms)
+        )
+        if _episode_matches(episode, gait_episode_from_model(model))
+    ]
+    target = session.get(GaitEpisode, episode.episode_id)
+    if target is None and matching_models:
+        target = matching_models[0]
+    if target is None:
+        session.add(_episode_to_model(episode, reset_at_ms))
+    else:
+        updated = _episode_to_model(episode, reset_at_ms)
+        target.episode_id = updated.episode_id
+        target.reset_at_ms = updated.reset_at_ms
+        target.started_at_ms = updated.started_at_ms
+        target.ended_at_ms = updated.ended_at_ms
+        target.duration_ms = updated.duration_ms
+        target.step_count = updated.step_count
+        target.left_steps = updated.left_steps
+        target.right_steps = updated.right_steps
+        target.cadence_spm = updated.cadence_spm
+        target.step_interval_cv = updated.step_interval_cv
+        target.left_load_index = updated.left_load_index
+        target.right_load_index = updated.right_load_index
+        target.load_asymmetry = updated.load_asymmetry
+        target.metrics_json = updated.metrics_json
+        target.issues_json = updated.issues_json
+        for duplicate in matching_models:
+            if duplicate is not target:
+                session.delete(duplicate)
+    session.commit()
+
+
+def _confirmed_gait_trend(
+    episodes: list[GaitEpisodeSummary],
+) -> tuple[list[GaitIssue], int, int]:
+    evidence = episodes[:GAIT_CONFIRMED_EPISODE_COUNT]
+    steps = sum(item.step_count for item in evidence)
+    if len(evidence) < GAIT_CONFIRMED_EPISODE_COUNT or steps < GAIT_CONFIRMED_MIN_STEPS:
+        return [], len(evidence), steps
+    keys = {
+        (issue.issue_type, issue.side)
+        for issue in evidence[0].issues
+        if issue.issue_type
+        in {"walking_load_asymmetry", "walking_forefoot_concentration"}
+    }
+    confirmed: list[GaitIssue] = []
+    for key in sorted(keys):
+        matches = [
+            next(
+                (
+                    issue
+                    for issue in episode.issues
+                    if (issue.issue_type, issue.side) == key
+                ),
+                None,
+            )
+            for episode in evidence
+        ]
+        if all(item is not None for item in matches):
+            values = [item.value for item in matches if item is not None]
+            thresholds = [item.threshold for item in matches if item is not None]
+            confirmed.append(
+                GaitIssue(
+                    issue_type=key[0],
+                    side=key[1],
+                    value=round(median(values), 4),
+                    threshold=max(thresholds),
+                )
+            )
+    return confirmed, len(evidence), steps
+
+
+def gait_history_summary(
+    session: Session, reset_at_ms: int, *, limit: int = 8
+) -> tuple[list[GaitEpisodeSummary], GaitTrendSummary]:
+    episodes = _saved_gait_episodes(session, reset_at_ms, limit=max(limit, 50))
+    confirmed, evidence_count, evidence_steps = _confirmed_gait_trend(episodes)
+    return episodes[:limit], GaitTrendSummary(
+        evidence_episode_count=evidence_count,
+        evidence_step_count=evidence_steps,
+        confirmed_issues=confirmed,
+    )
+
+
+def _completed_gait_segment(
+    metrics: list[PairMetric], last_moving_index: int
+) -> list[PairMetric]:
+    end_at_ms = metrics[last_moving_index].timestamp_ms
+    start_index = last_moving_index
+    previous_moving_at_ms = end_at_ms
+    for index in range(last_moving_index - 1, -1, -1):
+        metric = metrics[index]
+        if metric.motion_state != "moving":
+            if end_at_ms - metric.timestamp_ms >= GAIT_EPISODE_END_HOLD_MS:
+                break
+            continue
+        if previous_moving_at_ms - metric.timestamp_ms > GAIT_EPISODE_END_HOLD_MS:
+            break
+        start_index = index
+        previous_moving_at_ms = metric.timestamp_ms
+    return metrics[start_index : last_moving_index + 1]
+
+
 def _latest_saved_gait_episode(
     session: Session | None, reset_at_ms: int
 ) -> GaitEpisodeSummary | None:
-    if session is None:
-        return None
-    model = session.scalar(
-        select(GaitEpisode)
-        .where(GaitEpisode.reset_at_ms >= reset_at_ms)
-        .order_by(GaitEpisode.ended_at_ms.desc())
-        .limit(1)
-    )
-    return gait_episode_from_model(model) if model is not None else None
+    episodes = _saved_gait_episodes(session, reset_at_ms, limit=50)
+    return episodes[0] if episodes else None
 
 
 def _gait_summary(
@@ -719,18 +882,15 @@ def _gait_summary(
         and latest_at_ms - metrics[last_moving_index].timestamp_ms
         >= GAIT_EPISODE_END_HOLD_MS
     ):
-        end_ms = metrics[last_moving_index].timestamp_ms
-        completed_segment = [
-            item
-            for item in metrics
-            if end_ms - GAIT_ANALYSIS_WINDOW_MS <= item.timestamp_ms <= end_ms
-        ]
+        completed_segment = _completed_gait_segment(metrics, last_moving_index)
         completed = _gait_episode_from_segment(completed_segment, baseline)
         if completed is not None and record and session is not None:
-            if session.get(GaitEpisode, completed.episode_id) is None:
-                session.add(_episode_to_model(completed, reset_at_ms))
-                session.commit()
-    last_completed = completed or _latest_saved_gait_episode(session, reset_at_ms)
+            _persist_gait_episode(session, completed, reset_at_ms)
+    saved_episodes = _saved_gait_episodes(session, reset_at_ms)
+    last_completed = completed or (saved_episodes[0] if saved_episodes else None)
+    confirmed_issues, evidence_episode_count, evidence_step_count = (
+        _confirmed_gait_trend(saved_episodes)
+    )
     window_ms = recent[-1].timestamp_ms - recent[0].timestamp_ms if recent else 0
     if live_valid and live_episode is not None:
         return GaitSummary(
@@ -741,6 +901,9 @@ def _gait_summary(
             right_steps=live_episode.right_steps,
             cadence_spm=live_episode.cadence_spm,
             last_completed_episode=last_completed,
+            confirmed_issues=confirmed_issues,
+            evidence_episode_count=evidence_episode_count,
+            evidence_step_count=evidence_step_count,
         )
     return GaitSummary(
         state=(
@@ -753,6 +916,9 @@ def _gait_summary(
         left_steps=0,
         right_steps=0,
         last_completed_episode=last_completed,
+        confirmed_issues=confirmed_issues,
+        evidence_episode_count=evidence_episode_count,
+        evidence_step_count=evidence_step_count,
     )
 
 
@@ -1788,6 +1954,11 @@ def _signal(
     if temperature_side is not None:
         return "temperature_asymmetry", temperature_side
 
+    # Walking pressure is evaluated by the step-based gait analyzer. Static
+    # pressure rules must not interpret a stance phase as a sustained risk.
+    if metric.motion_state == "moving":
+        return None
+
     # Pressure risks still require meaningful footwear loading.
     if (
         not metric.pressure_valid
@@ -1843,6 +2014,8 @@ def _signals(
     temperature_side = _temperature_signal_side(metric, baseline)
     if temperature_side is not None:
         result.append(("temperature_asymmetry", temperature_side))
+    if metric.motion_state == "moving":
+        return result
     if (
         not metric.pressure_valid
         or not baseline.ready
@@ -2000,6 +2173,9 @@ def _signal_is_active(
         < RISK_MIN_TOTAL_PRESSURE
         or not _pressure_contact_present(metric, baseline)
     ):
+        return False
+
+    if metric.motion_state == "moving":
         return False
 
     if risk_type == "left_load_bias":
@@ -2572,6 +2748,8 @@ def restart_calibration(session: Session) -> CalibrationStatus:
 
 def _recovery_label(before: float, after: float) -> str:
     improvement = (before - after) / max(before, 1e-9)
+    if improvement < 0:
+        return "worsened"
     if improvement >= RECOVERY_EFFECTIVE_RATIO:
         return "effective"
     if improvement >= RECOVERY_PARTIAL_RATIO:

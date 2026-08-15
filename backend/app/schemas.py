@@ -79,7 +79,7 @@ class OfflineInterventionRecord(StrictModel):
     acknowledgements: list["AckRequest"] = Field(default_factory=list)
     before_load_diff: float | None = Field(default=None, ge=0)
     after_load_diff: float | None = Field(default=None, ge=0)
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
     recovery_time_ms: int | None = Field(default=None, ge=0)
 
 
@@ -215,6 +215,9 @@ class GaitSummary(StrictModel):
     right_steps: int = Field(ge=0)
     cadence_spm: float | None = Field(default=None, ge=0)
     last_completed_episode: GaitEpisodeSummary | None = None
+    confirmed_issues: list[GaitIssue] = Field(default_factory=list)
+    evidence_episode_count: int = Field(default=0, ge=0)
+    evidence_step_count: int = Field(default=0, ge=0)
 
 
 class RealtimeResponse(StrictModel):
@@ -250,7 +253,7 @@ class RecoveryObservation(StrictModel):
     started_at_ms: int = Field(ge=0)
     deadline_at_ms: int = Field(ge=0)
     remaining_ms: int = Field(ge=0)
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
     component_feedback: list["RiskComponentFeedback"] = Field(default_factory=list)
 
 
@@ -404,7 +407,7 @@ class RiskEventOut(StrictModel):
     before_load_diff: float | None
     after_load_diff: float | None
     intervention_action: str | None = None
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
     recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
     active_risks: list[RiskState] = Field(default_factory=list)
@@ -419,11 +422,32 @@ class RiskComponentFeedback(StrictModel):
     after_value: float | None = None
     improvement_ratio: float | None = None
     effect_label: Literal[
-        "effective", "partial", "ineffective", "unknown", "observation_only"
+        "effective", "partial", "ineffective", "worsened", "unknown", "observation_only"
     ] = "unknown"
     pressure_intervention: bool = True
     metric_code: str | None = None
     metric_unit: str | None = None
+
+
+class RiskImprovementSummary(StrictModel):
+    risk_type: str
+    risk_side: str
+    evaluated_count: int = Field(default=0, ge=0)
+    effective_count: int = Field(default=0, ge=0)
+    partial_count: int = Field(default=0, ge=0)
+    ineffective_count: int = Field(default=0, ge=0)
+    worsened_count: int = Field(default=0, ge=0)
+    data_insufficient_count: int = Field(default=0, ge=0)
+    median_improvement_ratio: float | None = None
+    before_median: float | None = None
+    after_median: float | None = None
+    metric_unit: str | None = None
+
+
+class GaitTrendSummary(StrictModel):
+    evidence_episode_count: int = Field(default=0, ge=0)
+    evidence_step_count: int = Field(default=0, ge=0)
+    confirmed_issues: list[GaitIssue] = Field(default_factory=list)
 
 
 class SessionSummary(StrictModel):
@@ -445,10 +469,14 @@ class SessionSummary(StrictModel):
     motor_executed_count: int = Field(default=0, ge=0)
     motor_ack_count: int = Field(default=0, ge=0)
     recovery_counts: dict[str, int] = Field(default_factory=dict)
+    improvement_summary: list[RiskImprovementSummary] = Field(default_factory=list)
     sensor_summary: dict[str, float] = Field(default_factory=dict)
+    pressure_untrusted_channels: list[str] = Field(default_factory=list)
+    temperature_valid_pairs: int = Field(default=0, ge=0, le=4)
     latest_events: list[RiskEventOut] = Field(default_factory=list)
     gait_episode_count: int = Field(default=0, ge=0)
     latest_gait_episodes: list[GaitEpisodeSummary] = Field(default_factory=list)
+    gait_trend: GaitTrendSummary = Field(default_factory=GaitTrendSummary)
 
 
 class SessionAdviceResponse(StrictModel):
@@ -458,10 +486,34 @@ class SessionAdviceResponse(StrictModel):
     advice: str = Field(min_length=1, max_length=700)
 
 
+class SessionQuestionRequest(StrictModel):
+    question_key: Literal[
+        "session_priority",
+        "session_pressure_area",
+        "session_improvement",
+        "session_next_test",
+        "session_data_quality",
+    ]
+
+
+class SessionQuestionResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    question_key: Literal[
+        "session_priority",
+        "session_pressure_area",
+        "session_improvement",
+        "session_next_test",
+        "session_data_quality",
+    ]
+    question: str = Field(min_length=1, max_length=100)
+    answer: str = Field(min_length=1, max_length=600)
+
+
 class InterventionFeedbackRequest(StrictModel):
     event_id: str = Field(min_length=1, max_length=64)
     user_action: str = Field(min_length=1, max_length=64)
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"]
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"]
     before_load_diff: float = Field(ge=0)
     after_load_diff: float = Field(ge=0)
     recovery_time_ms: int = Field(ge=0)

@@ -4,12 +4,14 @@ from dataclasses import replace
 
 import pytest
 
-from backend.app.config import BASELINE_MIN_SAMPLES
+from backend.app.config import BASELINE_MIN_SAMPLES, GAIT_STEP_INTERVAL_CV_THRESHOLD
 from backend.app.services.risk_service import (
     PairMetric,
     _baseline_profile,
     _current_risk,
     _current_risks,
+    _confirmed_gait_trend,
+    _completed_gait_segment,
     _empty_baseline,
     _empty_temperature_reference,
     _gait_episode_from_segment,
@@ -650,6 +652,57 @@ def test_gait_summary_detects_alternating_load_transfer() -> None:
     assert gait.cadence_spm == pytest.approx(100.0, abs=0.1)
 
 
+def test_moving_pressure_is_handled_by_gait_not_static_risk_rules() -> None:
+    baseline = replace(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)]),
+        ready=True,
+    )
+    moving = replace(
+        _metric(
+            200,
+            motion_state="moving",
+            left_distribution=(0.30, 0.10, 0.05, 0.25, 0.10, 0.20),
+            temperature_delta_c=(0.0, 0.0, 0.0, 0.0),
+        ),
+        log_load_ratio=0.0,
+    )
+    assert _signals(moving, baseline) == []
+
+
+def test_three_consistent_gait_episodes_confirm_only_primary_findings() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(left_total=0.75, right_total=0.30), baseline
+    )
+    assert episode is not None
+    first = episode.model_copy(update={"episode_id": "gait_1"})
+    second = episode.model_copy(update={"episode_id": "gait_2"})
+    third = episode.model_copy(update={"episode_id": "gait_3"})
+
+    confirmed, evidence_count, evidence_steps = _confirmed_gait_trend(
+        [first, second, third]
+    )
+    assert evidence_count == 3
+    assert evidence_steps >= 18
+    assert any(item.issue_type == "walking_load_asymmetry" for item in confirmed)
+
+    partial, _, _ = _confirmed_gait_trend([first, second])
+    assert partial == []
+
+    opposite = third.model_copy(
+        update={
+            "issues": [
+                issue.model_copy(update={"side": "right"})
+                for issue in third.issues
+            ]
+        }
+    )
+    inconsistent, _, _ = _confirmed_gait_trend([first, second, opposite])
+    assert inconsistent == []
+
+
 def test_gait_summary_reports_stationary_without_false_steps() -> None:
     metrics = [_metric(index, motion_state="stationary") for index in range(31)]
 
@@ -687,6 +740,23 @@ def test_gait_summary_retains_last_completed_walk_while_stationary() -> None:
     assert gait.step_count == 0
     assert gait.last_completed_episode is not None
     assert gait.last_completed_episode.step_count >= 6
+
+
+def test_short_pause_does_not_end_the_current_gait_segment() -> None:
+    walking = _gait_episode_metrics()
+    last_moving_index = len(walking) - 1
+    short_pause = [
+        replace(
+            _metric(200 + index, motion_state="stationary"),
+            timestamp_ms=walking[-1].timestamp_ms + (index + 1) * 500,
+        )
+        for index in range(3)
+    ]
+
+    segment = _completed_gait_segment(walking + short_pause, last_moving_index)
+
+    assert segment[0].timestamp_ms == walking[0].timestamp_ms
+    assert segment[-1].timestamp_ms == walking[-1].timestamp_ms
 
 
 def test_old_gait_events_do_not_revive_after_one_new_motion_frame() -> None:
@@ -762,7 +832,25 @@ def test_gait_episode_detects_walking_load_asymmetry() -> None:
     assert episode.left_load_index > episode.right_load_index
 
 
-def test_gait_episode_detects_repeated_regional_concentration() -> None:
+def test_gait_episode_rejects_untrusted_pressure_coverage() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    weak = replace(
+        baseline,
+        pressure_channel_trust=(True, True, True, False, False, False) + (True,) * 6,
+        pressure_channel_contact_trust=(True, True, True, False, False, False)
+        + (True,) * 6,
+    )
+
+    episode = _gait_episode_from_segment(
+        _gait_episode_metrics(left_total=0.75, right_total=0.30), weak
+    )
+
+    assert episode is None
+
+
+def test_gait_episode_keeps_regional_metrics_without_formal_medial_issue() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     )
@@ -773,14 +861,14 @@ def test_gait_episode_detects_repeated_regional_concentration() -> None:
     )
 
     assert episode is not None
-    assert any(
-        item.issue_type == "walking_medial_concentration"
-        and item.side == "left"
+    assert episode.left_medial_ratio > episode.right_medial_ratio
+    assert all(
+        item.issue_type != "walking_medial_concentration"
         for item in episode.issues
     )
 
 
-def test_gait_episode_detects_step_timing_instability() -> None:
+def test_gait_episode_keeps_step_variation_without_formal_timing_issue() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
     )
@@ -793,8 +881,9 @@ def test_gait_episode_detects_step_timing_instability() -> None:
     )
 
     assert episode is not None
-    assert any(
-        item.issue_type == "step_timing_instability" for item in episode.issues
+    assert episode.step_interval_cv >= GAIT_STEP_INTERVAL_CV_THRESHOLD
+    assert all(
+        item.issue_type != "step_timing_instability" for item in episode.issues
     )
 
 

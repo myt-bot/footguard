@@ -98,6 +98,7 @@ class RiskBanner extends StatelessWidget {
       'effective' => '压力分配已改善',
       'partial' => '部分压力指标改善',
       'ineffective' => '压力分配仍未改善',
+      'worsened' => '压力异常偏离增加',
       _ => '数据不足',
     };
     return Container(
@@ -270,6 +271,7 @@ class RiskBanner extends StatelessWidget {
         'effective' => '改善',
         'partial' => '部分改善',
         'ineffective' => '未改善',
+        'worsened' => '偏离增加',
         _ => '数据不足',
       };
 }

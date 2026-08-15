@@ -20,6 +20,20 @@ import '../widgets/connection_status_card.dart';
 import '../widgets/foot_pressure_view.dart';
 import '../widgets/risk_banner.dart';
 
+String? realtimeTemperatureStatusText(CalibrationStatus? current) {
+  if (current == null || !current.emptyTemperatureReferenceReady) {
+    return '温度参考学习中：双脚先离开鞋垫，保持约 27 秒；此阶段温差只显示、不报警。';
+  }
+  if (!current.baselineReady) {
+    return '空载温度参考已完成，请穿鞋自然站立完成本次穿戴基线。';
+  }
+  if (!current.temperatureRiskEnabled) {
+    return '温度风险暂停：当前可信温区少于 2 个，压力监测不受影响。';
+  }
+  if (current.temperatureOffsetChannels.isNotEmpty) return null;
+  return '温度基线已就绪：按相对变化判断，并保留普通温区绝对温差兜底。';
+}
+
 class RealtimeScreen extends StatefulWidget {
   const RealtimeScreen({
     super.key,
@@ -386,7 +400,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
             if (controller.gait.lastCompletedEpisode != null) ...[
               const SizedBox(height: 12),
               _GaitAssessmentCard(
-                episode: controller.gait.lastCompletedEpisode!,
+                gait: controller.gait,
               ),
             ],
             const SizedBox(height: 12),
@@ -470,25 +484,7 @@ class _WearingCalibrationCard extends StatelessWidget {
         _ => _progressReason,
       };
 
-  String get _temperatureReason {
-    final current = status;
-    if (current == null || !current.emptyTemperatureReferenceReady) {
-      return '温度参考学习中：双脚先离开鞋垫，保持约 27 秒；此阶段温差只显示、不报警。';
-    }
-    if (!current.baselineReady) {
-      return '空载温度参考已完成，请穿鞋自然站立完成本次穿戴基线。';
-    }
-    if (!current.temperatureRiskEnabled) {
-      return '温度风险暂停：当前可信温区少于 2 个，压力监测不受影响。';
-    }
-    if (current.temperatureOffsetChannels.isNotEmpty) {
-      final labels = current.temperatureOffsetChannels
-          .map((index) => 'T${index + 1}')
-          .join('、');
-      return '温度偏置补偿已启用：$labels 使用相对本次穿戴基线的变化判断。';
-    }
-    return '温度基线已就绪：按相对变化判断，并保留普通温区绝对温差兜底。';
-  }
+  String? get _temperatureReason => realtimeTemperatureStatusText(status);
 
   @override
   Widget build(BuildContext context) {
@@ -546,11 +542,13 @@ class _WearingCalibrationCard extends StatelessWidget {
               _stageReason,
               style: const TextStyle(color: Color(0xFF63757B), fontSize: 12),
             ),
-            const SizedBox(height: 5),
-            Text(
-              _temperatureReason,
-              style: const TextStyle(color: Color(0xFF39758C), fontSize: 12),
-            ),
+            if (_temperatureReason case final reason?) ...[
+              const SizedBox(height: 5),
+              Text(
+                reason,
+                style: const TextStyle(color: Color(0xFF39758C), fontSize: 12),
+              ),
+            ],
           ],
         ),
       ),
@@ -613,56 +611,73 @@ class _MetricsCard extends StatelessWidget {
 }
 
 class _GaitAssessmentCard extends StatelessWidget {
-  const _GaitAssessmentCard({required this.episode});
+  const _GaitAssessmentCard({required this.gait});
 
-  final GaitEpisodeSummary episode;
+  final GaitSummary gait;
 
   @override
-  Widget build(BuildContext context) => Card(
-        elevation: 0,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Row(
-                children: [
-                  Icon(Icons.directions_walk_rounded),
-                  SizedBox(width: 8),
-                  Text(
-                    '最近一次完整行走评估',
-                    style: TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '${episode.stepCount} 次落脚 · ${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟 · '
-                '负荷不对称 ${(episode.loadAsymmetry * 100).toStringAsFixed(0)}%',
-              ),
-              const SizedBox(height: 8),
-              if (episode.issues.isEmpty)
-                const Text(
-                  '本次有效行走未发现达到工程阈值的负荷或步时问题。',
-                  style: TextStyle(color: Color(0xFF147D73)),
-                )
-              else
-                Wrap(
-                  spacing: 7,
-                  runSpacing: 7,
-                  children: episode.issues
-                      .map(
-                        (issue) => Chip(
-                          visualDensity: VisualDensity.compact,
-                          label: Text(_issueLabel(issue)),
-                        ),
-                      )
-                      .toList(growable: false),
+  Widget build(BuildContext context) {
+    final episode = gait.lastCompletedEpisode!;
+    final confirmed = gait.confirmedIssues;
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.directions_walk_rounded),
+                SizedBox(width: 8),
+                Text(
+                  '最近一次完整行走观察',
+                  style: TextStyle(fontWeight: FontWeight.w800),
                 ),
-            ],
-          ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${episode.stepCount} 次落脚 · ${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟 · '
+              '负荷不对称 ${(episode.loadAsymmetry * 100).toStringAsFixed(0)}%',
+            ),
+            const SizedBox(height: 8),
+            if (confirmed.isNotEmpty) ...[
+              Text(
+                '连续 ${gait.evidenceEpisodeCount} 段、${gait.evidenceStepCount} 次落脚均支持以下趋势：',
+                style: const TextStyle(
+                  color: Color(0xFFC45A20),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 7),
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: confirmed
+                    .map(
+                      (issue) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_issueLabel(issue)),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ] else if (gait.evidenceEpisodeCount < 3)
+              Text(
+                '已收集 ${gait.evidenceEpisodeCount}/3 段有效行走；单段指标仅作观察。',
+                style: TextStyle(color: Color(0xFF147D73)),
+              )
+            else
+              const Text(
+                '最近三段未形成同一方向的偏载或前掌反复受压趋势。',
+                style: TextStyle(color: Color(0xFF147D73)),
+              ),
+          ],
         ),
-      );
+      ),
+    );
+  }
 
   static String _issueLabel(GaitIssue issue) {
     final side = issue.side == 'left'

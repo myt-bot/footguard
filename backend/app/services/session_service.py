@@ -67,10 +67,12 @@ def recovery_observation(
             effect_label = "unknown"
         elif all(item == "effective" for item in pressure_results):
             effect_label = "effective"
-        elif all(item == "ineffective" for item in pressure_results):
-            effect_label = "ineffective"
-        else:
+        elif any(item in {"effective", "partial"} for item in pressure_results):
             effect_label = "partial"
+        elif any(item == "worsened" for item in pressure_results):
+            effect_label = "worsened"
+        else:
+            effect_label = "ineffective"
 
     return RecoveryObservation(
         event_id=event.event_id,

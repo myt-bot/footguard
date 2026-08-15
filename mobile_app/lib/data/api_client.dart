@@ -278,6 +278,68 @@ class RiskComponentFeedbackRecord {
       };
 }
 
+class RiskImprovementSummaryRecord {
+  const RiskImprovementSummaryRecord({
+    required this.riskType,
+    required this.riskSide,
+    this.evaluatedCount = 0,
+    this.effectiveCount = 0,
+    this.partialCount = 0,
+    this.ineffectiveCount = 0,
+    this.worsenedCount = 0,
+    this.dataInsufficientCount = 0,
+    this.medianImprovementRatio,
+    this.beforeMedian,
+    this.afterMedian,
+    this.metricUnit,
+  });
+
+  final String riskType;
+  final String riskSide;
+  final int evaluatedCount;
+  final int effectiveCount;
+  final int partialCount;
+  final int ineffectiveCount;
+  final int worsenedCount;
+  final int dataInsufficientCount;
+  final double? medianImprovementRatio;
+  final double? beforeMedian;
+  final double? afterMedian;
+  final String? metricUnit;
+
+  factory RiskImprovementSummaryRecord.fromJson(Map<String, dynamic> json) =>
+      RiskImprovementSummaryRecord(
+        riskType: json['risk_type'] as String,
+        riskSide: json['risk_side'] as String,
+        evaluatedCount: json['evaluated_count'] as int? ?? 0,
+        effectiveCount: json['effective_count'] as int? ?? 0,
+        partialCount: json['partial_count'] as int? ?? 0,
+        ineffectiveCount: json['ineffective_count'] as int? ?? 0,
+        worsenedCount: json['worsened_count'] as int? ?? 0,
+        dataInsufficientCount: json['data_insufficient_count'] as int? ?? 0,
+        medianImprovementRatio:
+            (json['median_improvement_ratio'] as num?)?.toDouble(),
+        beforeMedian: (json['before_median'] as num?)?.toDouble(),
+        afterMedian: (json['after_median'] as num?)?.toDouble(),
+        metricUnit: json['metric_unit'] as String?,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'evaluated_count': evaluatedCount,
+        'effective_count': effectiveCount,
+        'partial_count': partialCount,
+        'ineffective_count': ineffectiveCount,
+        'worsened_count': worsenedCount,
+        'data_insufficient_count': dataInsufficientCount,
+        'median_improvement_ratio': medianImprovementRatio,
+        'before_median': beforeMedian,
+        'after_median': afterMedian,
+        'metric_unit': metricUnit,
+      };
+}
+
 class SessionSummary {
   const SessionSummary({
     required this.sessionStatus,
@@ -287,6 +349,12 @@ class SessionSummary {
     required this.motorExecutedCount,
     this.gaitEpisodeCount = 0,
     this.latestGaitEpisodes = const [],
+    this.gaitTrend = const GaitTrendSummary(),
+    this.improvementSummary = const [],
+    this.pressureUntrustedChannels = const [],
+    this.temperatureValidPairs = 0,
+    this.leftValidPressureChannels = 0,
+    this.rightValidPressureChannels = 0,
     this.lastDataAtMs,
   });
 
@@ -298,6 +366,12 @@ class SessionSummary {
   final int motorExecutedCount;
   final int gaitEpisodeCount;
   final List<GaitEpisodeSummary> latestGaitEpisodes;
+  final GaitTrendSummary gaitTrend;
+  final List<RiskImprovementSummaryRecord> improvementSummary;
+  final List<String> pressureUntrustedChannels;
+  final int temperatureValidPairs;
+  final int leftValidPressureChannels;
+  final int rightValidPressureChannels;
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) => SessionSummary(
         sessionStatus: json['session_status'] as String? ?? 'empty',
@@ -312,6 +386,23 @@ class SessionSummary {
                 .cast<Map<String, dynamic>>()
                 .map(GaitEpisodeSummary.fromJson)
                 .toList(growable: false),
+        gaitTrend: GaitTrendSummary.fromJson(
+          json['gait_trend'] as Map<String, dynamic>? ?? const {},
+        ),
+        improvementSummary:
+            (json['improvement_summary'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(RiskImprovementSummaryRecord.fromJson)
+                .toList(growable: false),
+        pressureUntrustedChannels:
+            (json['pressure_untrusted_channels'] as List<dynamic>? ?? const [])
+                .map((item) => item.toString())
+                .toList(growable: false),
+        temperatureValidPairs: json['temperature_valid_pairs'] as int? ?? 0,
+        leftValidPressureChannels:
+            json['left_valid_pressure_channels'] as int? ?? 0,
+        rightValidPressureChannels:
+            json['right_valid_pressure_channels'] as int? ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -324,6 +415,13 @@ class SessionSummary {
         'gait_episode_count': gaitEpisodeCount,
         'latest_gait_episodes':
             latestGaitEpisodes.map((item) => item.toJson()).toList(),
+        'gait_trend': gaitTrend.toJson(),
+        'improvement_summary':
+            improvementSummary.map((item) => item.toJson()).toList(),
+        'pressure_untrusted_channels': pressureUntrustedChannels,
+        'temperature_valid_pairs': temperatureValidPairs,
+        'left_valid_pressure_channels': leftValidPressureChannels,
+        'right_valid_pressure_channels': rightValidPressureChannels,
       };
 }
 
@@ -754,6 +852,19 @@ class FootGuardApiClient {
         .post(Uri.parse('$baseUrl/api/v1/ai/session-advice'))
         .timeout(const Duration(seconds: 35));
     return SessionAdvice.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AiQuestionAnswer> sessionQuestion(String questionKey) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/ai/session-question'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'question_key': questionKey}),
+        )
+        .timeout(const Duration(seconds: 35));
+    return AiQuestionAnswer.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
   }

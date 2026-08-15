@@ -350,7 +350,11 @@ class _InterventionCard extends StatelessWidget {
                       style: const TextStyle(fontWeight: FontWeight.w700)),
                   if (item.improvementRatio != null) ...[
                     const SizedBox(width: 6),
-                    Text('${(item.improvementRatio! * 100).round()}%'),
+                    Text(
+                      item.improvementRatio! < 0
+                          ? '偏离增加 ${(-item.improvementRatio! * 100).round()}%'
+                          : '改善 ${(item.improvementRatio! * 100).round()}%',
+                    ),
                   ],
                 ]),
               ),
@@ -363,6 +367,8 @@ String _riskLabel(String type, String side) => switch (type) {
         side == 'both' ? '双脚前掌负荷集中' : '${side == 'left' ? '左脚' : '右脚'}前掌负荷集中',
       'left_load_bias' => '左侧负载持续偏高',
       'right_load_bias' => '右侧负载持续偏高',
+      'medial_load_concentration' => '${side == 'left' ? '左脚' : '右脚'}内侧负荷集中',
+      'lateral_load_concentration' => '${side == 'left' ? '左脚' : '右脚'}外侧负荷集中',
       'temperature_asymmetry' => '同区温度趋势异常',
       _ => '风险事件',
     };
@@ -371,5 +377,6 @@ String _effectLabel(String value) => switch (value) {
       'effective' => '明显改善',
       'partial' => '部分改善',
       'ineffective' => '未改善',
+      'worsened' => '偏离增加',
       _ => '数据不足',
     };

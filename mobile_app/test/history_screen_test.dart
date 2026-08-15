@@ -70,6 +70,21 @@ http.Response _supportingResponse(http.Request request) {
       headers: {'content-type': 'application/json; charset=utf-8'},
     );
   }
+  if (request.url.path == '/api/v1/ai/session-question') {
+    final body = jsonDecode(request.body) as Map<String, dynamic>;
+    return http.Response.bytes(
+      utf8.encode(
+        jsonEncode({
+          'provider': 'mock-risk-advisor-v1:session',
+          'question_key': body['question_key'],
+          'question': '最近会话最值得优先关注什么？',
+          'answer': '优先复查连续出现的左侧负载趋势。',
+        }),
+      ),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+  }
   return http.Response('not found', 404);
 }
 
@@ -171,6 +186,8 @@ void main() {
     expect(find.text('最近会话 AI 建议'), findsOneWidget);
     expect(find.text('2 条'), findsOneWidget);
     expect(find.text('1 次'), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -260));
+    await tester.pumpAndSettle();
     expect(find.text('左侧负载持续偏高'), findsOneWidget);
     expect(find.text('同区温度趋势异常'), findsOneWidget);
     expect(find.text('已恢复'), findsOneWidget);
@@ -188,6 +205,45 @@ void main() {
     expect(find.textContaining('改善 63%'), findsOneWidget);
     expect(find.textContaining('恢复用时 2.5 秒'), findsOneWidget);
     expect(find.textContaining('马达提醒后调整姿势'), findsOneWidget);
+  });
+
+  testWidgets('history asks a preset question with session context', (
+    tester,
+  ) async {
+    final requestedPaths = <String>[];
+    final api = FootGuardApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        requestedPaths.add(request.url.path);
+        if (request.url.path == '/api/v1/events') {
+          return http.Response('[]', 200);
+        }
+        return _supportingResponse(request);
+      }),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HistoryScreen(
+            backendUrl: 'http://example.test',
+            apiClient: api,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('最应关注什么？'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('最应关注什么？'));
+    await tester.pumpAndSettle();
+
+    expect(
+      requestedPaths,
+      contains('/api/v1/ai/session-question'),
+    );
+    expect(find.text('最近会话最值得优先关注什么？'), findsOneWidget);
+    expect(find.text('优先复查连续出现的左侧负载趋势。'), findsOneWidget);
   });
 
   testWidgets('history derives load-bias result from displayed values', (
@@ -236,10 +292,12 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('右侧负载持续偏高'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('右侧负载持续偏高'));
     await tester.pumpAndSettle();
 
-    expect(find.text('干预后评估：未见明显改善'), findsOneWidget);
+    expect(find.text('干预后评估：偏离增加'), findsOneWidget);
     expect(find.textContaining('65.0% → 70.0%'), findsOneWidget);
     expect(find.textContaining('增加 8%'), findsOneWidget);
   });
@@ -289,6 +347,8 @@ void main() {
         ),
       ),
     );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('同区温度趋势异常'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('同区温度趋势异常'));
     await tester.pumpAndSettle();
@@ -355,6 +415,8 @@ void main() {
         ),
       ),
     );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('组合风险事件'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('组合风险事件'));
     await tester.pumpAndSettle();

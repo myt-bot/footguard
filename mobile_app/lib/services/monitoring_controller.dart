@@ -896,14 +896,15 @@ class MonitoringController extends ChangeNotifier {
 
   void _updateGaitNotice() {
     final episode = gait.lastCompletedEpisode;
+    final confirmed = gait.confirmedIssues;
     if (episode == null ||
-        episode.issues.isEmpty ||
+        confirmed.isEmpty ||
         episode.episodeId == _announcedGaitEpisodeId) {
       return;
     }
     _announcedGaitEpisodeId = episode.episodeId;
     gaitNoticeMessage =
-        '本次行走检测到${episode.issues.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
+        '连续三段行走均检测到${confirmed.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
     _gaitNoticeSequence += 1;
   }
 
@@ -945,9 +946,13 @@ class MonitoringController extends ChangeNotifier {
             ? (activeRisks.isEmpty ? 'effective' : 'ineffective')
             : pressureEffects.every((item) => item == 'effective')
                 ? 'effective'
-                : pressureEffects.every((item) => item == 'ineffective')
-                    ? 'ineffective'
-                    : 'partial';
+                : pressureEffects.any(
+                    (item) => item == 'effective' || item == 'partial',
+                  )
+                    ? 'partial'
+                    : pressureEffects.any((item) => item == 'worsened')
+                        ? 'worsened'
+                        : 'ineffective';
     recoveryObservation = RecoveryObservation(
       eventId: observation.eventId,
       status: remaining > 0 ? 'observing' : 'completed',

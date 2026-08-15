@@ -400,7 +400,11 @@ class LocalRiskEngine {
       );
     }
     final adjustedBias = loadRatio - _baselineLoadRatio!;
-    if (pressureAvailable && runtimeContact) {
+    if (motionState == 'moving') {
+      _signalStartedAt.removeWhere((key, _) => !key.startsWith('temperature_'));
+      _latchedSignals.removeWhere((key) => !key.startsWith('temperature_'));
+    }
+    if (pressureAvailable && runtimeContact && motionState == 'stationary') {
       candidates['bias'] = (
         type: adjustedBias >= 0 ? 'left_load_bias' : 'right_load_bias',
         side: adjustedBias >= 0 ? 'left' : 'right',

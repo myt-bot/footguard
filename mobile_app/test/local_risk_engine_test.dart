@@ -282,16 +282,20 @@ void main() {
       expect(warning.motorTarget, isNull);
 
       final movingPersistent = evaluateAt(20000, 42, moving: true);
-      expect(movingPersistent.risk.riskLevel, 3);
+      expect(movingPersistent.risk.riskLevel, 0);
       expect(movingPersistent.motionState, 'moving');
       expect(movingPersistent.motorTarget, isNull);
 
-      final persistent = evaluateAt(21500, 43);
+      final resumed = evaluateAt(21500, 43);
+      expect(resumed.risk.riskLevel, 0);
+      expect(resumed.motorTarget, isNull);
+
+      final persistent = evaluateAt(41500, 44);
       expect(persistent.risk.riskLevel, 3);
       expect(persistent.motorTarget, 'left');
       expect(persistent.motorPattern, 'long');
 
-      final repeated = evaluateAt(22000, 44);
+      final repeated = evaluateAt(42000, 45);
       expect(repeated.risk.riskLevel, 3);
       expect(repeated.motorTarget, isNull);
     },

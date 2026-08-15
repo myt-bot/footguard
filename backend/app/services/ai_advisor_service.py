@@ -23,6 +23,8 @@ from ..schemas import (
     AiQuestionRequest,
     AiQuestionResponse,
     SessionAdviceResponse,
+    SessionQuestionRequest,
+    SessionQuestionResponse,
     SessionSummary,
 )
 from ..schemas import StrictModel
@@ -37,6 +39,13 @@ QUESTIONS = {
     "immediate_action": "现在应该怎么做？",
     "improvement_check": "怎样判断已经改善？",
     "when_to_seek_help": "什么情况需要进一步检查？",
+}
+SESSION_QUESTIONS = {
+    "session_priority": "最近会话最值得优先关注什么？",
+    "session_pressure_area": "哪一侧或哪个区域的反复受压最值得复查？",
+    "session_improvement": "提醒后的改善是否稳定，哪些指标没有改善？",
+    "session_next_test": "下一轮行走测试怎样安排才能减少误报并验证趋势？",
+    "session_data_quality": "这次数据里有没有会影响判断的设备或传感器问题？",
 }
 logger = logging.getLogger(__name__)
 
@@ -78,6 +87,13 @@ def _chat_fallback(payload: AiChatRequest) -> str:
                 f"最近一次有效行走记录 {episode.step_count} 次落脚，"
                 f"估算步频 {episode.cadence_spm:.0f} 步/分钟。"
             )
+            if payload.gait.confirmed_issues:
+                gait_text += "连续三段已形成一致的行走压力趋势。"
+            else:
+                gait_text += (
+                    f"当前已收集 {payload.gait.evidence_episode_count}/3 段证据，"
+                    "单段观察不作为正式异常。"
+                )
         text = f"当前压力规则未发现持续异常。{temperature}{gait_text}请继续观察趋势和足部皮肤状态。"
     else:
         text = f"{_explanation(payload)}{_advice(payload)}"
@@ -90,8 +106,8 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
             "role": "system",
             "content": (
                 "你是足安智垫辅助监测状态助手。只依据结构化状态回答用户问题，"
-                "明确区分当前状态与最近一次完整行走；步频偏低本身不等于异常，"
-                "重点解释左右负荷不对称、反复区域受压和步时稳定性。"
+                "明确区分当前状态与最近一次完整行走；步频偏低本身不等于异常。"
+                "只有 confirmed_issues 才是三段一致的正式行走趋势，单段 issues 只能作为观察。"
                 "不得诊断疾病、虚构数值或决定马达动作。用简洁中文输出 JSON，"
                 f"只包含 answer 字符串，末尾说明：{MEDICAL_BOUNDARY}"
             ),
@@ -109,81 +125,76 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
 
 def _session_fallback(summary: SessionSummary) -> str:
     risk_labels = {
-        "left_load_bias": "左侧双足负载分配异常",
-        "right_load_bias": "右侧双足负载分配异常",
-        "forefoot_high": "前掌持续负荷集中",
+        "left_load_bias": "左侧负载持续偏高",
+        "right_load_bias": "右侧负载持续偏高",
+        "forefoot_high": "前掌负荷持续集中",
         "medial_load_concentration": "内侧局部负荷集中",
         "lateral_load_concentration": "外侧局部负荷集中",
         "temperature_asymmetry": "同区温度趋势异常",
     }
-    sensors = summary.sensor_summary
-    gait_text = ""
-    if summary.latest_gait_episodes:
-        latest_gait = summary.latest_gait_episodes[0]
-        issue_labels = {
-            "walking_load_asymmetry": "左右行走负荷不对称",
-            "walking_forefoot_concentration": "行走时前掌反复受压",
-            "walking_medial_concentration": "行走时内侧反复受压",
-            "walking_lateral_concentration": "行走时外侧反复受压",
-            "step_timing_instability": "步时波动较大",
-        }
-        issues = "、".join(
-            issue_labels[item.issue_type] for item in latest_gait.issues
-        )
-        gait_text = (
-            f"最近一次有效行走记录 {latest_gait.step_count} 次落脚，"
-            f"估算步频 {latest_gait.cadence_spm:.0f} 步/分钟。"
-        )
-        if issues:
-            gait_text += f"工程趋势包括{issues}。"
-    sensor_text = ""
-    if sensors:
-        left_total = sensors.get("left_total_mean")
-        right_total = sensors.get("right_total_mean")
-        left_forefoot = sensors.get("left_forefoot_ratio_mean")
-        right_forefoot = sensors.get("right_forefoot_ratio_mean")
-        temperature_peak = sensors.get("temperature_delta_max_c_peak")
-        parts: list[str] = []
-        if left_total is not None and right_total is not None:
-            parts.append(f"左右平均相对载荷约为 {left_total:.2f}:{right_total:.2f}")
-        if left_forefoot is not None and right_forefoot is not None:
-            parts.append(
-                f"左右前掌平均占比约为 {left_forefoot * 100:.0f}%:"
-                f"{right_forefoot * 100:.0f}%"
-            )
-        if temperature_peak is not None:
-            parts.append(f"同区温差峰值约 {temperature_peak:.1f}℃")
-        if parts:
-            sensor_text = "会话趋势统计显示" + "、".join(parts) + "。"
     if summary.session_status == "empty":
-        text = "暂无有效监测会话。穿戴后先完成本次基线学习，再观察双脚压力、温度与风险趋势。"
-    elif not summary.baseline_ready:
-        text = "最近会话尚未完成可靠基线，现有风险统计不宜单独解读。重新穿戴后请自然站稳完成基线学习。"
-    elif summary.event_count == 0:
-        temperature = (
-            "温度当前不可用，但压力观察仍可继续。"
-            if not summary.temperature_available
-            else "有效温度点未记录持续风险。"
+        return (
+            "结论：暂无可分析的有效监测会话。"
+            "行动：完成本次穿戴基线后再进行压力与行走观察。"
+            f"{MEDICAL_BOUNDARY}"
         )
-        text = f"最近会话未记录持续压力风险。{temperature}{sensor_text}{gait_text}请继续检查鞋内异物、皮肤状态和鞋垫贴合。"
+    prefix = (
+        "当前无实时数据，以下为最近会话。最近会话"
+        if summary.session_status != "live"
+        else "当前会话"
+    )
+    if not summary.baseline_ready:
+        conclusion = "个人基线尚未完成，现有压力统计不足以形成可靠结论。"
+    elif summary.gait_trend.confirmed_issues:
+        labels = {
+            "walking_load_asymmetry": "持续单侧行走偏载",
+            "walking_forefoot_concentration": "前掌反复受压",
+        }
+        conclusion = "三段一致的行走趋势为" + "、".join(
+            labels.get(item.issue_type, item.issue_type)
+            for item in summary.gait_trend.confirmed_issues
+        ) + "。"
+    elif summary.event_count:
+        top = sorted(summary.risk_counts.items(), key=lambda item: (-item[1], item[0]))[:2]
+        conclusion = "优先复查" + "、".join(
+            f"{risk_labels.get(name, name)}（{count} 次）" for name, count in top
+        ) + "。"
     else:
-        frequent = "、".join(
-            f"{risk_labels.get(name, name)} {count} 次"
-            for name, count in summary.risk_counts.items()
-        )
-        effective = summary.recovery_counts.get("effective", 0)
-        partial = summary.recovery_counts.get("partial", 0)
-        ineffective = summary.recovery_counts.get("ineffective", 0)
-        text = (
-            f"最近会话记录 {summary.event_count} 次风险事件，分布为{frequent}。"
-            f"马达确认执行 {summary.motor_executed_count} 次；恢复评价中有效 {effective} 次、"
-            f"部分有效 {partial} 次、未恢复 {ineffective} 次。"
-            f"{sensor_text}{gait_text}"
-            "建议优先复查反复出现的一侧和区域，并结合皮肤外观与鞋内摩擦情况观察。"
-        )
-    if summary.session_status != "live" and summary.session_status != "empty":
-        text = f"当前无实时数据，以下为最近会话辅助建议：{text}"
-    return f"{text}{MEDICAL_BOUNDARY}"
+        conclusion = "未记录达到持续时间阈值的压力风险，也未形成三段一致的行走异常趋势。"
+
+    improvement_parts = []
+    for item in summary.improvement_summary[:2]:
+        if item.median_improvement_ratio is None:
+            improvement_parts.append(f"{risk_labels.get(item.risk_type, item.risk_type)}数据不足")
+        else:
+            change = round(abs(item.median_improvement_ratio) * 100)
+            direction = "改善" if item.median_improvement_ratio >= 0 else "偏离增加"
+            improvement_parts.append(
+                f"{risk_labels.get(item.risk_type, item.risk_type)}中位{direction} {change}%"
+            )
+    evidence = (
+        f"记录 {summary.event_count} 次风险事件、{summary.motor_executed_count} 次已执行干预；"
+        f"行走证据为 {summary.gait_trend.evidence_episode_count} 段、"
+        f"{summary.gait_trend.evidence_step_count} 次落脚"
+    )
+    if improvement_parts:
+        evidence += "；" + "、".join(improvement_parts)
+    evidence += "。"
+    quality = (
+        f"压力不可信通道：{'、'.join(summary.pressure_untrusted_channels)}。"
+        if summary.pressure_untrusted_channels
+        else "压力通道未见已标记的不可信点。"
+    )
+    if summary.temperature_valid_pairs < 2:
+        quality += "温度有效对应区域少于 2 组，温度结论需保留。"
+    action = (
+        "先检查反复出现一侧的鞋内异物、鞋垫贴合和皮肤外观；"
+        "下一轮使用三段短直线自然行走复核，单段结果不单独下结论。"
+    )
+    return (
+        f"{prefix}结论：{conclusion}依据：{evidence}行动：{action}"
+        f"数据限制：{quality}{MEDICAL_BOUNDARY}"
+    )
 
 
 def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
@@ -191,11 +202,12 @@ def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
         {
             "role": "system",
             "content": (
-                "你是足安智垫的会话总结助手。仅依据结构化会话统计给出简洁中文辅助建议，"
-                "区分当前实时状态与最近历史，不得把历史风险描述为当前风险，不得诊断疾病、"
-                "结合完整行走记录解释左右减负、反复受压区域和步时稳定性，"
-                "不得把低步频单独描述为病理异常。"
-                "预测溃疡、虚构数值或决定马达动作。输出 JSON 且只包含 advice 字符串，"
+                "你是足安智垫的会话总结助手。只依据结构化汇总，按结论、依据、行动、数据限制"
+                "四部分给出简洁中文建议。只选择一至两个最重要发现，不逐条复述事件。"
+                "必须区分当前状态与最近历史；只有 gait_trend.confirmed_issues 才是跨三段确认的"
+                "行走趋势，单段 issues 只能视为观察值。改善率是相对个人基线的工程指标，"
+                "不得解释为临床疗效。不得把低步频、内外侧单段变化或步时波动描述为病理异常。"
+                "不得诊断疾病、预测溃疡、虚构数值或决定马达动作。输出 JSON 且只包含 advice 字符串，"
                 f"末尾必须说明：{MEDICAL_BOUNDARY}"
             ),
         },
@@ -203,6 +215,113 @@ def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
             "role": "user",
             "content": json.dumps(
                 summary.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+
+
+def _session_question_fallback(
+    summary: SessionSummary, request: SessionQuestionRequest
+) -> str:
+    pressure_labels = {
+        "left_load_bias": "左侧负载持续偏高",
+        "right_load_bias": "右侧负载持续偏高",
+        "forefoot_high": "前掌负荷持续集中",
+        "medial_load_concentration": "内侧局部负荷集中",
+        "lateral_load_concentration": "外侧局部负荷集中",
+    }
+    key = request.question_key
+    if summary.session_status == "empty":
+        answer = "暂无有效会话，完成个人基线和至少三段有效行走后再进行比较。"
+    elif key == "session_priority":
+        if summary.gait_trend.confirmed_issues:
+            labels = {
+                "walking_load_asymmetry": "持续单侧行走偏载",
+                "walking_forefoot_concentration": "前掌反复受压",
+            }
+            answer = "优先复查三段行走均出现的" + "、".join(
+                labels.get(item.issue_type, item.issue_type)
+                for item in summary.gait_trend.confirmed_issues
+            ) + "，并核对对应区域皮肤和鞋垫贴合。"
+        else:
+            pressure = [
+                item for item in summary.risk_counts.items() if item[0] in pressure_labels
+            ]
+            if pressure:
+                name, count = max(pressure, key=lambda item: item[1])
+                answer = f"优先复查{pressure_labels[name]}，最近会话记录 {count} 次；单段行走观察尚不作为正式结论。"
+            else:
+                answer = "最近会话未形成需要优先处理的持续压力或三段一致行走趋势。"
+    elif key == "session_pressure_area":
+        pressure = sorted(
+            (
+                (name, count)
+                for name, count in summary.risk_counts.items()
+                if name in pressure_labels
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        answer = (
+            f"最值得复查的是{pressure_labels[pressure[0][0]]}，记录 {pressure[0][1]} 次。"
+            if pressure
+            else "没有压力区域达到持续风险记录条件；继续观察三段行走是否出现同一侧、同一区域的重复趋势。"
+        )
+    elif key == "session_improvement":
+        parts = []
+        for item in summary.improvement_summary:
+            label = pressure_labels.get(item.risk_type, item.risk_type)
+            if item.median_improvement_ratio is None:
+                parts.append(f"{label}数据不足")
+            elif item.median_improvement_ratio < 0:
+                parts.append(f"{label}偏离增加 {round(-item.median_improvement_ratio * 100)}%")
+            else:
+                parts.append(f"{label}中位改善 {round(item.median_improvement_ratio * 100)}%")
+        answer = (
+            "；".join(parts[:3]) + "。改善率仅表示压力异常量相对个人基线的变化。"
+            if parts
+            else "没有完成可比较的压力干预前后窗口，当前不能可靠判断改善是否稳定。"
+        )
+    elif key == "session_next_test":
+        answer = (
+            "完成基线后进行三段独立短直线自然行走，每段至少 6 次有效落脚、左右各至少 3 次；"
+            "转弯后停稳再开始下一段，只在三段均出现同向偏载或前掌反复受压时确认趋势。"
+        )
+    else:
+        pressure = (
+            "压力不可信通道为" + "、".join(summary.pressure_untrusted_channels)
+            if summary.pressure_untrusted_channels
+            else "未记录已标记的压力不可信通道"
+        )
+        answer = (
+            f"{pressure}；当前左右有效压力通道为 {summary.left_valid_pressure_channels}/6 和 "
+            f"{summary.right_valid_pressure_channels}/6，温度有效对应区域 {summary.temperature_valid_pairs}/4。"
+        )
+    return answer if MEDICAL_BOUNDARY in answer else f"{answer}{MEDICAL_BOUNDARY}"
+
+
+def _cloud_session_question_prompt(
+    summary: SessionSummary, request: SessionQuestionRequest
+) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是糖尿病足辅助监测原型的会话问答助手。只回答白名单问题，并只依据"
+                "结构化会话汇总。confirmed_issues 才是三段一致趋势；单段 issues 不能当作"
+                "正式异常。改善率只表示相对个人基线的工程变化，不是临床疗效。"
+                "不得诊断、预测溃疡、虚构数值或决定马达动作。输出 JSON，且只包含 answer 字符串，"
+                f"末尾必须说明：{MEDICAL_BOUNDARY}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "question": SESSION_QUESTIONS[request.question_key],
+                    "session_summary": summary.model_dump(mode="json"),
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -619,6 +738,39 @@ def _request_cloud_session_advice(
             active_client.close()
 
 
+def _request_cloud_session_question(
+    summary: SessionSummary,
+    request: SessionQuestionRequest,
+    settings: _CloudSettings,
+    client: httpx.Client | None = None,
+) -> _CloudQuestionAnswer:
+    owns_client = client is None
+    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    try:
+        response = active_client.post(
+            f"{settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.model,
+                "messages": _cloud_session_question_prompt(summary, request),
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise CloudAdviceError("cloud response content is not text")
+        return _CloudQuestionAnswer.model_validate_json(content)
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        raise CloudAdviceError("cloud provider returned an invalid response") from error
+    finally:
+        if owns_client:
+            active_client.close()
+
+
 def _cloud_provider_name(model: str) -> str:
     return f"openai-compatible:{model}"[:64]
 
@@ -746,4 +898,40 @@ def generate_session_advice(
             provider=f"{FALLBACK_PROVIDER}:session",
             session_status=summary.session_status,
             advice=_session_fallback(summary),
+        )
+
+
+def generate_session_question_answer(
+    summary: SessionSummary,
+    request: SessionQuestionRequest,
+    client: httpx.Client | None = None,
+) -> SessionQuestionResponse:
+    settings = _cloud_settings()
+    if settings is None:
+        return SessionQuestionResponse(
+            provider=f"{MOCK_PROVIDER}:session",
+            question_key=request.question_key,
+            question=SESSION_QUESTIONS[request.question_key],
+            answer=_session_question_fallback(summary, request),
+        )
+    try:
+        narrative = _request_cloud_session_question(
+            summary, request, settings, client
+        )
+        answer = narrative.answer.rstrip()
+        if MEDICAL_BOUNDARY not in answer:
+            answer = f"{answer}{MEDICAL_BOUNDARY}"
+        return SessionQuestionResponse(
+            provider=_cloud_provider_name(settings.model),
+            question_key=request.question_key,
+            question=SESSION_QUESTIONS[request.question_key],
+            answer=answer,
+        )
+    except CloudAdviceError as error:
+        logger.warning("Cloud session question unavailable; using fallback: %s", error)
+        return SessionQuestionResponse(
+            provider=f"{FALLBACK_PROVIDER}:session",
+            question_key=request.question_key,
+            question=SESSION_QUESTIONS[request.question_key],
+            answer=_session_question_fallback(summary, request),
         )

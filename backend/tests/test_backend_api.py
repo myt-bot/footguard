@@ -155,6 +155,20 @@ def test_session_summary_and_csv_exports_work_without_live_data(
     assert advice.json()["session_status"] == "recent"
     assert "当前无实时数据" in advice.json()["advice"]
 
+    question = client.post(
+        "/api/v1/ai/session-question",
+        json={"question_key": "session_data_quality"},
+    )
+    assert question.status_code == 200
+    assert question.json()["question_key"] == "session_data_quality"
+    assert "不能替代医疗诊断" in question.json()["answer"]
+
+    arbitrary_question = client.post(
+        "/api/v1/ai/session-question",
+        json={"question_key": "write_a_diagnosis"},
+    )
+    assert arbitrary_question.status_code == 422
+
     events_csv = client.get("/api/v1/export/events.csv")
     session_csv = client.get("/api/v1/export/session.csv")
     assert events_csv.status_code == 200

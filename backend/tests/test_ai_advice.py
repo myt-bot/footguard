@@ -12,11 +12,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app.main import create_app
-from backend.app.schemas import AiAdviceRequest, AiChatRequest, AiQuestionRequest
+from backend.app.schemas import (
+    AiAdviceRequest,
+    AiChatRequest,
+    AiQuestionRequest,
+    RiskImprovementSummary,
+    SessionSummary,
+)
 from backend.app.services.ai_advisor_service import (
     generate_advice,
     generate_chat_answer,
     generate_question_answer,
+    generate_session_advice,
 )
 
 
@@ -250,6 +257,39 @@ def test_free_chat_explains_wearing_calibration() -> None:
     )
     result = generate_chat_answer(AiChatRequest.model_validate(payload))
     assert "本次穿戴基线" in result.answer
+
+
+def test_session_advice_prioritizes_evidence_instead_of_replaying_events() -> None:
+    summary = SessionSummary(
+        session_status="live",
+        baseline_ready=True,
+        event_count=5,
+        highest_risk_level=3,
+        risk_counts={"left_load_bias": 3, "forefoot_high": 2},
+        motor_executed_count=4,
+        improvement_summary=[
+            RiskImprovementSummary(
+                risk_type="left_load_bias",
+                risk_side="left",
+                evaluated_count=3,
+                effective_count=2,
+                ineffective_count=1,
+                median_improvement_ratio=0.42,
+                metric_unit="ratio",
+            )
+        ],
+        left_valid_pressure_channels=6,
+        right_valid_pressure_channels=6,
+        temperature_valid_pairs=4,
+    )
+
+    result = generate_session_advice(summary)
+
+    assert "结论：" in result.advice
+    assert "依据：" in result.advice
+    assert "行动：" in result.advice
+    assert "数据限制：" in result.advice
+    assert "记录 5 次风险事件" in result.advice
 
 
 def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(

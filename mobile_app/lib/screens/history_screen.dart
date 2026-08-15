@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/api_client.dart';
 import '../models/offline_intervention.dart';
 import '../models/gait_summary.dart';
+import '../models/ai_question_answer.dart';
 import '../models/session_advice.dart';
 import '../services/offline_monitoring_store.dart';
 
@@ -42,6 +43,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
   late Future<_HistoryPayload> payload;
   _HistoryFilter filter = _HistoryFilter.all;
   _HistoryView view = _HistoryView.risks;
+  AiQuestionAnswer? sessionQuestionAnswer;
+  bool sessionQuestionLoading = false;
+  String sessionQuestionStatus = '请选择一个会话问题';
 
   @override
   void initState() {
@@ -101,6 +105,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   advice: result.advice,
                   cached: result.cached,
                   onRefresh: _reload,
+                  questionAnswer: sessionQuestionAnswer,
+                  questionLoading: sessionQuestionLoading,
+                  questionStatus: sessionQuestionStatus,
+                  onQuestionSelected: _askSessionQuestion,
                 ),
                 const SizedBox(height: 14),
                 Row(
@@ -126,7 +134,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: _SummaryTile(
-                        label: '负载有改善',
+                        label: '压力有改善',
                         value: '$improvedCount 条',
                         icon: Icons.trending_down_rounded,
                         color: const Color(0xFF1A9B78),
@@ -175,11 +183,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     icon: Icons.directions_walk_rounded,
                     text: '暂无完整行走记录',
                   )
-                else
+                else ...[
+                  _GaitTrendPanel(trend: result.summary!.gaitTrend),
+                  const SizedBox(height: 10),
                   for (final episode in result.summary!.latestGaitEpisodes) ...[
                     _GaitEpisodeCard(episode: episode),
                     const SizedBox(height: 10),
                   ],
+                ],
               ],
             ),
           );
@@ -304,6 +315,29 @@ class _HistoryScreenState extends State<HistoryScreen> {
     setState(() => payload = _load());
     await payload;
   }
+
+  Future<void> _askSessionQuestion(String questionKey) async {
+    setState(() {
+      sessionQuestionLoading = true;
+      sessionQuestionAnswer = null;
+      sessionQuestionStatus = '正在结合最近会话生成回答…';
+    });
+    try {
+      final answer = await api.sessionQuestion(questionKey);
+      if (!mounted) return;
+      setState(() {
+        sessionQuestionAnswer = answer;
+        sessionQuestionStatus = '';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        sessionQuestionStatus = '会话追问暂时不可用：$error';
+      });
+    } finally {
+      if (mounted) setState(() => sessionQuestionLoading = false);
+    }
+  }
 }
 
 class _SessionAdvicePanel extends StatelessWidget {
@@ -311,11 +345,19 @@ class _SessionAdvicePanel extends StatelessWidget {
     required this.advice,
     required this.cached,
     required this.onRefresh,
+    required this.questionAnswer,
+    required this.questionLoading,
+    required this.questionStatus,
+    required this.onQuestionSelected,
   });
 
   final SessionAdvice? advice;
   final bool cached;
   final Future<void> Function() onRefresh;
+  final AiQuestionAnswer? questionAnswer;
+  final bool questionLoading;
+  final String questionStatus;
+  final Future<void> Function(String questionKey) onQuestionSelected;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -363,11 +405,115 @@ class _SessionAdvicePanel extends StatelessWidget {
                       const TextStyle(color: Color(0xFF718096), fontSize: 11),
                 ),
               ],
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              const Text(
+                '常见会话问题',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 9),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final question in _sessionQuestions) ...[
+                      ActionChip(
+                        avatar: Icon(question.icon, size: 17),
+                        label: Text(question.label),
+                        onPressed: questionLoading
+                            ? null
+                            : () => onQuestionSelected(question.key),
+                      ),
+                      const SizedBox(width: 7),
+                    ],
+                  ],
+                ),
+              ),
+              if (questionLoading)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Row(
+                    children: [
+                      SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 8),
+                      Text('正在生成回答…'),
+                    ],
+                  ),
+                )
+              else if (questionAnswer != null)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF7F5),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        questionAnswer!.question,
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(questionAnswer!.answer),
+                    ],
+                  ),
+                )
+              else if (questionStatus != '请选择一个会话问题')
+                Text(
+                  questionStatus,
+                  style: const TextStyle(
+                    color: Color(0xFF718096),
+                    fontSize: 12,
+                  ),
+                ),
             ],
           ),
         ),
       );
 }
+
+class _SessionQuestionOption {
+  const _SessionQuestionOption(this.key, this.label, this.icon);
+
+  final String key;
+  final String label;
+  final IconData icon;
+}
+
+const _sessionQuestions = [
+  _SessionQuestionOption(
+    'session_priority',
+    '最应关注什么？',
+    Icons.priority_high_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_pressure_area',
+    '复查哪个区域？',
+    Icons.location_searching_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_improvement',
+    '改善是否稳定？',
+    Icons.trending_down_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_next_test',
+    '下一轮怎么测？',
+    Icons.directions_walk_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_data_quality',
+    '数据可靠吗？',
+    Icons.sensors_rounded,
+  ),
+];
 
 List<RiskEventRecord> _eventsFromOfflineInterventions(
   List<OfflineIntervention> records,
@@ -588,6 +734,52 @@ class _HistoryEventCard extends StatelessWidget {
   }
 }
 
+class _GaitTrendPanel extends StatelessWidget {
+  const _GaitTrendPanel({required this.trend});
+
+  final GaitTrendSummary trend;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEAF7F3),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '行走趋势证据 ${trend.evidenceEpisodeCount}/3 段 · ${trend.evidenceStepCount} 次落脚',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 7),
+            if (trend.confirmedIssues.isEmpty)
+              Text(
+                trend.evidenceEpisodeCount < 3
+                    ? '证据仍在收集中，单段观察不触发正式提醒。'
+                    : '最近三段未形成同一方向的偏载或前掌反复受压趋势。',
+                style: const TextStyle(color: Color(0xFF147D73)),
+              )
+            else
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: trend.confirmedIssues
+                    .map(
+                      (issue) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_gaitIssueLabel(issue)),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+          ],
+        ),
+      );
+}
+
 class _GaitEpisodeCard extends StatelessWidget {
   const _GaitEpisodeCard({required this.episode});
 
@@ -612,8 +804,8 @@ class _GaitEpisodeCard extends StatelessWidget {
                     ),
                   ),
                   _StatusPill(
-                    label: episode.issues.isEmpty ? '未见明显问题' : '需要关注',
-                    active: episode.issues.isNotEmpty,
+                    label: episode.issues.isEmpty ? '无候选趋势' : '本段观察',
+                    active: false,
                   ),
                 ],
               ),
@@ -662,22 +854,6 @@ class _GaitEpisodeCard extends StatelessWidget {
           ),
         ),
       );
-
-  static String _gaitIssueLabel(GaitIssue issue) {
-    final side = issue.side == 'left'
-        ? '左脚'
-        : issue.side == 'right'
-            ? '右脚'
-            : '';
-    return switch (issue.issueType) {
-      'walking_load_asymmetry' => '$side行走负荷偏高',
-      'walking_forefoot_concentration' => '$side前掌反复受压',
-      'walking_medial_concentration' => '$side内侧反复受压',
-      'walking_lateral_concentration' => '$side外侧反复受压',
-      'step_timing_instability' => '步时波动较大',
-      _ => '行走趋势异常',
-    };
-  }
 }
 
 class _StatusPill extends StatelessWidget {
@@ -833,7 +1009,7 @@ class _ComponentRecoveryPanel extends StatelessWidget {
         width: double.infinity,
         padding: const EdgeInsets.all(13),
         decoration: BoxDecoration(
-          color: const Color(0xFFEAF7F3),
+          color: const Color(0xFFF2F5F5),
           borderRadius: BorderRadius.circular(14),
         ),
         child: Column(
@@ -849,30 +1025,36 @@ class _ComponentRecoveryPanel extends StatelessWidget {
             const SizedBox(height: 8),
             for (final item in feedback)
               Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Text(
-                        '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}',
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}',
+                          ),
+                        ),
+                        Text(
+                          _componentEffectLabel(item.effectLabel),
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ],
                     ),
+                    const SizedBox(height: 3),
                     Text(
-                      _componentEffectLabel(item.effectLabel),
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    if (item.beforeValue != null &&
-                        item.afterValue != null) ...[
-                      const SizedBox(width: 6),
-                      Text(
-                        '${_formatPercent(item.beforeValue!)} → ${_formatPercent(item.afterValue!)}',
-                        style: const TextStyle(fontSize: 12),
+                      item.beforeValue != null && item.afterValue != null
+                          ? '${_componentMetricLabel(item)} '
+                              '${_formatComponentValue(item, item.beforeValue!)} → '
+                              '${_formatComponentValue(item, item.afterValue!)}'
+                              '${_componentChangeLabel(item)}'
+                          : '有效静止配对数据不足，未计算改善程度',
+                      style: const TextStyle(
+                        color: Color(0xFF60706F),
+                        fontSize: 12,
                       ),
-                    ],
-                    if (item.improvementRatio != null) ...[
-                      const SizedBox(width: 6),
-                      Text('${(item.improvementRatio! * 100).round()}%'),
-                    ],
+                    ),
                   ],
                 ),
               ),
@@ -891,8 +1073,9 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
     final isActive = event.status == 'active';
     final description = switch (event.riskType) {
       'temperature_asymmetry' => '温差事件不能用左右负载差判定干预效果；本页仅记录事件是否解除和恢复用时。',
-      'forefoot_high' => '当前版本尚未保存提醒前后的前掌区域变化量，因此不宣称干预后改善。',
-      _ => '本次事件没有可用于评估干预效果的同类指标。',
+      _ when event.interventionStartedAtMs == null =>
+        '本次未执行马达提醒，因此不评价干预后的改善程度。',
+      _ => '本次干预前后没有取得足够的有效静止配对数据，暂不计算改善程度。',
     };
     return Container(
       width: double.infinity,
@@ -962,6 +1145,19 @@ String _riskLabel(String riskType) => switch (riskType) {
       _ => '区域负荷集中',
     };
 
+String _gaitIssueLabel(GaitIssue issue) {
+  final side = issue.side == 'left'
+      ? '左脚'
+      : issue.side == 'right'
+          ? '右脚'
+          : '';
+  return switch (issue.issueType) {
+    'walking_load_asymmetry' => '$side行走负荷偏高',
+    'walking_forefoot_concentration' => '$side前掌反复受压',
+    _ => '行走工程观察',
+  };
+}
+
 IconData _riskIcon(String riskType) => switch (riskType) {
       'temperature_asymmetry' => Icons.device_thermostat_rounded,
       'forefoot_high' => Icons.directions_walk_rounded,
@@ -972,6 +1168,9 @@ IconData _riskIcon(String riskType) => switch (riskType) {
     };
 
 String _recoveryResult(double? ratio) {
+  if (ratio != null && ratio < 0) {
+    return '偏离增加';
+  }
   if (ratio != null && ratio >= 0.5) {
     return '明显改善';
   }
@@ -1021,8 +1220,33 @@ String _componentEffectLabel(String value) => switch (value) {
       'effective' => '明显改善',
       'partial' => '部分改善',
       'ineffective' => '未改善',
+      'worsened' => '偏离增加',
       _ => '数据不足',
     };
+
+String _componentMetricLabel(RiskComponentFeedbackRecord item) =>
+    switch (item.metricCode) {
+      'load_asymmetry_excess' => '相对偏载程度',
+      String code when code.contains('forefoot_excess') => '前掌超出个人基线',
+      String code when code.contains('medial_excess') => '内侧超出个人基线',
+      String code when code.contains('lateral_excess') => '外侧超出个人基线',
+      _ => '异常偏离程度',
+    };
+
+String _formatComponentValue(
+  RiskComponentFeedbackRecord item,
+  double value,
+) =>
+    item.metricUnit == 'celsius'
+        ? '${value.toStringAsFixed(1)}℃'
+        : _formatPercent(value);
+
+String _componentChangeLabel(RiskComponentFeedbackRecord item) {
+  final ratio = item.improvementRatio;
+  if (ratio == null) return '';
+  final value = (ratio.abs() * 100).round();
+  return ratio < 0 ? ' · 偏离增加 $value%' : ' · 改善 $value%';
+}
 
 String _statusLabel(String status) => switch (status) {
       'active' => '进行中',
