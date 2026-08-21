@@ -44,6 +44,7 @@ from ..config import (
     GAIT_MAX_ADAPTIVE_THRESHOLD,
     GAIT_MAX_CADENCE_SPM,
     GAIT_MIN_CADENCE_SPM,
+    GAIT_MIN_ACTIVE_MOTION_FRAMES,
     GAIT_MIN_MOVING_RATIO,
     GAIT_MIN_SIDE_STEPS,
     GAIT_MIN_STEP_CANDIDATES,
@@ -540,11 +541,12 @@ def _gait_episode_from_segment(
     def share(metric: PairMetric, side: str, region: str) -> float:
         distribution = _estimated_distribution(metric, baseline, side)
         value = sum(distribution[index] for index in region_indices[region])
-        return (
+        result = (
             value
             if region == "forefoot"
             else value / max(sum(distribution[:4]), 1e-9)
         )
+        return min(1.0, max(0.0, result))
 
     shares = {
         (side, region): median(share(metric, side, region) for metric in side_events[side])
@@ -657,6 +659,14 @@ def _episode_to_model(episode: GaitEpisodeSummary, reset_at_ms: int) -> GaitEpis
 
 def gait_episode_from_model(model: GaitEpisode) -> GaitEpisodeSummary:
     metrics = json.loads(model.metrics_json or "{}")
+    stored_issues = [
+        GaitIssue.model_validate(item)
+        for item in json.loads(model.issues_json or "[]")
+    ]
+    current_thresholds = {
+        "walking_load_asymmetry": GAIT_LOAD_ASYMMETRY_THRESHOLD,
+        "walking_forefoot_concentration": GAIT_REGION_DELTA_THRESHOLD,
+    }
     return GaitEpisodeSummary(
         episode_id=model.episode_id,
         started_at_ms=model.started_at_ms,
@@ -677,8 +687,11 @@ def gait_episode_from_model(model: GaitEpisode) -> GaitEpisodeSummary:
         left_lateral_ratio=metrics.get("left_lateral_ratio", 0.0),
         right_lateral_ratio=metrics.get("right_lateral_ratio", 0.0),
         issues=[
-            GaitIssue.model_validate(item)
-            for item in json.loads(model.issues_json or "[]")
+            issue
+            for issue in stored_issues
+            if issue.issue_type in current_thresholds
+            and issue.threshold >= current_thresholds[issue.issue_type]
+            and issue.value >= current_thresholds[issue.issue_type]
         ],
     )
 
@@ -829,6 +842,36 @@ def _completed_gait_segment(
     return metrics[start_index : last_moving_index + 1]
 
 
+def _completed_gait_segments(metrics: list[PairMetric]) -> list[list[PairMetric]]:
+    """Return every motion segment already separated by a stop gap."""
+    segments: list[list[PairMetric]] = []
+    start_index: int | None = None
+    last_moving_index: int | None = None
+    for index, metric in enumerate(metrics):
+        if metric.motion_state != "moving":
+            continue
+        if (
+            last_moving_index is not None
+            and metric.timestamp_ms - metrics[last_moving_index].timestamp_ms
+            > GAIT_EPISODE_END_HOLD_MS
+        ):
+            if start_index is not None:
+                segments.append(metrics[start_index : last_moving_index + 1])
+            start_index = index
+        elif start_index is None:
+            start_index = index
+        last_moving_index = index
+
+    if (
+        start_index is not None
+        and last_moving_index is not None
+        and metrics[-1].timestamp_ms - metrics[last_moving_index].timestamp_ms
+        >= GAIT_EPISODE_END_HOLD_MS
+    ):
+        segments.append(metrics[start_index : last_moving_index + 1])
+    return segments
+
+
 def _latest_saved_gait_episode(
     session: Session | None, reset_at_ms: int
 ) -> GaitEpisodeSummary | None:
@@ -867,27 +910,31 @@ def _gait_summary(
         and bool(live_events)
         and latest_at_ms - live_events[-1][0] <= GAIT_ACTIVE_RECENCY_MS
     )
-
-    completed: GaitEpisodeSummary | None = None
-    last_moving_index = next(
-        (
-            index
-            for index in range(len(metrics) - 1, -1, -1)
-            if metrics[index].motion_state == "moving"
-        ),
-        None,
+    active_motion_frames = 0
+    for item in reversed(recent):
+        if item.motion_state != "moving":
+            break
+        active_motion_frames += 1
+    active_motion = (
+        metrics[-1].motion_state == "moving"
+        and active_motion_frames >= GAIT_MIN_ACTIVE_MOTION_FRAMES
     )
-    if (
-        last_moving_index is not None
-        and latest_at_ms - metrics[last_moving_index].timestamp_ms
-        >= GAIT_EPISODE_END_HOLD_MS
-    ):
-        completed_segment = _completed_gait_segment(metrics, last_moving_index)
-        completed = _gait_episode_from_segment(completed_segment, baseline)
-        if completed is not None and record and session is not None:
-            _persist_gait_episode(session, completed, reset_at_ms)
+
+    completed = [
+        episode
+        for segment in _completed_gait_segments(metrics)
+        if (episode := _gait_episode_from_segment(segment, baseline)) is not None
+    ]
+    if record and session is not None:
+        for episode in completed:
+            _persist_gait_episode(session, episode, reset_at_ms)
     saved_episodes = _saved_gait_episodes(session, reset_at_ms)
-    last_completed = completed or (saved_episodes[0] if saved_episodes else None)
+    all_completed = [*saved_episodes, *completed]
+    last_completed = (
+        max(all_completed, key=lambda item: item.ended_at_ms)
+        if all_completed
+        else None
+    )
     confirmed_issues, evidence_episode_count, evidence_step_count = (
         _confirmed_gait_trend(saved_episodes)
     )
@@ -900,6 +947,22 @@ def _gait_summary(
             left_steps=live_episode.left_steps,
             right_steps=live_episode.right_steps,
             cadence_spm=live_episode.cadence_spm,
+            last_completed_episode=last_completed,
+            confirmed_issues=confirmed_issues,
+            evidence_episode_count=evidence_episode_count,
+            evidence_step_count=evidence_step_count,
+        )
+    if active_motion:
+        # Surface an active walk before six validated footfalls are available.
+        # Formal episode metrics and voice criteria still require the complete
+        # segment returned above.
+        return GaitSummary(
+            state="walking",
+            window_ms=window_ms,
+            step_count=len(live_events),
+            left_steps=sum(side == "left" for _, side, _ in live_events),
+            right_steps=sum(side == "right" for _, side, _ in live_events),
+            cadence_spm=None,
             last_completed_episode=last_completed,
             confirmed_issues=confirmed_issues,
             evidence_episode_count=evidence_episode_count,
@@ -3098,6 +3161,7 @@ def evaluate_risk(
     session: Session,
     *,
     record: bool = False,
+    record_gait: bool = False,
     allow_motor_command: bool = True,
 ) -> RealtimeResponse:
     from .session_service import recovery_observation
@@ -3191,7 +3255,7 @@ def evaluate_risk(
         risk_metrics,
         analysis_baseline,
         session=session,
-        record=record,
+        record=record or record_gait,
     )
     if active_risks:
         risk = active_risks[0]

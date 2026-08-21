@@ -80,6 +80,10 @@ IMU_ACCEL_STATIONARY_TOLERANCE_MS2 = 3.0
 IMU_GYRO_STATIONARY_THRESHOLD_DPS = 12.0
 IMU_ACCEL_DELTA_MOVING_MS2 = 0.75
 IMU_MOTION_HOLD_MS = 1_500
+# Three consecutive moving pairs (about 600 ms at the nominal 5 Hz upload
+# rate) are enough to expose an active walk before a complete step episode is
+# available. This is a display/state gate, not a clinical gait criterion.
+GAIT_MIN_ACTIVE_MOTION_FRAMES = 3
 # Conservative gait observation from bilateral load transfer plus MPU motion.
 # These values describe an engineering prototype, not clinical gait criteria.
 GAIT_ANALYSIS_WINDOW_MS = 12_000

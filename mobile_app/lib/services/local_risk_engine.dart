@@ -59,6 +59,11 @@ class LocalRiskEngine {
   static const _temperatureWarningMs = 15000;
   static const _temperaturePersistentMs = 30000;
   static const _episodeClearMs = 5000;
+  static const _imuGravityMs2 = 9.80665;
+  static const _imuAccelStationaryToleranceMs2 = 3.0;
+  static const _imuAccelDeltaMovingMs2 = 0.75;
+  static const _imuGyroStationaryThresholdDps = 12.0;
+  static const _imuMotionHoldMs = 1500;
 
   final List<double> _loadRatios = [];
   final List<double> _leftForefootRatios = [];
@@ -94,6 +99,10 @@ class LocalRiskEngine {
   String? _leftDeviceId;
   String? _rightDeviceId;
   int? _createdAtMs;
+  FootFrame? _previousLeft;
+  FootFrame? _previousRight;
+  int _leftMovingUntilMs = 0;
+  int _rightMovingUntilMs = 0;
 
   bool get baselineReady => _baselineLoadRatio != null;
   int get baselineSamples => baselineReady
@@ -142,6 +151,10 @@ class LocalRiskEngine {
     _leftDeviceId = null;
     _rightDeviceId = null;
     _createdAtMs = null;
+    _previousLeft = null;
+    _previousRight = null;
+    _leftMovingUntilMs = 0;
+    _rightMovingUntilMs = 0;
   }
 
   Map<String, dynamic> exportBaseline() => {
@@ -248,8 +261,29 @@ class LocalRiskEngine {
       reset();
     }
     final timestamp = math.max(left.timestampMs, right.timestampMs);
-    final motionState =
-        _stationary(left) && _stationary(right) ? 'stationary' : 'moving';
+    final leftRawMotion = _frameIsStationary(left, _previousLeft);
+    final rightRawMotion = _frameIsStationary(right, _previousRight);
+    if (leftRawMotion == false) {
+      _leftMovingUntilMs = timestamp + _imuMotionHoldMs;
+    }
+    if (rightRawMotion == false) {
+      _rightMovingUntilMs = timestamp + _imuMotionHoldMs;
+    }
+    final leftMotion = leftRawMotion == false || timestamp < _leftMovingUntilMs
+        ? false
+        : leftRawMotion;
+    final rightMotion =
+        rightRawMotion == false || timestamp < _rightMovingUntilMs
+            ? false
+            : rightRawMotion;
+    final motionVotes = [leftMotion, rightMotion].whereType<bool>().toList();
+    final motionState = motionVotes.isEmpty
+        ? 'unavailable'
+        : motionVotes.every((stationary) => stationary)
+            ? 'stationary'
+            : 'moving';
+    _previousLeft = left;
+    _previousRight = right;
     final leftTotal = _validTotal(left);
     final rightTotal = _validTotal(right);
     final baselineContact =
@@ -286,8 +320,8 @@ class LocalRiskEngine {
         left.pressureChannelsValid &&
         right.pressureChannelsValid &&
         baselineContact &&
-        _stationary(left) &&
-        _stationary(right) &&
+        leftMotion == true &&
+        rightMotion == true &&
         _calibrationSampleDue(timestamp, _lastBaselineSampleAtMs)) {
       _loadRatios.add(loadRatio);
       _leftForefootRatios.add(leftForefoot);
@@ -710,18 +744,33 @@ class LocalRiskEngine {
     return _median(values.map((value) => (value - middle).abs()).toList());
   }
 
-  static bool _stationary(FootFrame frame) {
-    if (frame.qualityFlags & 0x400 != 0) return true;
+  static bool? _frameIsStationary(
+    FootFrame frame,
+    FootFrame? previous,
+  ) {
+    if (frame.qualityFlags & 0x400 != 0) return null;
     final acceleration = math.sqrt(
       frame.imu.ax * frame.imu.ax +
           frame.imu.ay * frame.imu.ay +
           frame.imu.az * frame.imu.az,
     );
-    final gyroMaximum = [
-      frame.imu.gx,
-      frame.imu.gy,
-      frame.imu.gz,
-    ].map((value) => value.abs()).reduce(math.max);
-    return (acceleration - 9.80665).abs() <= 3.0 && gyroMaximum <= 12.0;
+    final angularSpeed = math.sqrt(
+      frame.imu.gx * frame.imu.gx +
+          frame.imu.gy * frame.imu.gy +
+          frame.imu.gz * frame.imu.gz,
+    );
+    if (acceleration < 0.5 && angularSpeed < 0.5) return null;
+    if (previous != null && previous.qualityFlags & 0x400 == 0) {
+      final accelerationDelta = math.sqrt(
+        (frame.imu.ax - previous.imu.ax) * (frame.imu.ax - previous.imu.ax) +
+            (frame.imu.ay - previous.imu.ay) *
+                (frame.imu.ay - previous.imu.ay) +
+            (frame.imu.az - previous.imu.az) * (frame.imu.az - previous.imu.az),
+      );
+      if (accelerationDelta > _imuAccelDeltaMovingMs2) return false;
+    }
+    return (acceleration - _imuGravityMs2).abs() <=
+            _imuAccelStationaryToleranceMs2 &&
+        angularSpeed <= _imuGyroStationaryThresholdDps;
   }
 }

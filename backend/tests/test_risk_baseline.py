@@ -713,6 +713,27 @@ def test_gait_summary_reports_stationary_without_false_steps() -> None:
     assert gait.cadence_spm is None
 
 
+def test_gait_summary_surfaces_active_motion_before_complete_episode() -> None:
+    baseline = replace(
+        _baseline_profile([_metric(index) for index in range(BASELINE_MIN_SAMPLES)]),
+        ready=True,
+    )
+    metrics = [
+        replace(
+            _metric(index, motion_state="moving"),
+            timestamp_ms=index * 200,
+            log_load_ratio=0.0,
+        )
+        for index in range(3)
+    ]
+
+    gait = _gait_summary(metrics, baseline)
+
+    assert gait.state == "walking"
+    assert gait.step_count == 0
+    assert gait.cadence_spm is None
+
+
 def test_gait_summary_retains_last_completed_walk_while_stationary() -> None:
     baseline = _baseline_profile(
         [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]

@@ -619,6 +619,14 @@ class _GaitAssessmentCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final episode = gait.lastCompletedEpisode!;
     final confirmed = gait.confirmedIssues;
+    final episodeIssues = episode.issues
+        .where(
+          (issue) => const {
+            'walking_load_asymmetry',
+            'walking_forefoot_concentration',
+          }.contains(issue.issueType),
+        )
+        .toList(growable: false);
     return Card(
       elevation: 0,
       child: Padding(
@@ -642,9 +650,9 @@ class _GaitAssessmentCard extends StatelessWidget {
               '负荷不对称 ${(episode.loadAsymmetry * 100).toStringAsFixed(0)}%',
             ),
             const SizedBox(height: 8),
-            if (confirmed.isNotEmpty) ...[
+            if (episodeIssues.isNotEmpty) ...[
               Text(
-                '连续 ${gait.evidenceEpisodeCount} 段、${gait.evidenceStepCount} 次落脚均支持以下趋势：',
+                '本段达到行走工程提醒条件：',
                 style: const TextStyle(
                   color: Color(0xFFC45A20),
                   fontWeight: FontWeight.w700,
@@ -654,7 +662,7 @@ class _GaitAssessmentCard extends StatelessWidget {
               Wrap(
                 spacing: 7,
                 runSpacing: 7,
-                children: confirmed
+                children: episodeIssues
                     .map(
                       (issue) => Chip(
                         visualDensity: VisualDensity.compact,
@@ -663,14 +671,16 @@ class _GaitAssessmentCard extends StatelessWidget {
                     )
                     .toList(growable: false),
               ),
-            ] else if (gait.evidenceEpisodeCount < 3)
-              Text(
-                '已收集 ${gait.evidenceEpisodeCount}/3 段有效行走；单段指标仅作观察。',
-                style: TextStyle(color: Color(0xFF147D73)),
-              )
-            else
+              if (confirmed.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '最近 ${gait.evidenceEpisodeCount} 段、${gait.evidenceStepCount} 次落脚也形成同向重复趋势。',
+                  style: const TextStyle(color: Color(0xFFC45A20)),
+                ),
+              ],
+            ] else
               const Text(
-                '最近三段未形成同一方向的偏载或前掌反复受压趋势。',
+                '本段未达到单侧偏载或前掌反复受压提醒条件。',
                 style: TextStyle(color: Color(0xFF147D73)),
               ),
           ],
@@ -688,10 +698,7 @@ class _GaitAssessmentCard extends StatelessWidget {
     return switch (issue.issueType) {
       'walking_load_asymmetry' => '$side行走负荷偏高',
       'walking_forefoot_concentration' => '$side前掌反复受压',
-      'walking_medial_concentration' => '$side内侧反复受压',
-      'walking_lateral_concentration' => '$side外侧反复受压',
-      'step_timing_instability' => '步时波动较大',
-      _ => '行走趋势异常',
+      _ => '行走工程观察',
     };
   }
 }

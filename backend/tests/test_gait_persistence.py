@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import func, select
 
 from backend.app.database import create_database
@@ -8,6 +10,7 @@ from backend.app.schemas import GaitEpisodeSummary, GaitIssue
 from backend.app.services.risk_service import (
     _episode_to_model,
     _persist_gait_episode,
+    gait_episode_from_model,
     gait_history_summary,
 )
 
@@ -61,3 +64,27 @@ def test_overlapping_gait_rows_are_replaced_by_one_canonical_episode(tmp_path) -
             assert trend.evidence_episode_count == 1
     finally:
         engine.dispose()
+
+
+def test_legacy_gait_issues_do_not_reappear_as_current_alerts() -> None:
+    model = _episode_to_model(_episode("legacy", 6_000, 6), 0)
+    model.issues_json = json.dumps(
+        [
+            {
+                "issue_type": "walking_forefoot_concentration",
+                "side": "left",
+                "value": 0.12,
+                "threshold": 0.10,
+            },
+            {
+                "issue_type": "step_timing_instability",
+                "side": "none",
+                "value": 0.50,
+                "threshold": 0.25,
+            },
+        ]
+    )
+
+    restored = gait_episode_from_model(model)
+
+    assert restored.issues == []

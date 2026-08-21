@@ -11,7 +11,7 @@
 - 每只脚 6 路 FSR 相对压力、4 路 NTC 温度、1 个 MPU6050 和 1 个震动马达。
 - 左右固件独立构建，广播为 `FootGuard-L` / `FootGuard-R`；压力与 MPU 以 20 Hz 通知，温度以 5 Hz 刷新并缓存到帧中。
 - App 同时连接两只脚，执行 TimeSync、帧配对和质量屏蔽；正常站立时压力热力图也持续显示真实相对受力。
-- 后端结合本次站立基线、左右交替承重和 MPU 运动状态生成完整行走段；单段只作观察，只有连续 3 段均出现同向单侧偏载或前掌反复受压时才形成正式工程趋势。
+- 后端结合本次站立基线、左右交替承重和 MPU 运动状态生成完整行走段；单段达到单侧偏载或前掌反复受压阈值即可语音提醒，连续 3 段一致时另外形成重复趋势供历史和会话 AI 分析。
 - FastAPI 使用平滑后的对数载荷比、区域占比相对变化、MAD 噪声尺度、双阈值和持续时间进行判定。
 - 温度与压力独立降级：温度点缺失不会清空压力图、阻断压力风险、压力马达或恢复评价。
 - 实时页和设置页均可开始“新体验者 / 重新穿戴”标定；计算后的基线持久化，重启后不会因历史帧窗口滑动而丢失。
@@ -77,6 +77,7 @@ http://127.0.0.1:8000/dashboard/
 如需 DeepSeek，在启动后端的同一个终端中先设置：
 
 ```powershell
+$env:FOOTGUARD_AI_PROVIDER = "openai_compatible"
 $env:FOOTGUARD_AI_BASE_URL = "https://api.deepseek.com"
 $env:FOOTGUARD_AI_MODEL = "deepseek-v4-flash"
 $env:FOOTGUARD_AI_API_KEY = "你的 API Key"

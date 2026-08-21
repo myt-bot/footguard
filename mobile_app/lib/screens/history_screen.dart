@@ -758,7 +758,7 @@ class _GaitTrendPanel extends StatelessWidget {
             if (trend.confirmedIssues.isEmpty)
               Text(
                 trend.evidenceEpisodeCount < 3
-                    ? '证据仍在收集中，单段观察不触发正式提醒。'
+                    ? '重复趋势证据仍在收集中；单段达到主问题阈值时仍会实时提醒。'
                     : '最近三段未形成同一方向的偏载或前掌反复受压趋势。',
                 style: const TextStyle(color: Color(0xFF147D73)),
               )
@@ -786,74 +786,84 @@ class _GaitEpisodeCard extends StatelessWidget {
   final GaitEpisodeSummary episode;
 
   @override
-  Widget build(BuildContext context) => Card(
-        elevation: 0,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.directions_walk_rounded),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _formatDate(episode.startedAtMs),
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
+  Widget build(BuildContext context) {
+    final alertIssues = episode.issues
+        .where(
+          (issue) => const {
+            'walking_load_asymmetry',
+            'walking_forefoot_concentration',
+          }.contains(issue.issueType),
+        )
+        .toList(growable: false);
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.directions_walk_rounded),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _formatDate(episode.startedAtMs),
+                    style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
-                  _StatusPill(
-                    label: episode.issues.isEmpty ? '无候选趋势' : '本段观察',
-                    active: false,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 20,
-                runSpacing: 10,
-                children: [
-                  _DetailValue(label: '落脚', value: '${episode.stepCount} 次'),
-                  _DetailValue(
-                    label: '左右落脚',
-                    value: '${episode.leftSteps} / ${episode.rightSteps}',
-                  ),
-                  _DetailValue(
-                    label: '估算步频',
-                    value: '${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟',
-                  ),
-                  _DetailValue(
-                    label: '负荷不对称',
-                    value: _formatPercent(episode.loadAsymmetry),
-                  ),
-                  _DetailValue(
-                    label: '步时变异',
-                    value: _formatPercent(episode.stepIntervalCv),
-                  ),
-                ],
-              ),
-              if (episode.issues.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                const Divider(height: 1),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 7,
-                  runSpacing: 7,
-                  children: episode.issues
-                      .map(
-                        (issue) => Chip(
-                          visualDensity: VisualDensity.compact,
-                          label: Text(_gaitIssueLabel(issue)),
-                        ),
-                      )
-                      .toList(growable: false),
+                ),
+                _StatusPill(
+                  label: alertIssues.isEmpty ? '本段正常' : '本段提醒',
+                  active: alertIssues.isNotEmpty,
                 ),
               ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 20,
+              runSpacing: 10,
+              children: [
+                _DetailValue(label: '落脚', value: '${episode.stepCount} 次'),
+                _DetailValue(
+                  label: '左右落脚',
+                  value: '${episode.leftSteps} / ${episode.rightSteps}',
+                ),
+                _DetailValue(
+                  label: '估算步频',
+                  value: '${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟',
+                ),
+                _DetailValue(
+                  label: '负荷不对称',
+                  value: _formatPercent(episode.loadAsymmetry),
+                ),
+                _DetailValue(
+                  label: '步时变异',
+                  value: _formatPercent(episode.stepIntervalCv),
+                ),
+              ],
+            ),
+            if (alertIssues.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: alertIssues
+                    .map(
+                      (issue) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_gaitIssueLabel(issue)),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
             ],
-          ),
+          ],
         ),
-      );
+      ),
+    );
+  }
 }
 
 class _StatusPill extends StatelessWidget {

@@ -20,6 +20,43 @@ import 'local_risk_engine.dart';
 import 'offline_monitoring_store.dart';
 import 'risk_speech_coordinator.dart';
 
+const _gaitNoticeRecencyMs = 10000;
+
+String? gaitEpisodeNotice(
+  GaitSummary gait, {
+  required int latestTimestampMs,
+}) {
+  final episode = gait.lastCompletedEpisode;
+  if (episode == null ||
+      latestTimestampMs <= 0 ||
+      latestTimestampMs - episode.endedAtMs > _gaitNoticeRecencyMs) {
+    return null;
+  }
+  final issues = episode.issues
+      .where(
+        (issue) => const {
+          'walking_load_asymmetry',
+          'walking_forefoot_concentration',
+        }.contains(issue.issueType),
+      )
+      .toList(growable: false);
+  if (issues.isEmpty) return null;
+  return '本段行走检测到${issues.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
+}
+
+String _gaitIssueVoiceLabel(GaitIssue issue) {
+  final side = issue.side == 'left'
+      ? '左脚'
+      : issue.side == 'right'
+          ? '右脚'
+          : '';
+  return switch (issue.issueType) {
+    'walking_load_asymmetry' => '$side行走负荷持续偏高',
+    'walking_forefoot_concentration' => '$side前掌反复受压',
+    _ => '行走负荷趋势异常',
+  };
+}
+
 class MonitoringController extends ChangeNotifier {
   MonitoringController({
     required this.source,
@@ -126,7 +163,7 @@ class MonitoringController extends ChangeNotifier {
       };
 
   String get gaitStatusLabel => switch (gait.state) {
-        'stationary' => '静止',
+        'stationary' => gait.lastCompletedEpisode == null ? '静止' : '最近已识别行走',
         'walking' => '行走中',
         _ => '数据不足',
       };
@@ -808,7 +845,24 @@ class MonitoringController extends ChangeNotifier {
     motionState = result.motionState;
     leftMotionState = result.motionState;
     rightMotionState = result.motionState;
-    gait = const GaitSummary.insufficient();
+    final previousGait = gait;
+    final localState = result.motionState == 'moving'
+        ? 'walking'
+        : previousGait.lastCompletedEpisode == null
+            ? 'insufficient_data'
+            : 'stationary';
+    gait = GaitSummary(
+      state: localState,
+      windowMs: previousGait.windowMs,
+      stepCount: localState == 'walking' ? previousGait.stepCount : 0,
+      leftSteps: localState == 'walking' ? previousGait.leftSteps : 0,
+      rightSteps: localState == 'walking' ? previousGait.rightSteps : 0,
+      cadenceSpm: localState == 'walking' ? previousGait.cadenceSpm : null,
+      lastCompletedEpisode: previousGait.lastCompletedEpisode,
+      confirmedIssues: previousGait.confirmedIssues,
+      evidenceEpisodeCount: previousGait.evidenceEpisodeCount,
+      evidenceStepCount: previousGait.evidenceStepCount,
+    );
     syncErrorMs = left == null || right == null
         ? null
         : (left!.timestampMs - right!.timestampMs).abs();
@@ -839,6 +893,7 @@ class MonitoringController extends ChangeNotifier {
     );
     _advanceCalibrationStage(result.calibrationStage);
     _updateRiskNotice();
+    _updateGaitNotice();
     if (result.motorTarget != null &&
         result.motorPattern != null &&
         commandBridge != null &&
@@ -896,32 +951,22 @@ class MonitoringController extends ChangeNotifier {
 
   void _updateGaitNotice() {
     final episode = gait.lastCompletedEpisode;
-    final confirmed = gait.confirmedIssues;
+    final latestTimestampMs = math.max(
+      left?.timestampMs ?? 0,
+      right?.timestampMs ?? 0,
+    );
+    final message = gaitEpisodeNotice(
+      gait,
+      latestTimestampMs: latestTimestampMs,
+    );
     if (episode == null ||
-        confirmed.isEmpty ||
+        message == null ||
         episode.episodeId == _announcedGaitEpisodeId) {
       return;
     }
     _announcedGaitEpisodeId = episode.episodeId;
-    gaitNoticeMessage =
-        '连续三段行走均检测到${confirmed.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
+    gaitNoticeMessage = message;
     _gaitNoticeSequence += 1;
-  }
-
-  static String _gaitIssueVoiceLabel(GaitIssue issue) {
-    final side = issue.side == 'left'
-        ? '左脚'
-        : issue.side == 'right'
-            ? '右脚'
-            : '';
-    return switch (issue.issueType) {
-      'walking_load_asymmetry' => '$side行走负荷持续偏高',
-      'walking_forefoot_concentration' => '$side前掌反复受压',
-      'walking_medial_concentration' => '$side内侧反复受压',
-      'walking_lateral_concentration' => '$side外侧反复受压',
-      'step_timing_instability' => '步时波动较大',
-      _ => '行走负荷趋势异常',
-    };
   }
 
   void _tickRecoveryObservation() {

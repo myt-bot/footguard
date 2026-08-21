@@ -66,7 +66,13 @@ def ingest_offline_batch(
     )
     ordered_frames = [frame for frames in ordered_groups for frame in frames]
     accepted, rejected = add_frames(session, ordered_frames)
-    latest = evaluate_risk(session)
+    # Rebuild completed gait episodes from offline frames without reopening
+    # live risk events or issuing commands for historical data.
+    latest = evaluate_risk(
+        session,
+        record_gait=True,
+        allow_motor_command=False,
+    )
     return SensorBatchResponse(
         accepted=accepted,
         rejected=rejected,

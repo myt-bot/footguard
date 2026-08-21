@@ -87,12 +87,20 @@ def _chat_fallback(payload: AiChatRequest) -> str:
                 f"最近一次有效行走记录 {episode.step_count} 次落脚，"
                 f"估算步频 {episode.cadence_spm:.0f} 步/分钟。"
             )
-            if payload.gait.confirmed_issues:
+            primary_issues = [
+                item
+                for item in episode.issues
+                if item.issue_type
+                in {"walking_load_asymmetry", "walking_forefoot_concentration"}
+            ]
+            if primary_issues:
+                gait_text += "本段达到行走工程提醒条件，应先停下检查足部和鞋垫。"
+            elif payload.gait.confirmed_issues:
                 gait_text += "连续三段已形成一致的行走压力趋势。"
             else:
                 gait_text += (
                     f"当前已收集 {payload.gait.evidence_episode_count}/3 段证据，"
-                    "单段观察不作为正式异常。"
+                    "本段未达到单侧偏载或前掌反复受压提醒条件。"
                 )
         text = f"当前压力规则未发现持续异常。{temperature}{gait_text}请继续观察趋势和足部皮肤状态。"
     else:
@@ -107,7 +115,8 @@ def _cloud_chat_prompt(payload: AiChatRequest) -> list[dict[str, str]]:
             "content": (
                 "你是足安智垫辅助监测状态助手。只依据结构化状态回答用户问题，"
                 "明确区分当前状态与最近一次完整行走；步频偏低本身不等于异常。"
-                "只有 confirmed_issues 才是三段一致的正式行走趋势，单段 issues 只能作为观察。"
+                "单段 issues 中的单侧偏载或前掌反复受压可作为实时工程提醒；"
+                "只有 confirmed_issues 才能描述为三段一致的重复趋势。"
                 "不得诊断疾病、虚构数值或决定马达动作。用简洁中文输出 JSON，"
                 f"只包含 answer 字符串，末尾说明：{MEDICAL_BOUNDARY}"
             ),
@@ -189,7 +198,7 @@ def _session_fallback(summary: SessionSummary) -> str:
         quality += "温度有效对应区域少于 2 组，温度结论需保留。"
     action = (
         "先检查反复出现一侧的鞋内异物、鞋垫贴合和皮肤外观；"
-        "下一轮使用三段短直线自然行走复核，单段结果不单独下结论。"
+        "下一轮使用短直线自然行走复核；单段达到主问题阈值时立即检查，三段一致再描述为重复趋势。"
     )
     return (
         f"{prefix}结论：{conclusion}依据：{evidence}行动：{action}"
@@ -205,7 +214,7 @@ def _cloud_session_prompt(summary: SessionSummary) -> list[dict[str, str]]:
                 "你是足安智垫的会话总结助手。只依据结构化汇总，按结论、依据、行动、数据限制"
                 "四部分给出简洁中文建议。只选择一至两个最重要发现，不逐条复述事件。"
                 "必须区分当前状态与最近历史；只有 gait_trend.confirmed_issues 才是跨三段确认的"
-                "行走趋势，单段 issues 只能视为观察值。改善率是相对个人基线的工程指标，"
+                "重复行走趋势；单段主问题可触发实时工程提醒，但不能写成跨段趋势。改善率是相对个人基线的工程指标，"
                 "不得解释为临床疗效。不得把低步频、内外侧单段变化或步时波动描述为病理异常。"
                 "不得诊断疾病、预测溃疡、虚构数值或决定马达动作。输出 JSON 且只包含 advice 字符串，"
                 f"末尾必须说明：{MEDICAL_BOUNDARY}"
@@ -251,7 +260,7 @@ def _session_question_fallback(
             ]
             if pressure:
                 name, count = max(pressure, key=lambda item: item[1])
-                answer = f"优先复查{pressure_labels[name]}，最近会话记录 {count} 次；单段行走观察尚不作为正式结论。"
+                answer = f"优先复查{pressure_labels[name]}，最近会话记录 {count} 次；单段行走达到主问题阈值时会实时提醒，但不等同于重复趋势。"
             else:
                 answer = "最近会话未形成需要优先处理的持续压力或三段一致行走趋势。"
     elif key == "session_pressure_area":
@@ -309,8 +318,8 @@ def _cloud_session_question_prompt(
             "role": "system",
             "content": (
                 "你是糖尿病足辅助监测原型的会话问答助手。只回答白名单问题，并只依据"
-                "结构化会话汇总。confirmed_issues 才是三段一致趋势；单段 issues 不能当作"
-                "正式异常。改善率只表示相对个人基线的工程变化，不是临床疗效。"
+                "结构化会话汇总。单段 issues 中的主问题可作为实时工程提醒；confirmed_issues"
+                "才是三段一致趋势。改善率只表示相对个人基线的工程变化，不是临床疗效。"
                 "不得诊断、预测溃疡、虚构数值或决定马达动作。输出 JSON，且只包含 answer 字符串，"
                 f"末尾必须说明：{MEDICAL_BOUNDARY}"
             ),

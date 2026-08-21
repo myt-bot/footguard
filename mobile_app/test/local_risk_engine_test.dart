@@ -28,6 +28,29 @@ FootFrame frame(
     );
 
 void main() {
+  test('uses adjacent IMU vectors to recognize smooth walking motion', () {
+    final engine = LocalRiskEngine();
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence < 3; sequence += 1) {
+      final ax = sequence == 0 ? 0.0 : 1.0;
+      result = engine.evaluate([
+        frame(
+          'left',
+          sequence,
+          const [0.03, 0.03, 0.03, 0.03, 0.05, 0.05],
+          imu: ImuData(ax: ax, ay: 0, az: 9.75, gx: 1, gy: 0, gz: 0),
+        ),
+        frame(
+          'right',
+          sequence,
+          const [0.03, 0.03, 0.03, 0.03, 0.05, 0.05],
+          imu: ImuData(ax: ax, ay: 0, az: 9.75, gx: 1, gy: 0, gz: 0),
+        ),
+      ]);
+    }
+    expect(result!.motionState, 'moving');
+  });
+
   test(
     'learns 40 balanced pairs and ignores unloaded single-point residual',
     () {
