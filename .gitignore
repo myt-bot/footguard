@@ -5,6 +5,9 @@
 .pytest_cache/
 .env
 backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
 
 # ESP-IDF
 firmware/build/

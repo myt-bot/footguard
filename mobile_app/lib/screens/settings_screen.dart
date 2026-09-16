@@ -1,7 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../config/app_config.dart';
 import '../data/api_client.dart';
+import '../models/assessment.dart';
+import '../services/local_tts_service.dart';
+import '../services/offline_monitoring_store.dart';
 
 typedef BackendHealthCheck = Future<bool> Function(String baseUrl);
 typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
@@ -10,22 +15,33 @@ typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
 typedef CalibrationResetter = Future<CalibrationStatus> Function(
   String baseUrl,
 );
+typedef TemperatureDemoAction = Future<TemperatureDemoState> Function(
+  String baseUrl,
+);
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.onChanged,
+    this.onCalibrationReset,
     this.healthCheck,
     this.calibrationStatusLoader,
     this.calibrationResetter,
+    this.temperatureDemoStarter,
+    this.temperatureDemoResetter,
+    this.ttsSpeaker,
   });
 
   final AppSettings settings;
   final ValueChanged<AppSettings> onChanged;
+  final VoidCallback? onCalibrationReset;
   final BackendHealthCheck? healthCheck;
   final CalibrationStatusLoader? calibrationStatusLoader;
   final CalibrationResetter? calibrationResetter;
+  final TemperatureDemoAction? temperatureDemoStarter;
+  final TemperatureDemoAction? temperatureDemoResetter;
+  final TtsSpeaker? ttsSpeaker;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -33,14 +49,18 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late AppSettings value = widget.settings;
-  late final TextEditingController backend =
-      TextEditingController(text: value.backendUrl);
+  late final TextEditingController backend = TextEditingController(
+    text: value.backendUrl,
+  );
   bool _testingBackend = false;
   String? _backendStatus;
   bool _backendOnline = false;
   bool _loadingCalibration = false;
   CalibrationStatus? _calibrationStatus;
   String? _calibrationError;
+  bool _changingTemperatureDemo = false;
+  String? _temperatureDemoStatus;
+  late final TtsSpeaker _ttsSpeaker = widget.ttsSpeaker ?? AndroidTtsService();
 
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
@@ -79,10 +99,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     value = value.copyWith(
       backendUrl: normalizeBackendUrl(backend.text),
+      dataMode:
+          diagnosticReplayEnabled && value.dataMode == FootDataMode.csvReplay
+              ? FootDataMode.csvReplay
+              : FootDataMode.ble,
     );
     widget.onChanged(value);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('设置已保存，实时页数据源已更新')));
+  }
+
+  Future<void> _testVoice() async {
+    final available = await _ttsSpeaker.speak('语音提醒已开启。');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('设置已保存，实时页数据源已更新')),
+      SnackBar(content: Text(available ? '中文语音测试成功' : '中文语音不可用，文字提醒仍会保留')),
     );
   }
 
@@ -143,7 +174,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<CalibrationStatus> _defaultResetCalibration(String baseUrl) async {
     final api = FootGuardApiClient(baseUrl: baseUrl);
     try {
-      return await api.resetCalibration();
+      final status = await api.resetCalibration();
+      await OfflineMonitoringStore().clearBaseline();
+      return status;
     } finally {
       api.close();
     }
@@ -159,8 +192,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _calibrationError = null;
     });
     try {
-      final status = await (widget.calibrationStatusLoader ??
-          _defaultCalibrationStatus)(backend.text.trim());
+      final status =
+          await (widget.calibrationStatusLoader ?? _defaultCalibrationStatus)(
+        backend.text.trim(),
+      );
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
     } catch (error) {
@@ -180,7 +215,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text('重新学习个人基线？'),
         content: const Text(
           '更换体验者或重新穿鞋后都需要重新建立本次穿戴基线。'
-          '确认后请双脚平行自然站立约 8–12 秒。'
+          '确认后先保持双脚完全离开鞋垫，完成空载温度采集；'
+          '听到提示后再穿鞋，并自然站立完成个人基线采集。'
           '重新校准不会删除历史事件，但会结束当前风险并使待执行马达命令失效。',
         ),
         actions: [
@@ -201,13 +237,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _calibrationError = null;
     });
     try {
-      final status = await (widget.calibrationResetter ??
-          _defaultResetCalibration)(backend.text.trim());
+      final status =
+          await (widget.calibrationResetter ?? _defaultResetCalibration)(
+        backend.text.trim(),
+      );
       if (!mounted) return;
       setState(() => _calibrationStatus = status);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已开始新体验者标定，请双脚平行自然站立')),
+        const SnackBar(content: Text('已开始空载温度采集，请保持双脚完全离开鞋垫')),
       );
+      widget.onCalibrationReset?.call();
     } catch (error) {
       if (!mounted) return;
       setState(() => _calibrationError = '重新校准失败：$error');
@@ -218,9 +257,75 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _startTemperatureDemo() async {
+    if (_backendUrlError() != null) {
+      setState(() => _temperatureDemoStatus = '请先填写有效的后端地址');
+      return;
+    }
+    setState(() {
+      _changingTemperatureDemo = true;
+      _temperatureDemoStatus = null;
+    });
+    try {
+      final state = await (widget.temperatureDemoStarter ??
+          _defaultStartTemperatureDemo)(backend.text.trim());
+      if (!mounted) return;
+      setState(() {
+        _temperatureDemoStatus =
+            state.active ? '演示已准备：请脱鞋手按右脚 T4，持续到语音提醒。' : '演示准备失败';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '无法准备演示：$error');
+    } finally {
+      if (mounted) setState(() => _changingTemperatureDemo = false);
+    }
+  }
+
+  Future<void> _resetTemperatureDemo() async {
+    setState(() => _changingTemperatureDemo = true);
+    try {
+      await (widget.temperatureDemoResetter ?? _defaultResetTemperatureDemo)(
+        backend.text.trim(),
+      );
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '温度演示记录已重置');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '重置失败：$error');
+    } finally {
+      if (mounted) setState(() => _changingTemperatureDemo = false);
+    }
+  }
+
+  static Future<TemperatureDemoState> _defaultStartTemperatureDemo(
+    String baseUrl,
+  ) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.startTemperatureDemo();
+    } finally {
+      api.close();
+    }
+  }
+
+  static Future<TemperatureDemoState> _defaultResetTemperatureDemo(
+    String baseUrl,
+  ) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.resetTemperatureDemo();
+    } finally {
+      api.close();
+    }
+  }
+
   String _calibrationReason(String reason) => switch (reason) {
         'pressure_unavailable' => '压力通道不可用，请先检查连接和传感器。',
         'not_loaded' => '等待双脚稳定承重。',
+        'left_not_loaded' => '左脚未形成有效多点承重，请调整左脚位置。',
+        'right_not_loaded' => '右脚未形成有效多点承重，请调整右脚位置。',
+        'pressure_residual' => '仅检测到固定残余压力，请完整穿好双脚。',
         'moving' => '当前移动较大，请保持自然站立。',
         'unstable' => '数据波动较大，请保持双脚平行并放松站立。',
         'ready' => '标定已完成。',
@@ -239,16 +344,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final scenario = mockScenarioOption(value.mockScenario);
-    final csvAsset = csvReplayOptions.any(
-      (option) => option.assetPath == value.csvAsset,
-    )
-        ? value.csvAsset
-        : csvReplayOptions.first.assetPath;
+    final csvAsset =
+        csvReplayOptions.any((option) => option.assetPath == value.csvAsset)
+            ? value.csvAsset
+            : csvReplayOptions.first.assetPath;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        const Text(
+          '提醒与监测设置',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 0,
+          child: Column(
+            children: [
+              SwitchListTile(
+                secondary: const Icon(Icons.record_voice_over_rounded),
+                title: const Text('语音提醒'),
+                subtitle: const Text('使用 Android 本地语音；关闭后仍保留文字提醒'),
+                value: value.voiceEnabled,
+                onChanged: (enabled) {
+                  setState(() => value = value.copyWith(voiceEnabled: enabled));
+                  if (!enabled) unawaited(_ttsSpeaker.stop());
+                  widget.onChanged(value);
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: value.voiceEnabled ? _testVoice : null,
+                    icon: const Icon(Icons.volume_up_outlined),
+                    label: const Text('测试中文语音'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        const _InfoPanel(
+          icon: Icons.cloud_outlined,
+          title: '后端连接',
+          body: '真机填写电脑局域网地址；该地址只控制数据上传、历史与 AI，不会切换 BLE 数据源。',
+        ),
+        const SizedBox(height: 12),
         TextField(
           controller: backend,
           keyboardType: TextInputType.url,
@@ -291,54 +435,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         const SizedBox(height: 16),
-        DropdownButtonFormField<FootDataMode>(
-          key: ValueKey('data-mode-${value.dataMode.name}'),
-          initialValue: value.dataMode,
-          decoration: const InputDecoration(
-            labelText: '数据源',
-            border: OutlineInputBorder(),
+        if (diagnosticReplayEnabled) ...[
+          const _InfoPanel(
+            icon: Icons.build_circle_outlined,
+            title: '隐藏诊断入口',
+            body: '仅用于真实 CSV 回放，不是正式用户功能。',
           ),
-          items: FootDataMode.values
-              .map(
-                (mode) => DropdownMenuItem(
-                  value: mode,
-                  child: Text(_modeLabel(mode)),
-                ),
-              )
-              .toList(),
-          onChanged: (mode) =>
-              setState(() => value = value.copyWith(dataMode: mode)),
-        ),
-        if (value.dataMode == FootDataMode.mock) ...[
-          const SizedBox(height: 16),
-          DropdownButtonFormField<String>(
-            key: ValueKey('mock-scenario-${value.mockScenario}'),
-            initialValue: value.mockScenario,
+          const SizedBox(height: 12),
+        ],
+        if (diagnosticReplayEnabled)
+          DropdownButtonFormField<FootDataMode>(
+            key: ValueKey('data-mode-${value.dataMode.name}'),
+            initialValue: value.dataMode,
             decoration: const InputDecoration(
-              labelText: '模拟场景',
+              labelText: '数据源',
               border: OutlineInputBorder(),
             ),
-            items: mockScenarioOptions
+            items: const [FootDataMode.ble, FootDataMode.csvReplay]
                 .map(
-                  (option) => DropdownMenuItem(
-                    value: option.id,
-                    child: Text(option.label),
+                  (mode) => DropdownMenuItem(
+                    value: mode,
+                    child: Text(_modeLabel(mode)),
                   ),
                 )
                 .toList(),
-            onChanged: (scenarioId) => setState(
-              () => value = value.copyWith(mockScenario: scenarioId),
-            ),
+            onChanged: (mode) =>
+                setState(() => value = value.copyWith(dataMode: mode)),
+          ),
+        if (diagnosticReplayEnabled &&
+            value.dataMode == FootDataMode.csvReplay) ...[
+          const SizedBox(height: 16),
+          const _InfoPanel(
+            icon: Icons.warning_amber_rounded,
+            title: '诊断与应急回放',
+            body: '当前为历史真实数据回放，不是真机实时监测。',
           ),
           const SizedBox(height: 8),
-          _InfoPanel(
-            icon: Icons.movie_filter_outlined,
-            title: scenario.label,
-            body: scenario.description,
-          ),
-        ],
-        if (value.dataMode == FootDataMode.csvReplay) ...[
-          const SizedBox(height: 16),
           DropdownButtonFormField<String>(
             key: ValueKey('csv-asset-$csvAsset'),
             initialValue: csvAsset,
@@ -354,9 +486,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 )
                 .toList(),
-            onChanged: (assetPath) => setState(
-              () => value = value.copyWith(csvAsset: assetPath),
-            ),
+            onChanged: (assetPath) =>
+                setState(() => value = value.copyWith(csvAsset: assetPath)),
           ),
           const SizedBox(height: 8),
           ListTile(
@@ -374,15 +505,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: Text('${value.replaySpeed}×'),
           ),
         ],
-        if (value.dataMode == FootDataMode.backend) ...[
-          const SizedBox(height: 8),
-          const _InfoPanel(
-            icon: Icons.cloud_outlined,
-            title: '后端快照模式',
-            body: '只读取后端已接收的双足数据，不从本机上传传感器帧。',
-          ),
-        ],
-        if (value.dataMode == FootDataMode.ble) ...[
+        if (!diagnosticReplayEnabled || value.dataMode == FootDataMode.ble) ...[
           const SizedBox(height: 8),
           const _InfoPanel(
             icon: Icons.bluetooth_connected,
@@ -396,9 +519,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: '当前穿戴自适应规则',
           body: '每次更换体验者或重新穿鞋后，先采集 40 组稳定双足承重样本。'
               '偏载使用左右载荷对数比相对本次基线的变化，前掌使用足内占比变化，'
-              '并结合基线波动自动提高噪声较大场景的阈值。持续 3/6/10 秒分别进入关注、警告、持续风险；'
-              '等级 2 发送双振 800 ms，等级 3 发送长振 1500 ms。'
+              '并结合基线波动自动提高噪声较大场景的阈值。压力持续 5/10/20 秒分别进入趋势观察、需要减负、持续未改善；'
+              '压力 10 秒或温度 15 秒时文字与语音提醒一次；只有压力持续 20 秒仍未恢复时才执行马达。'
+              '趋势观察不弹窗、不播报、不震动。'
               '以上为工程原型规则，不是医疗诊断标准。',
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.science_outlined),
+                    const SizedBox(width: 10),
+                    Text('单次温度演示',
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '准备后脱鞋，手按右脚 T4 温度传感器直到语音提醒。系统只生成一条演示证据，不计入真实评级。',
+                  style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
+                ),
+                if (_temperatureDemoStatus != null) ...[
+                  const SizedBox(height: 8),
+                  Text(_temperatureDemoStatus!,
+                      key: const ValueKey('temperature-demo-status')),
+                ],
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _changingTemperatureDemo
+                            ? null
+                            : _startTemperatureDemo,
+                        icon: const Icon(Icons.play_arrow_rounded),
+                        label: const Text('准备演示'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.outlined(
+                      tooltip: '重置温度演示',
+                      onPressed: _changingTemperatureDemo
+                          ? null
+                          : _resetTemperatureDemo,
+                      icon: const Icon(Icons.restart_alt_rounded),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
         const SizedBox(height: 12),
         Card(
@@ -432,27 +608,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                Text(
+                  Text(
                   _calibrationStatus == null
                       ? '点击刷新，从后端读取当前学习进度。'
+                      : !_calibrationStatus!.emptyTemperatureReferenceReady &&
+                              _calibrationStatus!.emptySampleCount > 0
+                          ? '空载温度采集：${_calibrationStatus!.emptySampleCount}/'
+                              '${_calibrationStatus!.emptyRequiredSamples} 组样本'
                       : _calibrationStatus!.baselineReady
                           ? '本次穿戴基线已完成，压力风险与马达已启用'
-                          : '学习中：${_calibrationStatus!.sampleCount}/'
-                              '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
+                          : _calibrationStatus!.sampleCount >=
+                                  _calibrationStatus!.requiredSamples
+                              ? '最低样本数已达到，正在校验承重稳定性，请继续自然站立'
+                              : '学习中：${_calibrationStatus!.sampleCount}/'
+                                  '${_calibrationStatus!.requiredSamples} 组稳定双足承重样本',
                   key: const ValueKey('calibration-status'),
                 ),
                 if (_calibrationStatus != null &&
                     !_calibrationStatus!.baselineReady) ...[
                   const SizedBox(height: 8),
                   LinearProgressIndicator(
-                    value: _calibrationStatus!.progress,
+                    value: !_calibrationStatus!.emptyTemperatureReferenceReady &&
+                            _calibrationStatus!.emptySampleCount > 0
+                        ? _calibrationStatus!.emptyProgress
+                        : _calibrationStatus!.progress,
                   ),
                   const SizedBox(height: 6),
                   Text(
                     _calibrationReason(_calibrationStatus!.statusReason),
                     style: const TextStyle(
                       color: Color(0xFF718096),
-                      fontSize: 12,
+                      fontSize: 13,
                     ),
                   ),
                 ],
@@ -460,8 +646,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 8),
                   Text(
                     _calibrationError!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ],
                 const SizedBox(height: 12),
@@ -536,10 +723,7 @@ class _InfoPanel extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+                    Text(title, style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 4),
                     Text(body),
                   ],

@@ -15,10 +15,16 @@ void main() {
 
     final settings = await store.load();
 
-    expect(settings.backendUrl, 'http://10.0.2.2:8000');
-    expect(settings.dataMode, FootDataMode.mock);
+    expect(settings.backendUrl, defaultBackendUrl);
+    expect(settings.dataMode, FootDataMode.ble);
     expect(settings.mockScenario, 'normal_stand');
     expect(settings.replaySpeed, 1.0);
+    expect(settings.voiceEnabled, isTrue);
+  });
+
+  test('uses the compile-time backend URL as the unsaved default', () {
+    expect(const AppSettings().backendUrl, defaultBackendUrl);
+    expect(isValidBackendUrl(defaultBackendUrl), isTrue);
   });
 
   test('saves and restores all configurable settings', () async {
@@ -29,6 +35,7 @@ void main() {
       mockScenario: 'left_load_bias',
       csvAsset: 'assets/sample_data/normal_walk.csv',
       replaySpeed: 2.5,
+      voiceEnabled: false,
     );
 
     await store.save(expected);
@@ -39,6 +46,7 @@ void main() {
     expect(restored.mockScenario, expected.mockScenario);
     expect(restored.csvAsset, expected.csvAsset);
     expect(restored.replaySpeed, expected.replaySpeed);
+    expect(restored.voiceEnabled, isFalse);
   });
 
   test('rejects invalid saved enum, scenario, and replay speed', () async {
@@ -54,7 +62,7 @@ void main() {
     final restored = await store.load();
 
     expect(restored.backendUrl, const AppSettings().backendUrl);
-    expect(restored.dataMode, FootDataMode.mock);
+    expect(restored.dataMode, FootDataMode.ble);
     expect(restored.mockScenario, 'normal_stand');
     expect(restored.csvAsset, const AppSettings().csvAsset);
     expect(restored.replaySpeed, 4.0);

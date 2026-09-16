@@ -8,8 +8,12 @@ import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/device_ack.dart';
 import '../models/foot_frame.dart';
+import '../models/gait_summary.dart';
 import '../models/regional_analysis.dart';
 import '../models/risk_state.dart';
+import '../models/session_advice.dart';
+import '../models/offline_intervention.dart';
+import '../models/assessment.dart';
 
 class RealtimeSnapshot {
   const RealtimeSnapshot({
@@ -19,11 +23,16 @@ class RealtimeSnapshot {
     required this.loadDiff,
     required this.syncErrorMs,
     this.motionState = 'unavailable',
+    this.motorVibrationActive = false,
+    this.leftMotionState = 'unavailable',
+    this.rightMotionState = 'unavailable',
+    this.gait = const GaitSummary.insufficient(),
     this.pressureAvailable = false,
     this.temperatureAvailable = false,
     required this.risk,
     this.activeRisks = const [],
     required this.regionalAnalysis,
+    this.recoveryObservation,
   });
 
   final FootFrame? left;
@@ -32,11 +41,16 @@ class RealtimeSnapshot {
   final double? loadDiff;
   final int? syncErrorMs;
   final String motionState;
+  final bool motorVibrationActive;
+  final String leftMotionState;
+  final String rightMotionState;
+  final GaitSummary gait;
   final bool pressureAvailable;
   final bool temperatureAvailable;
   final RiskState risk;
   final List<RiskState> activeRisks;
   final RegionalAnalysis? regionalAnalysis;
+  final RecoveryObservation? recoveryObservation;
 
   factory RealtimeSnapshot.fromJson(Map<String, dynamic> json) =>
       RealtimeSnapshot(
@@ -50,6 +64,13 @@ class RealtimeSnapshot {
         loadDiff: (json['load_diff'] as num?)?.toDouble(),
         syncErrorMs: json['sync_error_ms'] as int?,
         motionState: json['motion_state'] as String? ?? 'unavailable',
+        motorVibrationActive: json['motor_vibration_active'] as bool? ?? false,
+        leftMotionState: json['left_motion_state'] as String? ?? 'unavailable',
+        rightMotionState:
+            json['right_motion_state'] as String? ?? 'unavailable',
+        gait: json['gait'] == null
+            ? const GaitSummary.insufficient()
+            : GaitSummary.fromJson(json['gait'] as Map<String, dynamic>),
         pressureAvailable: json['pressure_available'] as bool? ?? false,
         temperatureAvailable: json['temperature_available'] as bool? ?? false,
         risk: RiskState.fromJson(json['risk'] as Map<String, dynamic>),
@@ -63,6 +84,46 @@ class RealtimeSnapshot {
             : RegionalAnalysis.fromJson(
                 json['regional_analysis'] as Map<String, dynamic>,
               ),
+        recoveryObservation: json['recovery_observation'] == null
+            ? null
+            : RecoveryObservation.fromJson(
+                json['recovery_observation'] as Map<String, dynamic>,
+              ),
+      );
+}
+
+class RecoveryObservation {
+  const RecoveryObservation({
+    required this.eventId,
+    required this.status,
+    required this.startedAtMs,
+    required this.deadlineAtMs,
+    required this.remainingMs,
+    this.effectLabel,
+    this.componentFeedback = const [],
+  });
+
+  final String eventId;
+  final String status;
+  final int startedAtMs;
+  final int deadlineAtMs;
+  final int remainingMs;
+  final String? effectLabel;
+  final List<RiskComponentFeedbackRecord> componentFeedback;
+
+  factory RecoveryObservation.fromJson(Map<String, dynamic> json) =>
+      RecoveryObservation(
+        eventId: json['event_id'] as String,
+        status: json['status'] as String,
+        startedAtMs: json['started_at_ms'] as int,
+        deadlineAtMs: json['deadline_at_ms'] as int,
+        remainingMs: json['remaining_ms'] as int,
+        effectLabel: json['effect_label'] as String?,
+        componentFeedback:
+            (json['component_feedback'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(RiskComponentFeedbackRecord.fromJson)
+                .toList(growable: false),
       );
 }
 
@@ -82,6 +143,10 @@ class RiskEventRecord {
     this.effectLabel,
     this.recoveryTimeMs,
     this.activeRisks = const [],
+    this.interventionStartedAtMs,
+    this.componentFeedback = const [],
+    this.motorTarget,
+    this.motorPattern,
   });
 
   final String eventId;
@@ -97,6 +162,10 @@ class RiskEventRecord {
   final String? effectLabel;
   final int? recoveryTimeMs;
   final List<RiskState> activeRisks;
+  final int? interventionStartedAtMs;
+  final List<RiskComponentFeedbackRecord> componentFeedback;
+  final String? motorTarget;
+  final String? motorPattern;
   final String status;
 
   bool get hasLoadDiffComparison =>
@@ -130,8 +199,369 @@ class RiskEventRecord {
                 .map(RiskState.fromJson)
                 .toList(growable: false) ??
             const [],
+        interventionStartedAtMs: json['intervention_started_at_ms'] as int?,
+        componentFeedback: (json['component_feedback'] as List<dynamic>?)
+                ?.whereType<Map<String, dynamic>>()
+                .map(RiskComponentFeedbackRecord.fromJson)
+                .toList(growable: false) ??
+            const [],
+        motorTarget: json['motor_target'] as String?,
+        motorPattern: json['motor_pattern'] as String?,
         status: json['status'] as String,
       );
+
+  Map<String, dynamic> toJson() => {
+        'event_id': eventId,
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'risk_level': riskLevel,
+        'started_at_ms': startedAtMs,
+        'ended_at_ms': endedAtMs,
+        'duration_ms': durationMs,
+        'before_load_diff': beforeLoadDiff,
+        'after_load_diff': afterLoadDiff,
+        'intervention_action': interventionAction,
+        'effect_label': effectLabel,
+        'recovery_time_ms': recoveryTimeMs,
+        'active_risks': activeRisks.map((item) => item.toJson()).toList(),
+        'intervention_started_at_ms': interventionStartedAtMs,
+        'component_feedback':
+            componentFeedback.map((item) => item.toJson()).toList(),
+        'motor_target': motorTarget,
+        'motor_pattern': motorPattern,
+        'status': status,
+      };
+}
+
+class RiskComponentFeedbackRecord {
+  const RiskComponentFeedbackRecord({
+    required this.riskType,
+    required this.riskSide,
+    required this.effectLabel,
+    required this.pressureIntervention,
+    this.metricCode,
+    this.metricUnit,
+    this.beforeValue,
+    this.afterValue,
+    this.improvementRatio,
+  });
+
+  final String riskType;
+  final String riskSide;
+  final double? beforeValue;
+  final double? afterValue;
+  final double? improvementRatio;
+  final String effectLabel;
+  final bool pressureIntervention;
+  final String? metricCode;
+  final String? metricUnit;
+
+  factory RiskComponentFeedbackRecord.fromJson(Map<String, dynamic> json) =>
+      RiskComponentFeedbackRecord(
+        riskType: json['risk_type'] as String,
+        riskSide: json['risk_side'] as String,
+        beforeValue: (json['before_value'] as num?)?.toDouble(),
+        afterValue: (json['after_value'] as num?)?.toDouble(),
+        improvementRatio: (json['improvement_ratio'] as num?)?.toDouble(),
+        effectLabel: json['effect_label'] as String? ?? 'unknown',
+        pressureIntervention: json['pressure_intervention'] as bool? ?? true,
+        metricCode: json['metric_code'] as String?,
+        metricUnit: json['metric_unit'] as String?,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'before_value': beforeValue,
+        'after_value': afterValue,
+        'improvement_ratio': improvementRatio,
+        'effect_label': effectLabel,
+        'pressure_intervention': pressureIntervention,
+        'metric_code': metricCode,
+        'metric_unit': metricUnit,
+      };
+}
+
+class RiskImprovementSummaryRecord {
+  const RiskImprovementSummaryRecord({
+    required this.riskType,
+    required this.riskSide,
+    this.evaluatedCount = 0,
+    this.effectiveCount = 0,
+    this.partialCount = 0,
+    this.ineffectiveCount = 0,
+    this.worsenedCount = 0,
+    this.dataInsufficientCount = 0,
+    this.medianImprovementRatio,
+    this.beforeMedian,
+    this.afterMedian,
+    this.metricUnit,
+  });
+
+  final String riskType;
+  final String riskSide;
+  final int evaluatedCount;
+  final int effectiveCount;
+  final int partialCount;
+  final int ineffectiveCount;
+  final int worsenedCount;
+  final int dataInsufficientCount;
+  final double? medianImprovementRatio;
+  final double? beforeMedian;
+  final double? afterMedian;
+  final String? metricUnit;
+
+  factory RiskImprovementSummaryRecord.fromJson(Map<String, dynamic> json) =>
+      RiskImprovementSummaryRecord(
+        riskType: json['risk_type'] as String,
+        riskSide: json['risk_side'] as String,
+        evaluatedCount: json['evaluated_count'] as int? ?? 0,
+        effectiveCount: json['effective_count'] as int? ?? 0,
+        partialCount: json['partial_count'] as int? ?? 0,
+        ineffectiveCount: json['ineffective_count'] as int? ?? 0,
+        worsenedCount: json['worsened_count'] as int? ?? 0,
+        dataInsufficientCount: json['data_insufficient_count'] as int? ?? 0,
+        medianImprovementRatio:
+            (json['median_improvement_ratio'] as num?)?.toDouble(),
+        beforeMedian: (json['before_median'] as num?)?.toDouble(),
+        afterMedian: (json['after_median'] as num?)?.toDouble(),
+        metricUnit: json['metric_unit'] as String?,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'risk_type': riskType,
+        'risk_side': riskSide,
+        'evaluated_count': evaluatedCount,
+        'effective_count': effectiveCount,
+        'partial_count': partialCount,
+        'ineffective_count': ineffectiveCount,
+        'worsened_count': worsenedCount,
+        'data_insufficient_count': dataInsufficientCount,
+        'median_improvement_ratio': medianImprovementRatio,
+        'before_median': beforeMedian,
+        'after_median': afterMedian,
+        'metric_unit': metricUnit,
+      };
+}
+
+class SessionSummary {
+  const SessionSummary({
+    required this.sessionStatus,
+    required this.eventCount,
+    required this.highestRiskLevel,
+    required this.motorCommandCount,
+    required this.motorExecutedCount,
+    this.gaitEpisodeCount = 0,
+    this.latestGaitEpisodes = const [],
+    this.gaitTrend = const GaitTrendSummary(),
+    this.improvementSummary = const [],
+    this.pressureUntrustedChannels = const [],
+    this.temperatureValidPairs = 0,
+    this.leftValidPressureChannels = 0,
+    this.rightValidPressureChannels = 0,
+    this.lastDataAtMs,
+    this.monitoringRating,
+    this.temperatureEvidence = const TemperatureEvidence(),
+    this.healthProfile = const HealthProfile(),
+    this.recentGlucoseReadings = const [],
+  });
+
+  final String sessionStatus;
+  final int? lastDataAtMs;
+  final int eventCount;
+  final int highestRiskLevel;
+  final int motorCommandCount;
+  final int motorExecutedCount;
+  final int gaitEpisodeCount;
+  final List<GaitEpisodeSummary> latestGaitEpisodes;
+  final GaitTrendSummary gaitTrend;
+  final List<RiskImprovementSummaryRecord> improvementSummary;
+  final List<String> pressureUntrustedChannels;
+  final int temperatureValidPairs;
+  final int leftValidPressureChannels;
+  final int rightValidPressureChannels;
+  final MonitoringRating? monitoringRating;
+  final TemperatureEvidence temperatureEvidence;
+  final HealthProfile healthProfile;
+  final List<GlucoseReading> recentGlucoseReadings;
+
+  factory SessionSummary.fromJson(Map<String, dynamic> json) => SessionSummary(
+        sessionStatus: json['session_status'] as String? ?? 'empty',
+        lastDataAtMs: json['last_data_at_ms'] as int?,
+        eventCount: json['event_count'] as int? ?? 0,
+        highestRiskLevel: json['highest_risk_level'] as int? ?? 0,
+        motorCommandCount: json['motor_command_count'] as int? ?? 0,
+        motorExecutedCount: json['motor_executed_count'] as int? ?? 0,
+        gaitEpisodeCount: json['gait_episode_count'] as int? ?? 0,
+        latestGaitEpisodes:
+            (json['latest_gait_episodes'] as List<dynamic>? ?? const [])
+                .cast<Map<String, dynamic>>()
+                .map(GaitEpisodeSummary.fromJson)
+                .toList(growable: false),
+        gaitTrend: GaitTrendSummary.fromJson(
+          json['gait_trend'] as Map<String, dynamic>? ?? const {},
+        ),
+        improvementSummary:
+            (json['improvement_summary'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(RiskImprovementSummaryRecord.fromJson)
+                .toList(growable: false),
+        pressureUntrustedChannels:
+            (json['pressure_untrusted_channels'] as List<dynamic>? ?? const [])
+                .map((item) => item.toString())
+                .toList(growable: false),
+        temperatureValidPairs: json['temperature_valid_pairs'] as int? ?? 0,
+        leftValidPressureChannels:
+            json['left_valid_pressure_channels'] as int? ?? 0,
+        rightValidPressureChannels:
+            json['right_valid_pressure_channels'] as int? ?? 0,
+        monitoringRating: json['monitoring_rating'] == null
+            ? null
+            : MonitoringRating.fromJson(
+                json['monitoring_rating'] as Map<String, dynamic>,
+              ),
+        temperatureEvidence: TemperatureEvidence.fromJson(
+          json['temperature_evidence'] as Map<String, dynamic>? ?? const {},
+        ),
+        healthProfile: HealthProfile.fromJson(
+          json['health_profile'] as Map<String, dynamic>? ?? const {},
+        ),
+        recentGlucoseReadings:
+            (json['recent_glucose_readings'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(GlucoseReading.fromJson)
+                .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'session_status': sessionStatus,
+        'last_data_at_ms': lastDataAtMs,
+        'event_count': eventCount,
+        'highest_risk_level': highestRiskLevel,
+        'motor_command_count': motorCommandCount,
+        'motor_executed_count': motorExecutedCount,
+        'gait_episode_count': gaitEpisodeCount,
+        'latest_gait_episodes':
+            latestGaitEpisodes.map((item) => item.toJson()).toList(),
+        'gait_trend': gaitTrend.toJson(),
+        'improvement_summary':
+            improvementSummary.map((item) => item.toJson()).toList(),
+        'pressure_untrusted_channels': pressureUntrustedChannels,
+        'temperature_valid_pairs': temperatureValidPairs,
+        'left_valid_pressure_channels': leftValidPressureChannels,
+        'right_valid_pressure_channels': rightValidPressureChannels,
+        'monitoring_rating': monitoringRating == null
+            ? null
+            : {
+                'rating': monitoringRating!.rating,
+                'level': monitoringRating!.level,
+                'label': monitoringRating!.label,
+                'trend': monitoringRating!.trend,
+                'trend_label': monitoringRating!.trendLabel,
+                'evidence': monitoringRating!.evidence,
+                'data_quality': monitoringRating!.dataQuality,
+                'session_id': monitoringRating!.sessionId,
+                'previous_session_id': monitoringRating!.previousSessionId,
+                'is_demo_only': monitoringRating!.isDemoOnly,
+              },
+        'temperature_evidence': {
+          'real_days': temperatureEvidence.realDays,
+          'real_consecutive_days': temperatureEvidence.realConsecutiveDays,
+          'demo_days': temperatureEvidence.demoDays,
+          'status': temperatureEvidence.status,
+          'records': temperatureEvidence.records
+              .map((record) => {
+                    'record_date': record.recordDate,
+                    'side': record.side,
+                    'zone': record.zone,
+                    'raw_delta_c': record.rawDeltaC,
+                    'corrected_delta_c': record.correctedDeltaC,
+                    'started_at_ms': record.startedAtMs,
+                    'ended_at_ms': record.endedAtMs,
+                    'valid_zone_count': record.validZoneCount,
+                    'source': record.source,
+                    'load_state': record.loadState,
+                    'motion_state': record.motionState,
+                    'quality': record.quality,
+                    'demo_session_id': record.demoSessionId,
+                  })
+              .toList(),
+        },
+        'health_profile': healthProfile.toJson(),
+        'recent_glucose_readings':
+            recentGlucoseReadings.map((item) => item.toJson()).toList(),
+      };
+}
+
+class AnalyticsFramePoint {
+  const AnalyticsFramePoint({
+    required this.timestampMs,
+    required this.syncId,
+    required this.packetSeq,
+    required this.side,
+    required this.totalPressure,
+    required this.forefootRatio,
+    required this.temperature,
+  });
+
+  final int timestampMs;
+  final int syncId;
+  final int packetSeq;
+  final String side;
+  final double totalPressure;
+  final double forefootRatio;
+  final List<double> temperature;
+
+  factory AnalyticsFramePoint.fromFootFrame(FootFrame frame) {
+    final validPressure = <double>[];
+    var forefoot = 0.0;
+    for (var index = 0; index < frame.pressure.length; index += 1) {
+      if (!frame.pressureChannelValid(index)) continue;
+      final value = frame.pressure[index].clamp(0.0, double.infinity);
+      validPressure.add(value);
+      if (index < 4) forefoot += value;
+    }
+    final total = validPressure.fold<double>(0, (sum, value) => sum + value);
+    return AnalyticsFramePoint(
+      timestampMs: frame.timestampMs,
+      syncId: frame.syncId,
+      packetSeq: frame.packetSeq,
+      side: frame.side,
+      totalPressure: total,
+      forefootRatio: total <= 0 ? 0 : forefoot / total,
+      temperature: List<double>.generate(
+        frame.temperature.length,
+        (index) => frame.temperatureChannelValid(index)
+            ? frame.temperature[index]
+            : double.nan,
+        growable: false,
+      ),
+    );
+  }
+
+  factory AnalyticsFramePoint.fromJson(Map<String, dynamic> json) =>
+      AnalyticsFramePoint(
+        timestampMs: json['timestamp_ms'] as int,
+        syncId: json['sync_id'] as int? ?? 0,
+        packetSeq: json['packet_seq'] as int? ?? 0,
+        side: json['side'] as String,
+        totalPressure: (json['total_pressure'] as num).toDouble(),
+        forefootRatio: (json['forefoot_ratio'] as num).toDouble(),
+        temperature: (json['temperature'] as List<dynamic>? ?? const [])
+            .whereType<num>()
+            .map((value) => value.toDouble())
+            .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'timestamp_ms': timestampMs,
+        'sync_id': syncId,
+        'packet_seq': packetSeq,
+        'side': side,
+        'total_pressure': totalPressure,
+        'forefoot_ratio': forefootRatio,
+        'temperature': temperature,
+      };
 }
 
 class ApiException implements Exception {
@@ -148,6 +578,13 @@ class CalibrationStatus {
     required this.requiredSamples,
     this.resetAtMs,
     this.statusReason = 'waiting_for_data',
+    this.emptyTemperatureReferenceReady = false,
+    this.emptySampleCount = 0,
+    this.emptyRequiredSamples = 60,
+    this.temperatureRiskEnabled = false,
+    this.temperatureOffsetChannels = const [],
+    this.temperatureUntrustedChannels = const [],
+    this.temperatureRiskReason = 'baseline_not_ready',
   });
 
   final bool baselineReady;
@@ -155,18 +592,50 @@ class CalibrationStatus {
   final int requiredSamples;
   final int? resetAtMs;
   final String statusReason;
+  final bool emptyTemperatureReferenceReady;
+  final int emptySampleCount;
+  final int emptyRequiredSamples;
+  final bool temperatureRiskEnabled;
+  final List<int> temperatureOffsetChannels;
+  final List<int> temperatureUntrustedChannels;
+  final String temperatureRiskReason;
 
   double get progress => requiredSamples <= 0
       ? 0.0
       : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
 
-  factory CalibrationStatus.fromJson(Map<String, dynamic> json) =>
+  double get emptyProgress => emptyRequiredSamples <= 0
+      ? 0.0
+      : (emptySampleCount / emptyRequiredSamples).clamp(0, 1).toDouble();
+
+  factory CalibrationStatus.fromJson(
+    Map<String, dynamic> json,
+  ) =>
       CalibrationStatus(
         baselineReady: json['baseline_ready'] as bool,
         sampleCount: json['sample_count'] as int,
         requiredSamples: json['required_samples'] as int,
         resetAtMs: json['reset_at_ms'] as int?,
         statusReason: json['status_reason'] as String? ?? 'waiting_for_data',
+        emptyTemperatureReferenceReady:
+            json['empty_temperature_reference_ready'] as bool? ?? false,
+        emptySampleCount: json['empty_sample_count'] as int? ?? 0,
+        emptyRequiredSamples: json['empty_required_samples'] as int? ?? 60,
+        temperatureRiskEnabled:
+            json['temperature_risk_enabled'] as bool? ?? false,
+        temperatureOffsetChannels:
+            (json['temperature_offset_channels'] as List<dynamic>? ?? const [])
+                .whereType<num>()
+                .map((value) => value.toInt())
+                .toList(growable: false),
+        temperatureUntrustedChannels:
+            (json['temperature_untrusted_channels'] as List<dynamic>? ??
+                    const [])
+                .whereType<num>()
+                .map((value) => value.toInt())
+                .toList(growable: false),
+        temperatureRiskReason:
+            json['temperature_risk_reason'] as String? ?? 'baseline_not_ready',
       );
 }
 
@@ -217,10 +686,15 @@ class FootGuardApiClient {
     return serverNowMs;
   }
 
-  Future<void> uploadFrames(List<FootFrame> frames) async {
+  Future<void> uploadFrames(
+    List<FootFrame> frames, {
+    bool offlineReplay = false,
+  }) async {
     final response = await _client
         .post(
-          Uri.parse('$baseUrl/api/v1/sensor/batch'),
+          Uri.parse(
+            '$baseUrl/api/v1/sensor/${offlineReplay ? 'offline-sync' : 'batch'}',
+          ),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'protocol_version': 1,
@@ -232,12 +706,30 @@ class FootGuardApiClient {
     await _decode(response);
   }
 
+  Future<void> uploadOfflineInterventions(
+    List<OfflineIntervention> records,
+  ) async {
+    if (records.isEmpty) return;
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/sensor/offline-interventions'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'protocol_version': 1,
+            'records': records.map((item) => item.toJson()).toList(),
+          }),
+        )
+        .timeout(const Duration(seconds: 8));
+    await _decode(response);
+  }
+
   Future<RealtimeSnapshot> realtime() async {
     final response = await _client
         .get(Uri.parse('$baseUrl/api/v1/realtime'))
         .timeout(const Duration(seconds: 5));
     return RealtimeSnapshot.fromJson(
-        await _decode(response) as Map<String, dynamic>);
+      await _decode(response) as Map<String, dynamic>,
+    );
   }
 
   Future<List<RiskEventRecord>> events({int limit = 50}) async {
@@ -248,6 +740,104 @@ class FootGuardApiClient {
     return body
         .map((event) => RiskEventRecord.fromJson(event as Map<String, dynamic>))
         .toList(growable: false);
+  }
+
+  Future<SessionSummary> latestSession() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/session/latest'))
+        .timeout(const Duration(seconds: 5));
+    return SessionSummary.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AssessmentSummary> latestAssessment() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/assessment/latest'))
+        .timeout(const Duration(seconds: 8));
+    return AssessmentSummary.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<MonitoringRating>> assessmentHistory() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/assessment/history'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(MonitoringRating.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<List<TemperatureDailyRecord>> dailyTemperature() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/temperature/daily'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(TemperatureDailyRecord.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<TemperatureDemoState> startTemperatureDemo() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/temperature-demo/start'))
+        .timeout(const Duration(seconds: 8));
+    return TemperatureDemoState.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<TemperatureDemoState> resetTemperatureDemo() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/temperature-demo/reset'))
+        .timeout(const Duration(seconds: 8));
+    return TemperatureDemoState.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<HealthProfile> healthProfile() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/health-profile'))
+        .timeout(const Duration(seconds: 8));
+    return HealthProfile.fromJson(
+        await _decode(response) as Map<String, dynamic>);
+  }
+
+  Future<HealthProfile> updateHealthProfile(HealthProfile profile) async {
+    final response = await _client
+        .put(
+          Uri.parse('$baseUrl/api/v1/health-profile'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(profile.toJson()),
+        )
+        .timeout(const Duration(seconds: 8));
+    return HealthProfile.fromJson(
+        await _decode(response) as Map<String, dynamic>);
+  }
+
+  Future<List<GlucoseReading>> glucoseReadings() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/glucose'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(GlucoseReading.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<GlucoseReading> addGlucose(GlucoseReading reading) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/glucose'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(reading.toJson()),
+        )
+        .timeout(const Duration(seconds: 8));
+    return GlucoseReading.fromJson(
+        await _decode(response) as Map<String, dynamic>);
   }
 
   Future<CalibrationStatus> calibrationStatus() async {
@@ -320,6 +910,7 @@ class FootGuardApiClient {
     required bool temperatureAvailable,
     required bool leftConnected,
     required bool rightConnected,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -336,12 +927,11 @@ class FootGuardApiClient {
             'temperature_available': temperatureAvailable,
             'left_connected': leftConnected,
             'right_connected': rightConnected,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));
-    return AiAdvice.fromJson(
-      await _decode(response) as Map<String, dynamic>,
-    );
+    return AiAdvice.fromJson(await _decode(response) as Map<String, dynamic>);
   }
 
   Future<AiQuestionAnswer> aiQuestion({
@@ -355,6 +945,7 @@ class FootGuardApiClient {
     bool temperatureAvailable = true,
     bool leftConnected = true,
     bool rightConnected = true,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -372,6 +963,7 @@ class FootGuardApiClient {
             'temperature_available': temperatureAvailable,
             'left_connected': leftConnected,
             'right_connected': rightConnected,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));
@@ -393,6 +985,7 @@ class FootGuardApiClient {
     required String motionState,
     required bool leftConnected,
     required bool rightConnected,
+    GaitSummary? gait,
   }) async {
     final response = await _client
         .post(
@@ -412,12 +1005,48 @@ class FootGuardApiClient {
             'right_connected': rightConnected,
             'valid_temperature_pairs': validTemperaturePairs,
             'motion_state': motionState,
+            'gait': gait?.toJson(),
           }),
         )
         .timeout(const Duration(seconds: 35));
     return AiChatAnswer.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
+  }
+
+  Future<SessionAdvice> sessionAdvice() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/ai/session-advice'))
+        .timeout(const Duration(seconds: 35));
+    return SessionAdvice.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AiQuestionAnswer> sessionQuestion(String questionKey) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/ai/session-question'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'question_key': questionKey}),
+        )
+        .timeout(const Duration(seconds: 35));
+    return AiQuestionAnswer.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<AnalyticsFramePoint>> analyticsTimeseries({
+    int limit = 600,
+  }) async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/analytics/timeseries?limit=$limit'))
+        .timeout(const Duration(seconds: 8));
+    final body = await _decode(response) as List<dynamic>;
+    return body
+        .whereType<Map<String, dynamic>>()
+        .map(AnalyticsFramePoint.fromJson)
+        .toList(growable: false);
   }
 
   void close() => _client.close();

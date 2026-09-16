@@ -1,13 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../data/api_client.dart';
+import '../models/offline_intervention.dart';
+import '../models/gait_summary.dart';
+import '../models/ai_question_answer.dart';
+import '../models/session_advice.dart';
+import '../models/assessment.dart';
+import '../services/offline_monitoring_store.dart';
 
 class HistoryScreen extends StatefulWidget {
-  const HistoryScreen({
-    super.key,
-    required this.backendUrl,
-    this.apiClient,
-  });
+  const HistoryScreen({super.key, required this.backendUrl, this.apiClient});
 
   final String backendUrl;
   final FootGuardApiClient? apiClient;
@@ -18,11 +22,37 @@ class HistoryScreen extends StatefulWidget {
 
 enum _HistoryFilter { all, active, finished }
 
+enum _HistoryView { assessment, risks, gait }
+
+class _HistoryPayload {
+  const _HistoryPayload({
+    required this.events,
+    required this.advice,
+    required this.summary,
+    this.cached = false,
+  });
+  final List<RiskEventRecord> events;
+  final SessionAdvice? advice;
+  final SessionSummary? summary;
+  final bool cached;
+}
+
 class _HistoryScreenState extends State<HistoryScreen> {
   late final FootGuardApiClient api =
       widget.apiClient ?? FootGuardApiClient(baseUrl: widget.backendUrl);
-  late Future<List<RiskEventRecord>> events = api.events();
+  final OfflineMonitoringStore _store = OfflineMonitoringStore();
+  late Future<_HistoryPayload> payload;
   _HistoryFilter filter = _HistoryFilter.all;
+  _HistoryView view = _HistoryView.risks;
+  AiQuestionAnswer? sessionQuestionAnswer;
+  bool sessionQuestionLoading = false;
+  String sessionQuestionStatus = '请选择一个会话问题';
+
+  @override
+  void initState() {
+    super.initState();
+    payload = _loadInitial();
+  }
 
   @override
   void dispose() {
@@ -31,23 +61,22 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<List<RiskEventRecord>>(
-        future: events,
+  Widget build(BuildContext context) => FutureBuilder<_HistoryPayload>(
+        future: payload,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
             return _Message(
-                icon: Icons.cloud_off,
-                text: '无法读取历史事件\n${snapshot.error}',
-                onRetry: _reload);
+              icon: Icons.cloud_off,
+              text: '无法读取历史事件\n${snapshot.error}',
+              onRetry: _reload,
+            );
           }
-          final data = snapshot.data ?? const [];
-          if (data.isEmpty) {
-            return _Message(
-                icon: Icons.event_available, text: '暂无风险事件', onRetry: _reload);
-          }
+          final result = snapshot.data ??
+              const _HistoryPayload(events: [], advice: null, summary: null);
+          final data = result.events;
 
           final filtered = data.where((event) {
             return switch (filter) {
@@ -56,15 +85,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               _HistoryFilter.finished => event.status != 'active',
             };
           }).toList(growable: false);
-          final highRiskCount =
-              data.where((event) => event.riskLevel >= 2).length;
-          final improvedCount = data.where((event) {
-            if (!_isLoadBiasRisk(event.riskType)) {
-              return false;
-            }
-            final ratio = event.loadDiffImprovementRatio;
-            return ratio != null && ratio >= 0.2;
-          }).length;
+          final improvedCount = data.where(_pressureEventImproved).length;
 
           return RefreshIndicator(
             onRefresh: _reload,
@@ -72,21 +93,31 @@ class _HistoryScreenState extends State<HistoryScreen> {
               padding: const EdgeInsets.all(16),
               children: [
                 const Text(
-                  '历史风险记录',
+                  '历史事件与会话建议',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '查看风险发生、提醒与负载改善结果。记录仅用于辅助监测，不替代医疗诊断。',
+                  '查看最近监测情况、变化趋势和下一步建议。',
                   style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
                 ),
                 const SizedBox(height: 16),
+                _SessionAdvicePanel(
+                  advice: result.advice,
+                  cached: result.cached,
+                  onRefresh: _reload,
+                  questionAnswer: sessionQuestionAnswer,
+                  questionLoading: sessionQuestionLoading,
+                  questionStatus: sessionQuestionStatus,
+                  onQuestionSelected: _askSessionQuestion,
+                ),
+                const SizedBox(height: 14),
                 Row(
                   children: [
                     Expanded(
                       child: _SummaryTile(
                         label: '风险事件',
-                        value: '${data.length} 条',
+                        value: '${result.summary?.eventCount ?? data.length} 条',
                         icon: Icons.event_note_rounded,
                         color: const Color(0xFF147D73),
                       ),
@@ -94,8 +125,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: _SummaryTile(
-                        label: '预警及以上',
-                        value: '$highRiskCount 条',
+                        label: '已发出提醒',
+                        value:
+                            '${result.summary?.motorExecutedCount ?? data.where((event) => event.interventionStartedAtMs != null).length} 次',
                         icon: Icons.warning_amber_rounded,
                         color: const Color(0xFFE07A36),
                       ),
@@ -103,7 +135,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: _SummaryTile(
-                        label: '负载有改善',
+                        label: '压力有改善',
                         value: '$improvedCount 条',
                         icon: Icons.trending_down_rounded,
                         color: const Color(0xFF1A9B78),
@@ -112,22 +144,67 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   ],
                 ),
                 const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    _filterChip(_HistoryFilter.all, '全部'),
-                    _filterChip(_HistoryFilter.active, '进行中'),
-                    _filterChip(_HistoryFilter.finished, '已结束'),
+                SegmentedButton<_HistoryView>(
+                  segments: const [
+                    ButtonSegment(
+                      value: _HistoryView.assessment,
+                      icon: Icon(Icons.assessment_outlined),
+                      label: Text('综合评估'),
+                    ),
+                    ButtonSegment(
+                      value: _HistoryView.risks,
+                      icon: Icon(Icons.warning_amber_rounded),
+                      label: Text('风险事件'),
+                    ),
+                    ButtonSegment(
+                      value: _HistoryView.gait,
+                      icon: Icon(Icons.directions_walk_rounded),
+                      label: Text('步态记录'),
+                    ),
                   ],
+                  selected: {view},
+                  onSelectionChanged: (value) =>
+                      setState(() => view = value.first),
                 ),
-                const SizedBox(height: 8),
-                if (filtered.isEmpty)
-                  const _EmptyFilter()
-                else
-                  for (final event in filtered) ...[
-                    _HistoryEventCard(event: event),
+                const SizedBox(height: 12),
+                if (view == _HistoryView.assessment)
+                  _AssessmentPanel(
+                    summary: result.summary,
+                    onEditProfile: result.summary == null
+                        ? null
+                        : () => _editHealthProfile(result.summary!),
+                    onAddGlucose: _addGlucose,
+                  )
+                else if (view == _HistoryView.risks) ...[
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      _filterChip(_HistoryFilter.all, '全部'),
+                      _filterChip(_HistoryFilter.active, '进行中'),
+                      _filterChip(_HistoryFilter.finished, '已结束'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (filtered.isEmpty)
+                    const _EmptyFilter()
+                  else
+                    for (final event in filtered) ...[
+                      _HistoryEventCard(event: event),
+                      const SizedBox(height: 10),
+                    ],
+                ] else if (result.summary?.latestGaitEpisodes.isEmpty ?? true)
+                  const _Message(
+                    icon: Icons.directions_walk_rounded,
+                    text: '暂无完整行走记录',
+                  )
+                else ...[
+                  _GaitTrendPanel(trend: result.summary!.gaitTrend),
+                  const SizedBox(height: 10),
+                  for (final episode in result.summary!.latestGaitEpisodes) ...[
+                    _GaitEpisodeCard(episode: episode),
                     const SizedBox(height: 10),
                   ],
+                ],
               ],
             ),
           );
@@ -142,11 +219,518 @@ class _HistoryScreenState extends State<HistoryScreen> {
     );
   }
 
-  Future<void> _reload() async {
-    setState(() => events = api.events());
-    await events;
+  Future<_HistoryPayload> _load() async {
+    List<RiskEventRecord> events = const [];
+    SessionAdvice? advice;
+    SessionSummary? summary;
+    var cached = false;
+    await _syncPendingHealthData();
+    try {
+      events = await api.events();
+      await _store.saveHistoryEvents(
+        events.map((item) => item.toJson()).toList(growable: false),
+      );
+    } catch (_) {
+      events = (await _store.loadHistoryEvents())
+          .map(RiskEventRecord.fromJson)
+          .toList(growable: false);
+      cached = events.isNotEmpty;
+    }
+    final offlineEvents = _eventsFromOfflineInterventions(
+      await _store.loadInterventions(),
+    );
+    final knownIds = events.map((item) => item.eventId).toSet();
+    events = [
+      ...offlineEvents.where((item) => !knownIds.contains(item.eventId)),
+      ...events,
+    ]..sort((a, b) => b.startedAtMs.compareTo(a.startedAtMs));
+    try {
+      summary = await api.latestSession();
+      await _store.saveSessionSummary(summary.toJson());
+    } catch (_) {
+      final raw = await _store.loadSessionSummary();
+      summary = raw == null ? null : SessionSummary.fromJson(raw);
+      cached = cached || summary != null;
+    }
+    try {
+      advice = await api.sessionAdvice();
+      await _store.saveSessionAdvice(advice.toJson());
+    } catch (_) {
+      final raw = await _store.loadSessionAdvice();
+      advice = raw == null ? null : SessionAdvice.fromJson(raw);
+      advice ??= _localSessionAdvice(events);
+      cached = cached || advice != null;
+    }
+    return _HistoryPayload(
+      events: events,
+      advice: advice,
+      summary: summary,
+      cached: cached,
+    );
   }
+
+  Future<_HistoryPayload> _loadInitial() async {
+    final cached = await _loadCached();
+    if (cached.events.isNotEmpty ||
+        cached.advice != null ||
+        cached.summary != null) {
+      unawaited(_refreshAfterCache());
+      return cached;
+    }
+    return _load();
+  }
+
+  Future<_HistoryPayload> _loadCached() async {
+    final rawEvents = await _store.loadHistoryEvents();
+    final events = rawEvents.map(RiskEventRecord.fromJson).toList();
+    final knownIds = events.map((item) => item.eventId).toSet();
+    events.addAll(
+      _eventsFromOfflineInterventions(await _store.loadInterventions())
+          .where((item) => !knownIds.contains(item.eventId)),
+    );
+    events.sort((a, b) => b.startedAtMs.compareTo(a.startedAtMs));
+    final rawAdvice = await _store.loadSessionAdvice();
+    final rawSummary = await _store.loadSessionSummary();
+    return _HistoryPayload(
+      events: events,
+      advice: rawAdvice == null
+          ? _localSessionAdvice(events)
+          : SessionAdvice.fromJson(rawAdvice),
+      summary: rawSummary == null ? null : SessionSummary.fromJson(rawSummary),
+      cached: true,
+    );
+  }
+
+  Future<void> _refreshAfterCache() async {
+    final refreshed = await _load();
+    if (!mounted) return;
+    setState(() {
+      payload = Future.value(refreshed);
+    });
+  }
+
+  SessionAdvice? _localSessionAdvice(List<RiskEventRecord> events) {
+    if (events.isEmpty) return null;
+    final pressureEvents = events.where(
+      (event) => event.riskType != 'temperature_asymmetry',
+    );
+    final recovered = events.where(_pressureEventImproved);
+    return SessionAdvice(
+      provider: 'local-session-template',
+      sessionStatus: 'recent',
+      advice: '最近情况：出现过 ${pressureEvents.length} 次受力提醒，'
+          '其中 ${recovered.length} 次随后有所缓解。\n'
+          '建议：优先检查反复出现的一侧和前掌区域，留意皮肤外观、鞋内异物与鞋垫贴合；'
+          '下一次自然行走时观察是否仍在同一侧。'
+          '本建议仅用于辅助监测，不替代医疗诊断。',
+    );
+  }
+
+  Future<void> _reload() async {
+    setState(() => payload = _load());
+    await payload;
+  }
+
+  Future<void> _askSessionQuestion(String questionKey) async {
+    setState(() {
+      sessionQuestionLoading = true;
+      sessionQuestionAnswer = null;
+      sessionQuestionStatus = '正在结合最近会话生成回答…';
+    });
+    try {
+      final answer = await api.sessionQuestion(questionKey);
+      if (!mounted) return;
+      setState(() {
+        sessionQuestionAnswer = answer;
+        sessionQuestionStatus = '';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        sessionQuestionStatus = '会话追问暂时不可用：$error';
+      });
+    } finally {
+      if (mounted) setState(() => sessionQuestionLoading = false);
+    }
+  }
+
+  Future<void> _editHealthProfile(SessionSummary summary) async {
+    var ulcer = summary.healthProfile.ulcerOrAmputation;
+    var sensory = summary.healthProfile.sensoryOrCirculationIssue;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('足部背景提示'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: ulcer,
+                decoration: const InputDecoration(labelText: '既往足部溃疡或截肢'),
+                items: _healthOptions(),
+                onChanged: (value) =>
+                    setDialogState(() => ulcer = value ?? 'unknown'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: sensory,
+                decoration: const InputDecoration(labelText: '医生提示感觉减退或供血问题'),
+                items: _healthOptions(),
+                onChanged: (value) =>
+                    setDialogState(() => sensory = value ?? 'unknown'),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                '这里只保存背景提示，不生成 IWGDF 临床分级。',
+                style: TextStyle(fontSize: 13, color: Color(0xFF718096)),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    final profile = HealthProfile(
+      ulcerOrAmputation: ulcer,
+      sensoryOrCirculationIssue: sensory,
+      completeness: ulcer != 'unknown' && sensory != 'unknown'
+          ? 'complete'
+          : 'incomplete',
+    );
+    try {
+      await api.updateHealthProfile(profile);
+      await _store.clearPendingHealthProfile();
+    } catch (_) {
+      await _store.savePendingHealthProfile(profile);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('后端暂不可用，足部背景已在本地等待同步')),
+        );
+      }
+    }
+    await _reload();
+  }
+
+  Future<void> _addGlucose() async {
+    final controller = TextEditingController();
+    var unit = 'mmol/L';
+    var contextValue = 'random';
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('新增血糖记录'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                    labelText: '血糖数值', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: unit,
+                decoration: const InputDecoration(labelText: '单位'),
+                items: const [
+                  DropdownMenuItem(value: 'mmol/L', child: Text('mmol/L')),
+                  DropdownMenuItem(value: 'mg/dL', child: Text('mg/dL')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => unit = value ?? unit),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: contextValue,
+                decoration: const InputDecoration(labelText: '测量时点'),
+                items: const [
+                  DropdownMenuItem(value: 'fasting', child: Text('空腹')),
+                  DropdownMenuItem(value: 'pre_meal', child: Text('餐前')),
+                  DropdownMenuItem(value: 'post_meal', child: Text('餐后')),
+                  DropdownMenuItem(value: 'random', child: Text('随机')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => contextValue = value ?? contextValue),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    final value = double.tryParse(controller.text.trim());
+    controller.dispose();
+    if (saved != true || value == null || value <= 0) return;
+    final reading = GlucoseReading(
+      value: value,
+      unit: unit,
+      context: contextValue,
+      measuredAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    try {
+      await api.addGlucose(reading);
+    } catch (_) {
+      final pending = await _store.loadPendingGlucose();
+      await _store.savePendingGlucose([...pending, reading]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('后端暂不可用，血糖记录已在本地等待同步')),
+        );
+      }
+    }
+    await _reload();
+  }
+
+  Future<void> _syncPendingHealthData() async {
+    final profile = await _store.loadPendingHealthProfile();
+    if (profile != null) {
+      try {
+        await api.updateHealthProfile(profile);
+        await _store.clearPendingHealthProfile();
+      } catch (_) {
+        return;
+      }
+    }
+    final readings = await _store.loadPendingGlucose();
+    if (readings.isEmpty) return;
+    for (var index = 0; index < readings.length; index += 1) {
+      try {
+        final reading = readings[index];
+        await api.addGlucose(reading);
+      } catch (_) {
+        await _store.savePendingGlucose(readings.sublist(index));
+        return;
+      }
+    }
+    await _store.clearPendingGlucose();
+  }
+
+  static List<DropdownMenuItem<String>> _healthOptions() => const [
+        DropdownMenuItem(value: 'no', child: Text('无')),
+        DropdownMenuItem(value: 'yes', child: Text('有')),
+        DropdownMenuItem(value: 'unknown', child: Text('不确定')),
+      ];
 }
+
+class _SessionAdvicePanel extends StatelessWidget {
+  const _SessionAdvicePanel({
+    required this.advice,
+    required this.cached,
+    required this.onRefresh,
+    required this.questionAnswer,
+    required this.questionLoading,
+    required this.questionStatus,
+    required this.onQuestionSelected,
+  });
+
+  final SessionAdvice? advice;
+  final bool cached;
+  final Future<void> Function() onRefresh;
+  final AiQuestionAnswer? questionAnswer;
+  final bool questionLoading;
+  final String questionStatus;
+  final Future<void> Function(String questionKey) onQuestionSelected;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.auto_awesome_outlined),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '最近会话 AI 建议',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '刷新会话建议',
+                    onPressed: onRefresh,
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
+                ],
+              ),
+              if (advice == null)
+                const Text('暂无可用的最近会话建议。')
+              else ...[
+                Text(
+                  cached || advice!.isHistorical
+                      ? '当前无实时数据；以下是最近会话，不是当前风险。'
+                      : '当前会话综合建议',
+                  style: const TextStyle(
+                    color: Color(0xFF087F72),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(advice!.advice),
+              ],
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              const Text(
+                '常见会话问题',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 9),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final question in _sessionQuestions) ...[
+                      ActionChip(
+                        avatar: Icon(question.icon, size: 17),
+                        label: Text(question.label),
+                        onPressed: questionLoading
+                            ? null
+                            : () => onQuestionSelected(question.key),
+                      ),
+                      const SizedBox(width: 7),
+                    ],
+                  ],
+                ),
+              ),
+              if (questionLoading)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Row(
+                    children: [
+                      SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 8),
+                      Text('正在生成回答…'),
+                    ],
+                  ),
+                )
+              else if (questionAnswer != null)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF7F5),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        questionAnswer!.question,
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(questionAnswer!.answer),
+                    ],
+                  ),
+                )
+              else if (questionStatus != '请选择一个会话问题')
+                Text(
+                  questionStatus,
+                  style: const TextStyle(
+                    color: Color(0xFF718096),
+                    fontSize: 13,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+}
+
+class _SessionQuestionOption {
+  const _SessionQuestionOption(this.key, this.label, this.icon);
+
+  final String key;
+  final String label;
+  final IconData icon;
+}
+
+const _sessionQuestions = [
+  _SessionQuestionOption(
+    'session_priority',
+    '最应关注什么？',
+    Icons.priority_high_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_pressure_area',
+    '复查哪个区域？',
+    Icons.location_searching_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_improvement',
+    '改善是否稳定？',
+    Icons.trending_down_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_next_test',
+    '下一轮怎么测？',
+    Icons.directions_walk_rounded,
+  ),
+  _SessionQuestionOption(
+    'session_data_quality',
+    '数据可靠吗？',
+    Icons.sensors_rounded,
+  ),
+];
+
+List<RiskEventRecord> _eventsFromOfflineInterventions(
+  List<OfflineIntervention> records,
+) =>
+    records.map((item) {
+      final executedAcks = item.acknowledgements
+          .where((ack) => ack.status == 'executed')
+          .toList(growable: false);
+      final interventionAt =
+          executedAcks.map((ack) => ack.executedAtMs ?? ack.ackAtMs).fold<int?>(
+                null,
+                (earliest, value) =>
+                    earliest == null || value < earliest ? value : earliest,
+              );
+      return RiskEventRecord(
+        eventId: item.eventId,
+        riskType: item.risk.riskType,
+        riskSide: item.risk.riskSide,
+        riskLevel: item.risk.riskLevel,
+        startedAtMs: item.startedAtMs,
+        durationMs: item.risk.durationMs,
+        status: item.effectLabel == null ? 'active' : 'resolved',
+        beforeLoadDiff: item.beforeLoadDiff,
+        afterLoadDiff: item.afterLoadDiff,
+        interventionAction: executedAcks.isEmpty ? null : 'motor_vibration',
+        effectLabel: item.effectLabel,
+        recoveryTimeMs: item.recoveryTimeMs,
+        activeRisks: item.activeRisks,
+        interventionStartedAtMs: interventionAt,
+        motorTarget: item.command.target,
+        motorPattern: item.command.pattern,
+      );
+    }).toList(growable: false);
 
 class _SummaryTile extends StatelessWidget {
   const _SummaryTile({
@@ -238,7 +822,7 @@ class _HistoryEventCard extends StatelessWidget {
             const Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                '本次同时存在',
+                '本次事件期间出现',
                 style: TextStyle(fontWeight: FontWeight.w800),
               ),
             ),
@@ -248,8 +832,11 @@ class _HistoryEventCard extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Row(
                   children: [
-                    Icon(_riskIcon(risk.riskType),
-                        size: 17, color: severityColor),
+                    Icon(
+                      _riskIcon(risk.riskType),
+                      size: 17,
+                      color: severityColor,
+                    ),
                     const SizedBox(width: 7),
                     Expanded(
                       child: Text(
@@ -259,7 +846,9 @@ class _HistoryEventCard extends StatelessWidget {
                     Text(
                       '${_levelLabel(risk.riskLevel)} · ${_formatDuration(risk.durationMs)}',
                       style: const TextStyle(
-                          fontSize: 12, color: Color(0xFF60706F)),
+                        fontSize: 12,
+                        color: Color(0xFF60706F),
+                      ),
                     ),
                   ],
                 ),
@@ -271,7 +860,7 @@ class _HistoryEventCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _DetailValue(
-                  label: '风险等级',
+                  label: '事件状态',
                   value: _levelLabel(event.riskLevel),
                 ),
               ),
@@ -291,20 +880,136 @@ class _HistoryEventCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 12),
+          const SizedBox(height: 2),
           _RecoveryPanel(event: event),
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              '事件编号 ${event.eventId}',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF879291),
-              ),
-            ),
-          ),
         ],
+      ),
+    );
+  }
+}
+
+class _GaitTrendPanel extends StatelessWidget {
+  const _GaitTrendPanel({required this.trend});
+
+  final GaitTrendSummary trend;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEAF7F3),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '最近行走情况 · ${trend.evidenceStepCount} 次落脚',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 7),
+            if (trend.confirmedIssues.isEmpty)
+              Text(
+                '最近行走记录中暂未出现重复的同向受力变化。',
+                style: const TextStyle(color: Color(0xFF147D73)),
+              )
+            else
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: trend.confirmedIssues
+                    .map(
+                      (issue) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_gaitIssueLabel(issue)),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+          ],
+        ),
+      );
+}
+
+class _GaitEpisodeCard extends StatelessWidget {
+  const _GaitEpisodeCard({required this.episode});
+
+  final GaitEpisodeSummary episode;
+
+  @override
+  Widget build(BuildContext context) {
+    final alertIssues = episode.issues
+        .where(
+          (issue) => const {
+            'walking_load_asymmetry',
+            'walking_forefoot_concentration',
+          }.contains(issue.issueType),
+        )
+        .toList(growable: false);
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.directions_walk_rounded),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _formatDate(episode.startedAtMs),
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+                _StatusPill(
+                  label: alertIssues.isEmpty ? '本段正常' : '本段提醒',
+                  active: alertIssues.isNotEmpty,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 20,
+              runSpacing: 10,
+              children: [
+                _DetailValue(label: '落脚', value: '${episode.stepCount} 次'),
+                _DetailValue(
+                  label: '左右落脚',
+                  value: '${episode.leftSteps} / ${episode.rightSteps}',
+                ),
+                _DetailValue(
+                  label: '平均步频',
+                  value: '${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟',
+                ),
+                _DetailValue(
+                  label: '左右受力差',
+                  value: _formatPercent(episode.loadAsymmetry),
+                ),
+              ],
+            ),
+            if (alertIssues.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: alertIssues
+                    .map(
+                      (issue) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(_gaitIssueLabel(issue)),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -329,7 +1034,7 @@ class _StatusPill extends StatelessWidget {
         label,
         style: TextStyle(
           color: color,
-          fontSize: 12,
+          fontSize: 13,
           fontWeight: FontWeight.w700,
         ),
       ),
@@ -349,7 +1054,7 @@ class _DetailValue extends StatelessWidget {
         children: [
           Text(
             label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
+            style: const TextStyle(fontSize: 13, color: Color(0xFF71807F)),
           ),
           const SizedBox(height: 3),
           Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
@@ -364,6 +1069,12 @@ class _RecoveryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final componentFeedback = event.componentFeedback
+        .where((item) => item.pressureIntervention)
+        .toList(growable: false);
+    if (componentFeedback.isNotEmpty) {
+      return _ComponentRecoveryPanel(feedback: componentFeedback);
+    }
     if (!_isLoadBiasRisk(event.riskType)) {
       return _NonLoadBiasRecoveryPanel(event: event);
     }
@@ -377,8 +1088,8 @@ class _RecoveryPanel extends StatelessWidget {
         ),
         child: Text(
           event.status == 'active'
-              ? '事件仍在持续，结束后将评估提醒前后的负载变化。'
-              : '本次事件没有完整的提醒前后对比数据。',
+              ? '提醒仍在持续，结束后再观察受力是否回到平稳状态。'
+              : '本次提醒前后没有足够资料，暂时无法判断是否改善。',
           style: const TextStyle(color: Color(0xFF60706F)),
         ),
       );
@@ -419,7 +1130,7 @@ class _RecoveryPanel extends StatelessWidget {
               ),
               const SizedBox(width: 7),
               Text(
-                '干预后评估：$result',
+                '提醒后变化：$result',
                 style: TextStyle(color: color, fontWeight: FontWeight.w800),
               ),
             ],
@@ -437,7 +1148,7 @@ class _RecoveryPanel extends StatelessWidget {
           if (event.interventionAction != null) ...[
             const SizedBox(height: 5),
             Text(
-              '干预记录：${_actionLabel(event.interventionAction!)}',
+              '观察方式：${_actionLabel(event.interventionAction!)}',
               style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
             ),
           ],
@@ -445,6 +1156,70 @@ class _RecoveryPanel extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ComponentRecoveryPanel extends StatelessWidget {
+  const _ComponentRecoveryPanel({required this.feedback});
+
+  final List<RiskComponentFeedbackRecord> feedback;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF2F5F5),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '提醒后的压力重新分配观察',
+              style: TextStyle(
+                color: Color(0xFF147D73),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            for (final item in feedback)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${_riskLabel(item.riskType)} · ${_sideLabel(item.riskSide)}',
+                          ),
+                        ),
+                        Text(
+                          _componentEffectLabel(item.effectLabel),
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      item.beforeValue != null && item.afterValue != null
+                          ? '${_componentMetricLabel(item)} '
+                              '${_formatComponentValue(item, item.beforeValue!)} → '
+                              '${_formatComponentValue(item, item.afterValue!)}'
+                              '${_componentChangeLabel(item)}'
+                          : '前后资料不足，暂时无法判断改善程度',
+                      style: const TextStyle(
+                        color: Color(0xFF60706F),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
 }
 
 class _NonLoadBiasRecoveryPanel extends StatelessWidget {
@@ -456,9 +1231,9 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final isActive = event.status == 'active';
     final description = switch (event.riskType) {
-      'temperature_asymmetry' => '温差事件不能用左右负载差判定干预效果；本页仅记录事件是否解除和恢复用时。',
-      'forefoot_high' => '当前版本尚未保存提醒前后的前掌区域变化量，因此不宣称干预后改善。',
-      _ => '本次事件没有可用于评估干预效果的同类指标。',
+      'temperature_asymmetry' => '温度提醒单独观察，不用受力变化来判断是否改善。',
+      _ when event.interventionStartedAtMs == null => '本次没有形成可比较的提醒前后记录。',
+      _ => '本次提醒前后资料不足，暂不判断改善程度。',
     };
     return Container(
       width: double.infinity,
@@ -480,7 +1255,7 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             description,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF60706F)),
+              style: const TextStyle(fontSize: 13, color: Color(0xFF60706F)),
           ),
           if (event.recoveryTimeMs != null) ...[
             const SizedBox(height: 5),
@@ -489,13 +1264,180 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
           if (event.interventionAction != null) ...[
             const SizedBox(height: 5),
             Text(
-              '干预记录：${_actionLabel(event.interventionAction!)}',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
+              '提醒记录：${_actionLabel(event.interventionAction!)}',
+              style: const TextStyle(fontSize: 13, color: Color(0xFF71807F)),
             ),
           ],
         ],
       ),
     );
+  }
+}
+
+class _AssessmentPanel extends StatelessWidget {
+  const _AssessmentPanel({
+    required this.summary,
+    required this.onEditProfile,
+    required this.onAddGlucose,
+  });
+
+  final SessionSummary? summary;
+  final VoidCallback? onEditProfile;
+  final VoidCallback onAddGlucose;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = summary;
+    final rating = data?.monitoringRating;
+    if (data == null || rating == null) {
+      return const _Message(
+        icon: Icons.assessment_outlined,
+        text: '暂无综合评估数据\n连接后端并完成本次穿戴基线后再刷新',
+      );
+    }
+    final realRecords =
+        data.temperatureEvidence.records.where((item) => !item.isDemo);
+    final demoRecords =
+        data.temperatureEvidence.records.where((item) => item.isDemo);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const Icon(Icons.assessment_outlined),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                      child: Text('近期监测评级',
+                          style: TextStyle(fontWeight: FontWeight.w800))),
+                  Text(rating.label,
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                ]),
+                const SizedBox(height: 8),
+                Text(rating.trendLabel),
+                if (rating.evidence.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  for (final item in rating.evidence) Text('• $item'),
+                ],
+                const Divider(height: 22),
+                Text(
+                  rating.dataQuality.isEmpty
+                      ? '本次资料完整，可用于趋势观察。'
+                      : '本次资料仍有部分缺失，评级仅供当前展示参考。',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF607D7B),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text('本评级仅描述 FootGuard 近期监测证据，不是医疗诊断、溃疡预测或 IWGDF 临床等级。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF718096))),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('温度日记录',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text(
+                    '真实设备观察：${data.temperatureEvidence.realConsecutiveDays >= 2 ? '已记录连续自然日变化' : data.temperatureEvidence.realDays > 0 ? '已记录 ${data.temperatureEvidence.realDays} 个自然日' : '暂无记录；现场演示不要求两日数据'}'),
+                if (realRecords.isEmpty)
+                  const Text('暂无真实设备日记录',
+                      style: TextStyle(color: Color(0xFF718096)))
+                else
+                  for (final item in realRecords.take(4)) _temperatureRow(item),
+                const Divider(height: 22),
+                Text(
+                    '演示证据：${data.temperatureEvidence.demoDays > 0 ? '单次演示已准备/完成' : '尚未准备'}'),
+                if (demoRecords.isEmpty)
+                  const Text('暂无演示记录',
+                      style: TextStyle(color: Color(0xFF718096)))
+                else
+                  for (final item in demoRecords.take(4)) _temperatureRow(item),
+                const SizedBox(height: 8),
+                const Text('演示记录始终与真实自然日证据分开，不改变真实评级。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF9A6A08))),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Card(
+          elevation: 0,
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.medical_information_outlined),
+                title: const Text('足部背景提示',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: Text(data.healthProfile.completeness == 'complete'
+                    ? '背景资料已填写'
+                    : '背景资料不足；不会猜测临床分级'),
+                trailing: IconButton(
+                  tooltip: '编辑足部背景',
+                  onPressed: onEditProfile,
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.bloodtype_outlined),
+                title: const Text('血糖记录',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: data.recentGlucoseReadings.isEmpty
+                    ? const Text('暂无记录；血糖仅作为综合解释背景')
+                    : Text(_glucoseLabel(data.recentGlucoseReadings.first)),
+                trailing: IconButton(
+                  tooltip: '新增血糖记录',
+                  onPressed: onAddGlucose,
+                  icon: const Icon(Icons.add_rounded),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  static Widget _temperatureRow(TemperatureDailyRecord item) => Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Row(children: [
+          if (item.isDemo)
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child: Text('演示',
+                  style: TextStyle(
+                      color: Color(0xFF9A6A08), fontWeight: FontWeight.w700)),
+            ),
+          Expanded(
+              child: Text(
+                  '${item.recordDate} ${_sideLabel(item.side)} ${item.zone}')),
+          Text('${item.correctedDeltaC.abs().toStringAsFixed(1)}℃'),
+        ]),
+      );
+
+  static String _glucoseLabel(GlucoseReading item) {
+    final context = switch (item.context) {
+      'fasting' => '空腹',
+      'pre_meal' => '餐前',
+      'post_meal' => '餐后',
+      _ => '随机',
+    };
+    return '最近：$context ${item.value.toStringAsFixed(1)} ${item.unit}；仅作背景，不改变评级';
   }
 }
 
@@ -519,20 +1461,41 @@ class _EmptyFilter extends StatelessWidget {
 }
 
 String _riskLabel(String riskType) => switch (riskType) {
-      'left_load_bias' => '左脚负载持续偏高',
-      'right_load_bias' => '右脚负载持续偏高',
-      'forefoot_high' => '前掌持续高载',
-      'temperature_asymmetry' => '同区温差异常',
-      _ => riskType,
+      'left_load_bias' => '左侧负载持续偏高',
+      'right_load_bias' => '右侧负载持续偏高',
+      'forefoot_high' => '前掌负荷持续集中',
+      'medial_load_concentration' => '内侧局部负荷集中',
+      'lateral_load_concentration' => '外侧局部负荷集中',
+      'temperature_asymmetry' => '同区温度趋势异常',
+      _ => '区域负荷集中',
     };
+
+String _gaitIssueLabel(GaitIssue issue) {
+  final side = issue.side == 'left'
+      ? '左脚'
+      : issue.side == 'right'
+          ? '右脚'
+          : '';
+  return switch (issue.issueType) {
+    'walking_load_asymmetry' => '$side行走负荷偏高',
+    'walking_forefoot_concentration' => '$side前掌反复受压',
+    _ => '行走受力观察',
+  };
+}
 
 IconData _riskIcon(String riskType) => switch (riskType) {
       'temperature_asymmetry' => Icons.device_thermostat_rounded,
       'forefoot_high' => Icons.directions_walk_rounded,
+      'medial_load_concentration' ||
+      'lateral_load_concentration' =>
+        Icons.warning_amber_rounded,
       _ => Icons.balance_rounded,
     };
 
 String _recoveryResult(double? ratio) {
+  if (ratio != null && ratio < 0) {
+    return '偏离增加';
+  }
   if (ratio != null && ratio >= 0.5) {
     return '明显改善';
   }
@@ -545,8 +1508,21 @@ String _recoveryResult(double? ratio) {
 bool _isLoadBiasRisk(String riskType) =>
     riskType == 'left_load_bias' || riskType == 'right_load_bias';
 
+bool _pressureEventImproved(RiskEventRecord event) {
+  final pressureFeedback = event.componentFeedback
+      .where((item) => item.pressureIntervention)
+      .toList(growable: false);
+  if (pressureFeedback.isNotEmpty) {
+    return pressureFeedback.any(
+      (item) => const {'effective', 'partial'}.contains(item.effectLabel),
+    );
+  }
+  return event.riskType != 'temperature_asymmetry' &&
+      const {'effective', 'partial'}.contains(event.effectLabel);
+}
+
 String _actionLabel(String action) => switch (action) {
-      'motor_vibration' => '马达提醒后调整姿势',
+      'motor_vibration' => '提醒后调整姿势',
       'followed_vibration' => '按震动提醒调整',
       _ => action,
     };
@@ -559,11 +1535,43 @@ String _sideLabel(String side) => switch (side) {
     };
 
 String _levelLabel(int level) => switch (level) {
-      >= 3 => '3级 · 持续风险',
-      2 => '2级 · 预警',
-      1 => '1级 · 关注',
-      _ => '0级 · 正常',
+      >= 3 => '持续未改善',
+      2 => '需要减负',
+      1 => '趋势观察',
+      _ => '正常',
     };
+
+String _componentEffectLabel(String value) => switch (value) {
+      'effective' => '明显改善',
+      'partial' => '部分改善',
+      'ineffective' => '未改善',
+      'worsened' => '偏离增加',
+      _ => '数据不足',
+    };
+
+String _componentMetricLabel(RiskComponentFeedbackRecord item) =>
+    switch (item.metricCode) {
+      'load_asymmetry_excess' => '相对偏载程度',
+      String code when code.contains('forefoot_excess') => '前掌超出个人基线',
+      String code when code.contains('medial_excess') => '内侧超出个人基线',
+      String code when code.contains('lateral_excess') => '外侧超出个人基线',
+      _ => '异常偏离程度',
+    };
+
+String _formatComponentValue(
+  RiskComponentFeedbackRecord item,
+  double value,
+) =>
+    item.metricUnit == 'celsius'
+        ? '${value.toStringAsFixed(1)}℃'
+        : _formatPercent(value);
+
+String _componentChangeLabel(RiskComponentFeedbackRecord item) {
+  final ratio = item.improvementRatio;
+  if (ratio == null) return '';
+  final value = (ratio.abs() * 100).round();
+  return ratio < 0 ? ' · 偏离增加 $value%' : ' · 改善 $value%';
+}
 
 String _statusLabel(String status) => switch (status) {
       'active' => '进行中',
@@ -598,19 +1606,27 @@ String _formatDuration(int durationMs) {
 String _formatPercent(double value) => '${(value * 100).toStringAsFixed(1)}%';
 
 class _Message extends StatelessWidget {
-  const _Message(
-      {required this.icon, required this.text, required this.onRetry});
+  const _Message({
+    required this.icon,
+    required this.text,
+    this.onRetry,
+  });
   final IconData icon;
   final String text;
-  final Future<void> Function() onRetry;
+  final Future<void> Function()? onRetry;
   @override
   Widget build(BuildContext context) => Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 52, color: const Color(0xFF78909C)),
-          const SizedBox(height: 12),
-          Text(text, textAlign: TextAlign.center),
-          const SizedBox(height: 12),
-          OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
-        ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 52, color: const Color(0xFF78909C)),
+            const SizedBox(height: 12),
+            Text(text, textAlign: TextAlign.center),
+            if (onRetry != null) ...[
+              const SizedBox(height: 12),
+              OutlinedButton(onPressed: onRetry, child: const Text('重新加载')),
+            ],
+          ],
+        ),
       );
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -70,12 +70,37 @@ class SensorBatchResponse(StrictModel):
     latest_risk: str
 
 
+class OfflineInterventionRecord(StrictModel):
+    event_id: str = Field(pattern=r"^local_evt_[0-9]+$")
+    command: "DeviceCommand"
+    risk: "RiskState"
+    active_risks: list["RiskState"] = Field(default_factory=list)
+    started_at_ms: int = Field(ge=0)
+    acknowledgements: list["AckRequest"] = Field(default_factory=list)
+    before_load_diff: float | None = Field(default=None, ge=0)
+    after_load_diff: float | None = Field(default=None, ge=0)
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
+    recovery_time_ms: int | None = Field(default=None, ge=0)
+
+
+class OfflineInterventionBatch(StrictModel):
+    protocol_version: Literal[1]
+    records: list[OfflineInterventionRecord] = Field(max_length=200)
+
+
+class OfflineInterventionResponse(StrictModel):
+    accepted: int = Field(ge=0)
+    rejected: int = Field(ge=0)
+
+
 class RiskState(StrictModel):
     risk_type: Literal[
         "normal",
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "medial_load_concentration",
+        "lateral_load_concentration",
         "temperature_asymmetry",
         "data_incomplete",
     ]
@@ -95,6 +120,7 @@ class AiAdviceRequest(StrictModel):
     temperature_available: bool = True
     left_connected: bool = True
     right_connected: bool = True
+    gait: "GaitSummary | None" = None
 
 
 class AiAdviceResponse(StrictModel):
@@ -146,6 +172,54 @@ class AiChatResponse(StrictModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class GaitIssue(StrictModel):
+    issue_type: Literal[
+        "walking_load_asymmetry",
+        "walking_forefoot_concentration",
+        "walking_medial_concentration",
+        "walking_lateral_concentration",
+        "step_timing_instability",
+    ]
+    side: Literal["left", "right", "both", "none"]
+    value: float = Field(ge=0)
+    threshold: float = Field(ge=0)
+
+
+class GaitEpisodeSummary(StrictModel):
+    episode_id: str
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int = Field(ge=0)
+    duration_ms: int = Field(ge=0)
+    step_count: int = Field(ge=0)
+    left_steps: int = Field(ge=0)
+    right_steps: int = Field(ge=0)
+    cadence_spm: float = Field(ge=0)
+    step_interval_cv: float = Field(ge=0)
+    left_load_index: float = Field(ge=0)
+    right_load_index: float = Field(ge=0)
+    load_asymmetry: float = Field(ge=0)
+    left_forefoot_ratio: float = Field(ge=0, le=1)
+    right_forefoot_ratio: float = Field(ge=0, le=1)
+    left_medial_ratio: float = Field(ge=0, le=1)
+    right_medial_ratio: float = Field(ge=0, le=1)
+    left_lateral_ratio: float = Field(ge=0, le=1)
+    right_lateral_ratio: float = Field(ge=0, le=1)
+    issues: list[GaitIssue] = Field(default_factory=list)
+
+
+class GaitSummary(StrictModel):
+    state: Literal["stationary", "walking", "insufficient_data"]
+    window_ms: int = Field(ge=0)
+    step_count: int = Field(ge=0)
+    left_steps: int = Field(ge=0)
+    right_steps: int = Field(ge=0)
+    cadence_spm: float | None = Field(default=None, ge=0)
+    last_completed_episode: GaitEpisodeSummary | None = None
+    confirmed_issues: list[GaitIssue] = Field(default_factory=list)
+    evidence_episode_count: int = Field(default=0, ge=0)
+    evidence_step_count: int = Field(default=0, ge=0)
+
+
 class RealtimeResponse(StrictModel):
     left: FootFrame | None
     right: FootFrame | None
@@ -154,11 +228,34 @@ class RealtimeResponse(StrictModel):
     load_bias: float | None
     load_diff: float | None
     motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    motor_vibration_active: bool = False
+    left_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    right_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    gait: GaitSummary = Field(
+        default_factory=lambda: GaitSummary(
+            state="insufficient_data",
+            window_ms=0,
+            step_count=0,
+            left_steps=0,
+            right_steps=0,
+        )
+    )
     pressure_available: bool = False
     temperature_available: bool = False
     risk: RiskState
     active_risks: list[RiskState] = Field(default_factory=list)
     regional_analysis: "RegionalAnalysis | None" = None
+    recovery_observation: "RecoveryObservation | None" = None
+
+
+class RecoveryObservation(StrictModel):
+    event_id: str
+    status: Literal["observing", "completed"]
+    started_at_ms: int = Field(ge=0)
+    deadline_at_ms: int = Field(ge=0)
+    remaining_ms: int = Field(ge=0)
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
+    component_feedback: list["RiskComponentFeedback"] = Field(default_factory=list)
 
 
 class RegionalAnalysis(StrictModel):
@@ -176,10 +273,22 @@ class RegionalAnalysis(StrictModel):
     left_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
     right_pressure_analysis_valid: list[bool] = Field(min_length=6, max_length=6)
     left_pressure_channel_status: list[
-        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+        Literal[
+            "ok",
+            "runtime_recovered",
+            "uncovered_in_baseline",
+            "raw_invalid",
+            "residual_suspect",
+        ]
     ] = Field(min_length=6, max_length=6)
     right_pressure_channel_status: list[
-        Literal["ok", "uncovered_in_baseline", "raw_invalid", "residual_suspect"]
+        Literal[
+            "ok",
+            "runtime_recovered",
+            "uncovered_in_baseline",
+            "raw_invalid",
+            "residual_suspect",
+        ]
     ] = Field(min_length=6, max_length=6)
     temperature_available: bool = False
     left_temperature_valid: list[bool] = Field(min_length=4, max_length=4)
@@ -187,6 +296,11 @@ class RegionalAnalysis(StrictModel):
     temperature_delta_c: list[float | None] = Field(min_length=4, max_length=4)
     left_temperature_scores: list[float] = Field(min_length=4, max_length=4)
     right_temperature_scores: list[float] = Field(min_length=4, max_length=4)
+    temperature_offset_status: list[str] = Field(min_length=4, max_length=4)
+    temperature_offset_channels: list[int] = Field(default_factory=list)
+    temperature_untrusted_channels: list[int] = Field(default_factory=list)
+    temperature_risk_enabled: bool = False
+    temperature_risk_reason: str = "baseline_not_ready"
 
 
 class DeviceCommand(StrictModel):
@@ -201,6 +315,8 @@ class DeviceCommand(StrictModel):
         "left_load_bias",
         "right_load_bias",
         "forefoot_high",
+        "medial_load_concentration",
+        "lateral_load_concentration",
         "temperature_asymmetry",
         "risk_persisted",
         "cancel",
@@ -264,9 +380,22 @@ class CalibrationStatus(StrictModel):
         "waiting_for_data",
         "pressure_unavailable",
         "not_loaded",
+        "left_not_loaded",
+        "right_not_loaded",
+        "pressure_residual",
         "moving",
         "unstable",
+        "temperature_reference_learning",
+        "temperature_unavailable",
+        "temperature_unstable",
     ] = "waiting_for_data"
+    empty_temperature_reference_ready: bool = False
+    empty_sample_count: int = Field(default=0, ge=0)
+    empty_required_samples: int = Field(default=60, gt=0)
+    temperature_risk_enabled: bool = False
+    temperature_offset_channels: list[int] = Field(default_factory=list)
+    temperature_untrusted_channels: list[int] = Field(default_factory=list)
+    temperature_risk_reason: str = "baseline_not_ready"
 
 
 class RiskEventOut(StrictModel):
@@ -281,16 +410,220 @@ class RiskEventOut(StrictModel):
     before_load_diff: float | None
     after_load_diff: float | None
     intervention_action: str | None = None
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"] | None = None
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"] | None = None
     recovery_time_ms: int | None = Field(default=None, ge=0)
     status: str
     active_risks: list[RiskState] = Field(default_factory=list)
+    intervention_started_at_ms: int | None = Field(default=None, ge=0)
+    component_feedback: list["RiskComponentFeedback"] = Field(default_factory=list)
+
+
+class RiskComponentFeedback(StrictModel):
+    risk_type: str
+    risk_side: str
+    before_value: float | None = None
+    after_value: float | None = None
+    improvement_ratio: float | None = None
+    effect_label: Literal[
+        "effective", "partial", "ineffective", "worsened", "unknown", "observation_only"
+    ] = "unknown"
+    pressure_intervention: bool = True
+    metric_code: str | None = None
+    metric_unit: str | None = None
+
+
+class RiskImprovementSummary(StrictModel):
+    risk_type: str
+    risk_side: str
+    evaluated_count: int = Field(default=0, ge=0)
+    effective_count: int = Field(default=0, ge=0)
+    partial_count: int = Field(default=0, ge=0)
+    ineffective_count: int = Field(default=0, ge=0)
+    worsened_count: int = Field(default=0, ge=0)
+    data_insufficient_count: int = Field(default=0, ge=0)
+    median_improvement_ratio: float | None = None
+    before_median: float | None = None
+    after_median: float | None = None
+    metric_unit: str | None = None
+
+
+class GaitTrendSummary(StrictModel):
+    evidence_episode_count: int = Field(default=0, ge=0)
+    evidence_step_count: int = Field(default=0, ge=0)
+    confirmed_issues: list[GaitIssue] = Field(default_factory=list)
+
+
+class TemperatureDailyRecordOut(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    record_id: str
+    record_date: str
+    side: Literal["left", "right"]
+    zone: Literal["T1", "T2", "T3", "T4"]
+    raw_delta_c: float
+    corrected_delta_c: float
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int = Field(ge=0)
+    valid_zone_count: int = Field(ge=0, le=4)
+    source: Literal["device_observation", "demo"]
+    load_state: str
+    motion_state: str
+    quality: str
+    demo_session_id: str | None = None
+
+
+class TemperatureEvidenceSummary(StrictModel):
+    real_days: int = Field(default=0, ge=0)
+    real_consecutive_days: int = Field(default=0, ge=0)
+    demo_days: int = Field(default=0, ge=0)
+    status: Literal[
+        "no_data",
+        "single_day",
+        "two_day",
+        "demo_single",
+        "insufficient_data",
+    ] = "no_data"
+    records: list[TemperatureDailyRecordOut] = Field(default_factory=list)
+
+
+class MonitoringRatingSummary(StrictModel):
+    rating: Literal["normal", "attention", "review", "persistent", "insufficient_data"]
+    level: int = Field(ge=0, le=4)
+    label: str
+    trend: Literal["improving", "stable", "worsening", "insufficient_data", "unavailable"] = "unavailable"
+    trend_label: str
+    evidence: list[str] = Field(default_factory=list)
+    data_quality: list[str] = Field(default_factory=list)
+    session_id: str | None = None
+    previous_session_id: str | None = None
+    is_demo_only: bool = False
+
+
+class HealthProfile(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    ulcer_or_amputation: Literal["no", "yes", "unknown"] = "unknown"
+    sensory_or_circulation_issue: Literal["no", "yes", "unknown"] = "unknown"
+    completeness: Literal["complete", "incomplete"] = "incomplete"
+
+
+class HealthProfileUpdate(StrictModel):
+    ulcer_or_amputation: Literal["no", "yes", "unknown"] = "unknown"
+    sensory_or_circulation_issue: Literal["no", "yes", "unknown"] = "unknown"
+
+
+class GlucoseReading(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    reading_id: str
+    value: float = Field(gt=0, le=1000)
+    unit: Literal["mmol/L", "mg/dL"]
+    context: Literal["fasting", "pre_meal", "post_meal", "random"]
+    measured_at_ms: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=200)
+
+    @computed_field
+    @property
+    def value_mmol_l(self) -> float:
+        return self.value if self.unit == "mmol/L" else self.value / 18.0
+
+
+class GlucoseReadingCreate(StrictModel):
+    value: float = Field(gt=0, le=1000)
+    unit: Literal["mmol/L", "mg/dL"]
+    context: Literal["fasting", "pre_meal", "post_meal", "random"]
+    measured_at_ms: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_unit_range(self) -> "GlucoseReadingCreate":
+        upper = 55.5 if self.unit == "mmol/L" else 1000.0
+        if self.value > upper:
+            raise ValueError(f"value exceeds the supported range for {self.unit}")
+        return self
+
+
+class AssessmentSummary(StrictModel):
+    rating: MonitoringRatingSummary
+    previous_rating: MonitoringRatingSummary | None = None
+    temperature: TemperatureEvidenceSummary = Field(default_factory=TemperatureEvidenceSummary)
+    health_profile: HealthProfile = Field(default_factory=HealthProfile)
+    glucose_readings: list[GlucoseReading] = Field(default_factory=list)
+
+
+class TemperatureDemoResponse(StrictModel):
+    active: bool
+    demo_session_id: str | None = None
+    seed_date: str | None = None
+    current_date: str | None = None
+    status: str = "inactive"
+
+
+class SessionSummary(StrictModel):
+    session_status: Literal["live", "recent", "empty"]
+    data_source: Literal["ble", "mock", "csv_replay", "none"] = "none"
+    last_data_at_ms: int | None = Field(default=None, ge=0)
+    baseline_ready: bool = False
+    pressure_available: bool = False
+    temperature_available: bool = False
+    left_device_id: str | None = None
+    right_device_id: str | None = None
+    left_valid_pressure_channels: int = Field(default=0, ge=0, le=6)
+    right_valid_pressure_channels: int = Field(default=0, ge=0, le=6)
+    event_count: int = Field(ge=0)
+    highest_risk_level: int = Field(ge=0, le=3)
+    risk_counts: dict[str, int] = Field(default_factory=dict)
+    longest_duration_ms: dict[str, int] = Field(default_factory=dict)
+    motor_command_count: int = Field(default=0, ge=0)
+    motor_executed_count: int = Field(default=0, ge=0)
+    motor_ack_count: int = Field(default=0, ge=0)
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+    improvement_summary: list[RiskImprovementSummary] = Field(default_factory=list)
+    sensor_summary: dict[str, float] = Field(default_factory=dict)
+    pressure_untrusted_channels: list[str] = Field(default_factory=list)
+    temperature_valid_pairs: int = Field(default=0, ge=0, le=4)
+    latest_events: list[RiskEventOut] = Field(default_factory=list)
+    gait_episode_count: int = Field(default=0, ge=0)
+    latest_gait_episodes: list[GaitEpisodeSummary] = Field(default_factory=list)
+    gait_trend: GaitTrendSummary = Field(default_factory=GaitTrendSummary)
+    monitoring_rating: MonitoringRatingSummary | None = None
+    temperature_evidence: TemperatureEvidenceSummary = Field(default_factory=TemperatureEvidenceSummary)
+    health_profile: HealthProfile = Field(default_factory=HealthProfile)
+    recent_glucose_readings: list[GlucoseReading] = Field(default_factory=list)
+
+
+class SessionAdviceResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    session_status: Literal["live", "recent", "empty"]
+    advice: str = Field(min_length=1, max_length=700)
+
+
+class SessionQuestionRequest(StrictModel):
+    question_key: Literal[
+        "session_priority",
+        "session_pressure_area",
+        "session_improvement",
+        "session_next_test",
+        "session_data_quality",
+    ]
+
+
+class SessionQuestionResponse(StrictModel):
+    protocol_version: Literal[1] = 1
+    provider: str = Field(min_length=1, max_length=64)
+    question_key: Literal[
+        "session_priority",
+        "session_pressure_area",
+        "session_improvement",
+        "session_next_test",
+        "session_data_quality",
+    ]
+    question: str = Field(min_length=1, max_length=100)
+    answer: str = Field(min_length=1, max_length=600)
 
 
 class InterventionFeedbackRequest(StrictModel):
     event_id: str = Field(min_length=1, max_length=64)
     user_action: str = Field(min_length=1, max_length=64)
-    effect_label: Literal["effective", "partial", "ineffective", "unknown"]
+    effect_label: Literal["effective", "partial", "ineffective", "worsened", "unknown"]
     before_load_diff: float = Field(ge=0)
     after_load_diff: float = Field(ge=0)
     recovery_time_ms: int = Field(ge=0)

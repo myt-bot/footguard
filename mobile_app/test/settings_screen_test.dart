@@ -3,6 +3,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/config/app_config.dart';
 import 'package:footguard/data/api_client.dart';
 import 'package:footguard/screens/settings_screen.dart';
+import 'package:footguard/models/assessment.dart';
+import 'package:footguard/services/local_tts_service.dart';
+
+class _FakeTtsSpeaker implements TtsSpeaker {
+  final spoken = <String>[];
+
+  @override
+  Future<bool> speak(String text) async {
+    spoken.add(text);
+    return true;
+  }
+
+  @override
+  Future<void> stop() async {}
+}
 
 Future<void> _scrollUntilVisible(
   WidgetTester tester,
@@ -26,7 +41,9 @@ Future<void> _scrollUntilVisible(
 }
 
 void main() {
-  testWidgets('settings display mock scenarios in Chinese', (tester) async {
+  testWidgets('release settings expose BLE mode without simulation controls', (
+    tester,
+  ) async {
     AppSettings? applied;
     await tester.pumpWidget(
       MaterialApp(
@@ -39,114 +56,64 @@ void main() {
       ),
     );
 
-    expect(find.text('模拟场景'), findsOneWidget);
-    expect(find.text('正常站立'), findsWidgets);
-    expect(find.textContaining('双脚稳定承重'), findsOneWidget);
-    expect(find.text('normal_stand'), findsNothing);
-
-    await tester.tap(find.text('正常站立').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('左脚持续偏载').last);
-    await tester.pumpAndSettle();
-    await _scrollUntilVisible(tester, find.text('应用设置'));
-    await tester.tap(find.text('应用设置'));
-    await tester.pump();
-
-    expect(applied?.mockScenario, 'left_load_bias');
-  });
-
-  testWidgets('CSV mode exposes dataset and replay speed controls',
-      (tester) async {
-    AppSettings? applied;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: const AppSettings(dataMode: FootDataMode.csvReplay),
-            onChanged: (settings) => applied = settings,
-          ),
-        ),
-      ),
-    );
-
-    expect(find.text('CSV 回放数据'), findsOneWidget);
-    expect(find.text('提醒前后恢复演示'), findsOneWidget);
-    expect(find.text('CSV 回放速度'), findsOneWidget);
+    expect(find.text('BLE 真机模式'), findsOneWidget);
+    expect(find.text('数据源'), findsNothing);
     expect(find.text('模拟场景'), findsNothing);
-
-    await tester.tap(find.text('提醒前后恢复演示'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('正常行走').last);
-    await tester.pumpAndSettle();
-    await _scrollUntilVisible(tester, find.text('应用设置'));
-    await tester.tap(find.text('应用设置'));
-    await tester.pump();
-
-    expect(applied?.csvAsset, 'assets/sample_data/normal_walk.csv');
-  });
-
-  testWidgets('backend address can be validated before applying settings',
-      (tester) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: const AppSettings(),
-            onChanged: (_) {},
-            healthCheck: (baseUrl) async => baseUrl == 'http://10.0.2.2:8000',
-          ),
-        ),
-      ),
-    );
-
-    await tester.tap(find.byTooltip('检测连接'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('后端连接正常'), findsOneWidget);
-  });
-
-  testWidgets('invalid backend address is not applied', (tester) async {
-    AppSettings? applied;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SettingsScreen(
-            settings: const AppSettings(),
-            onChanged: (settings) => applied = settings,
-          ),
-        ),
-      ),
-    );
-
+    expect(find.text('CSV 回放数据'), findsNothing);
+    expect(find.text('FastAPI 后端地址'), findsOneWidget);
+    expect(find.text('语音提醒'), findsOneWidget);
     await tester.enterText(
       find.byType(TextField),
-      '192.168.1.10:8000',
+      'http://192.168.1.6:8000/',
     );
     await _scrollUntilVisible(tester, find.text('应用设置'));
     await tester.tap(find.text('应用设置'));
     await tester.pump();
 
-    expect(applied, isNull);
-    await _scrollUntilVisible(
-      tester,
-      find.byKey(const ValueKey('backend-status')),
-      delta: -300,
-    );
-    expect(
-      find.text('请输入以 http:// 或 https:// 开头的完整地址'),
-      findsOneWidget,
-    );
+    expect(applied?.dataMode, FootDataMode.ble);
+    expect(applied?.backendUrl, 'http://192.168.1.6:8000');
   });
 
-  testWidgets('baseline status is visible and reset requires confirmation',
-      (tester) async {
+  testWidgets('voice switch persists and test button uses local TTS', (
+    tester,
+  ) async {
+    final speaker = _FakeTtsSpeaker();
+    AppSettings? applied;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: const AppSettings(),
+            onChanged: (settings) => applied = settings,
+            ttsSpeaker: speaker,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('测试中文语音'));
+    await tester.pumpAndSettle();
+    expect(speaker.spoken, ['语音提醒已开启。']);
+    expect(find.text('中文语音测试成功'), findsOneWidget);
+
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(applied?.voiceEnabled, isFalse);
+    expect(find.text('测试中文语音'), findsOneWidget);
+  });
+
+  testWidgets('baseline status is visible and reset requires confirmation', (
+    tester,
+  ) async {
     var resetCalls = 0;
+    var resetNotifications = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: SettingsScreen(
             settings: const AppSettings(),
             onChanged: (_) {},
+            onCalibrationReset: () => resetNotifications += 1,
             calibrationStatusLoader: (_) async => const CalibrationStatus(
               baselineReady: true,
               sampleCount: 40,
@@ -180,6 +147,48 @@ void main() {
     await tester.tap(find.text('确认重新校准'));
     await tester.pumpAndSettle();
     expect(resetCalls, 1);
+    expect(resetNotifications, 1);
     expect(find.textContaining('学习中：0/40'), findsOneWidget);
+  });
+
+  testWidgets('temperature demo can be prepared and reset with explicit state',
+      (
+    tester,
+  ) async {
+    var starts = 0;
+    var resets = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: const AppSettings(),
+            onChanged: (_) {},
+            temperatureDemoStarter: (_) async {
+              starts += 1;
+              return const TemperatureDemoState(active: true, status: 'ready');
+            },
+            temperatureDemoResetter: (_) async {
+              resets += 1;
+              return const TemperatureDemoState();
+            },
+          ),
+        ),
+      ),
+    );
+
+    await _scrollUntilVisible(tester, find.text('准备演示'));
+    await tester.tap(find.text('准备演示'));
+    await tester.pumpAndSettle();
+    expect(starts, 1);
+    expect(
+      find.byKey(const ValueKey('temperature-demo-status')),
+      findsOneWidget,
+    );
+    expect(find.text('演示已准备：请脱鞋手按右脚 T4，持续到语音提醒。'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('重置温度演示'));
+    await tester.pumpAndSettle();
+    expect(resets, 1);
+    expect(find.text('温度演示记录已重置'), findsOneWidget);
   });
 }

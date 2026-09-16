@@ -41,7 +41,7 @@ GATT Write Response 只表示设备收到了写入，不表示指令已经执行
 5. 发送 JSON 前必须确认 `json_utf8_length <= negotiated_mtu - 3`。
 6. MTU 或长度不足时不得静默截断，应报告 MTU_INSUFFICIENT 并停止对应操作。
 7. v1 不支持 SensorData 或 JSON 分包，也不允许在一次 Notify 中拼接多条消息。
-8. 第一版 SensorData 采样和通知频率从 5 Hz 开始。
+8. SensorData 帧在固件 `0.2.0` 起以 20 Hz 通知；压力和 MPU 每帧采集，温度每 4 帧刷新一次并在中间帧复用最近采样。客户端必须使用时间戳计算间隔，不能假设固定频率。
 9. DeviceStatus 仅在连接后读取或状态变化时通知；AckEvent 仅在命令产生最终结果时通知。
 
 ## 4. SensorData 固定帧

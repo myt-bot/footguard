@@ -17,15 +17,36 @@ def create_database(url: str) -> tuple[Engine, sessionmaker[Session]]:
     # create_all does not add columns to an existing SQLite database. Keep the
     # competition database forward-compatible without deleting event history.
     if engine.dialect.name == "sqlite":
-        columns = {column["name"] for column in inspect(engine).get_columns("risk_events")}
-        if "risk_components_json" not in columns:
-            with engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "ALTER TABLE risk_events ADD COLUMN "
-                        "risk_components_json VARCHAR(1024) NOT NULL DEFAULT '[]'"
-                    )
+        migrations = {
+            "risk_events": {
+                "risk_components_json": "VARCHAR(1024) NOT NULL DEFAULT '[]'",
+            },
+            "calibration_profiles": {
+                "empty_temperature_delta_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
+                "empty_temperature_mad_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
+                "empty_temperature_slope_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
+                "temperature_offset_status_json": "VARCHAR(256) NOT NULL DEFAULT '[\"unstable\",\"unstable\",\"unstable\",\"unstable\"]'",
+                "wearing_temperature_mad_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
+                "regional_share_mad_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
+            },
+            "temperature_daily_records": {
+                "demo_session_id": "VARCHAR(64)",
+                "motion_state": "VARCHAR(16) NOT NULL DEFAULT 'unknown'",
+            },
+        }
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_sensor_frames_side_timestamp_ms "
+                    "ON sensor_frames (side, timestamp_ms)"
                 )
+            )
+            for table, table_migrations in migrations.items():
+                columns = {column["name"] for column in inspect(engine).get_columns(table)}
+                for column, definition in table_migrations.items():
+                    if column not in columns:
+                        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
     return engine, factory
 
 

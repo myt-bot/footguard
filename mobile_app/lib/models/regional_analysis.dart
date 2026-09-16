@@ -49,6 +49,16 @@ class RegionalAnalysis {
     required this.temperatureDeltaC,
     required this.leftTemperatureScores,
     required this.rightTemperatureScores,
+    this.temperatureOffsetStatus = const [
+      'unstable',
+      'unstable',
+      'unstable',
+      'unstable'
+    ],
+    this.temperatureOffsetChannels = const [],
+    this.temperatureUntrustedChannels = const [0, 1, 2, 3],
+    this.temperatureRiskEnabled = false,
+    this.temperatureRiskReason = 'baseline_not_ready',
   });
 
   final bool baselineReady;
@@ -72,6 +82,11 @@ class RegionalAnalysis {
   final List<double?> temperatureDeltaC;
   final List<double> leftTemperatureScores;
   final List<double> rightTemperatureScores;
+  final List<String> temperatureOffsetStatus;
+  final List<int> temperatureOffsetChannels;
+  final List<int> temperatureUntrustedChannels;
+  final bool temperatureRiskEnabled;
+  final String temperatureRiskReason;
 
   static List<double> _values(dynamic raw, int length, String field) {
     if (raw is! List ||
@@ -150,6 +165,21 @@ class RegionalAnalysis {
         4,
         'right_temperature_scores',
       ),
+      temperatureOffsetStatus: _statuses(json['temperature_offset_status'], 4),
+      temperatureOffsetChannels:
+          (json['temperature_offset_channels'] as List<dynamic>? ?? const [])
+              .whereType<num>()
+              .map((value) => value.toInt())
+              .toList(growable: false),
+      temperatureUntrustedChannels:
+          (json['temperature_untrusted_channels'] as List<dynamic>? ?? const [])
+              .whereType<num>()
+              .map((value) => value.toInt())
+              .toList(growable: false),
+      temperatureRiskEnabled:
+          json['temperature_risk_enabled'] as bool? ?? false,
+      temperatureRiskReason:
+          json['temperature_risk_reason'] as String? ?? 'baseline_not_ready',
     );
   }
 }

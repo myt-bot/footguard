@@ -12,11 +12,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app.main import create_app
-from backend.app.schemas import AiAdviceRequest, AiChatRequest, AiQuestionRequest
+from backend.app.schemas import (
+    AiAdviceRequest,
+    AiChatRequest,
+    AiQuestionRequest,
+    RiskImprovementSummary,
+    SessionSummary,
+    TemperatureDailyRecordOut,
+    TemperatureEvidenceSummary,
+    HealthProfile,
+)
 from backend.app.services.ai_advisor_service import (
     generate_advice,
     generate_chat_answer,
     generate_question_answer,
+    generate_session_advice,
 )
 
 
@@ -79,7 +89,7 @@ def test_normal_advice_never_proposes_motor_action(client: TestClient) -> None:
     assert result["candidate_pattern"] == "off"
 
 
-def test_severe_left_bias_returns_explanation_and_candidate(
+def test_level_two_left_bias_returns_explanation_without_motor_candidate(
     client: TestClient,
 ) -> None:
     payload = advice_payload(
@@ -94,8 +104,8 @@ def test_severe_left_bias_returns_explanation_and_candidate(
     assert response.status_code == 200
     result = response.json()
     assert result["risk_level"] == 2
-    assert result["target"] == "left"
-    assert result["candidate_pattern"] == "double"
+    assert result["target"] == "none"
+    assert result["candidate_pattern"] == "off"
     assert "0.310" in result["explanation"]
     assert "不能替代医疗诊断" in result["advice"]
 
@@ -252,6 +262,129 @@ def test_free_chat_explains_wearing_calibration() -> None:
     assert "本次穿戴基线" in result.answer
 
 
+def test_session_advice_prioritizes_evidence_instead_of_replaying_events() -> None:
+    summary = SessionSummary(
+        session_status="live",
+        baseline_ready=True,
+        event_count=5,
+        highest_risk_level=3,
+        risk_counts={"left_load_bias": 3, "forefoot_high": 2},
+        motor_executed_count=4,
+        improvement_summary=[
+            RiskImprovementSummary(
+                risk_type="left_load_bias",
+                risk_side="left",
+                evaluated_count=3,
+                effective_count=2,
+                ineffective_count=1,
+                median_improvement_ratio=0.42,
+                metric_unit="ratio",
+            )
+        ],
+        left_valid_pressure_channels=6,
+        right_valid_pressure_channels=6,
+        temperature_valid_pairs=4,
+    )
+
+    result = generate_session_advice(summary)
+
+    assert "最近情况：" in result.advice
+    assert "依据：" in result.advice
+    assert "建议：" in result.advice
+    assert "左脚受力偏高" in result.advice
+    assert "3次提醒" in result.advice
+    assert "有效通道" not in result.advice
+    assert "工程" not in result.advice
+
+
+def test_session_advice_includes_demo_temperature_and_foot_background() -> None:
+    summary = SessionSummary(
+        session_status="recent",
+        baseline_ready=True,
+        pressure_available=True,
+        event_count=0,
+        highest_risk_level=1,
+        monitoring_rating={
+            "rating": "attention",
+            "level": 1,
+            "label": "关注",
+            "trend": "stable",
+            "trend_label": "与上次会话基本稳定",
+        },
+        temperature_evidence=TemperatureEvidenceSummary(
+            demo_days=1,
+            status="demo_single",
+            records=[
+                TemperatureDailyRecordOut(
+                    record_id="temp_demo_1",
+                    record_date="2026-08-23",
+                    side="right",
+                    zone="T4",
+                    raw_delta_c=3.0,
+                    corrected_delta_c=2.8,
+                    started_at_ms=1,
+                    ended_at_ms=2,
+                    valid_zone_count=4,
+                    source="demo",
+                    load_state="unloaded",
+                    motion_state="stationary",
+                    quality="usable",
+                )
+            ],
+        ),
+        health_profile=HealthProfile(
+            ulcer_or_amputation="yes",
+            sensory_or_circulation_issue="unknown",
+            completeness="incomplete",
+        ),
+    )
+
+    result = generate_session_advice(summary)
+
+    assert "右脚T4" in result.advice
+    assert "足部背景" in result.advice
+    assert "演示" in result.advice
+
+
+def test_cloud_session_advice_receives_and_returns_audience_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOOTGUARD_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("FOOTGUARD_AI_BASE_URL", "https://model.example/v1")
+    monkeypatch.setenv("FOOTGUARD_AI_API_KEY", "test-secret")
+    monkeypatch.setenv("FOOTGUARD_AI_MODEL", "competition-model")
+    summary = SessionSummary(
+        session_status="recent",
+        baseline_ready=True,
+        pressure_available=True,
+        event_count=2,
+        highest_risk_level=2,
+        risk_counts={"left_load_bias": 2},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        audience_summary = body["messages"][1]["content"]
+        assert "risk_counts" not in audience_summary
+        assert "left_valid_pressure_channels" not in audience_summary
+        assert "左脚受力偏高" in audience_summary
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"advice":"最近左脚受力偏高，建议检查鞋内情况。"}'}},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as cloud_client:
+        result = generate_session_advice(summary, client=cloud_client)
+
+    assert result.provider == "openai-compatible:competition-model"
+    assert result.advice.startswith("最近左脚受力偏高")
+    assert "不能替代医疗诊断" in result.advice
+
+
 def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,8 +429,8 @@ def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(
     assert result.provider == "openai-compatible:competition-model"
     assert result.explanation == "左脚负荷持续偏高。"
     assert "不能替代医疗诊断" in result.advice
-    assert result.target == "left"
-    assert result.candidate_pattern == "double"
+    assert result.target == "none"
+    assert result.candidate_pattern == "off"
 
 
 def test_cloud_failure_falls_back_to_safe_mock(
@@ -322,8 +455,8 @@ def test_cloud_failure_falls_back_to_safe_mock(
         )
 
     assert result.provider == "mock-risk-advisor-v1:fallback"
-    assert result.target == "right"
-    assert result.candidate_pattern == "short"
+    assert result.target == "none"
+    assert result.candidate_pattern == "off"
 
 
 def test_combined_risks_use_target_union_and_forefoot_pattern(
@@ -332,15 +465,16 @@ def test_combined_risks_use_target_union_and_forefoot_pattern(
     payload = advice_payload(
         risk_type="right_load_bias",
         risk_side="right",
-        risk_level=2,
+        risk_level=3,
+        duration_ms=25_000,
     )
     payload["active_risks"] = [
         payload["risk"],
         {
             "risk_type": "forefoot_high",
             "risk_side": "left",
-            "risk_level": 2,
-            "duration_ms": 7_600,
+            "risk_level": 3,
+            "duration_ms": 25_000,
         },
     ]
 

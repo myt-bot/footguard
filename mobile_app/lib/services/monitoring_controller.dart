@@ -1,18 +1,67 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
 import '../data/api_client.dart';
 import '../data/foot_data_source.dart';
-import '../models/ai_advice.dart';
 import '../models/ai_chat_answer.dart';
 import '../models/ai_question_answer.dart';
 import '../models/device_command.dart';
 import '../models/foot_frame.dart';
+import '../models/gait_summary.dart';
 import '../models/risk_state.dart';
 import '../models/regional_analysis.dart';
+import '../models/session_advice.dart';
+import '../models/offline_intervention.dart';
+import '../models/assessment.dart';
 import 'frame_pairing_service.dart';
 import 'ble_command_bridge.dart';
+import 'local_risk_engine.dart';
+import 'offline_monitoring_store.dart';
+import 'risk_speech_coordinator.dart';
+
+const _gaitNoticeRecencyMs = 10000;
+
+String? gaitEpisodeNotice(
+  GaitSummary gait, {
+  required int latestTimestampMs,
+}) {
+  final episode = gait.lastCompletedEpisode;
+  if (episode == null ||
+      latestTimestampMs <= 0 ||
+      latestTimestampMs - episode.endedAtMs > _gaitNoticeRecencyMs) {
+    return null;
+  }
+  final issues = episode.issues
+      .where(
+        (issue) => const {
+          'walking_load_asymmetry',
+          'walking_forefoot_concentration',
+        }.contains(issue.issueType),
+      )
+      .toList(growable: false);
+  if (issues.isEmpty) return null;
+  final guidance = issues.any(
+    (issue) => issue.issueType == 'walking_forefoot_concentration',
+  )
+      ? '请调整走路姿势，放慢脚步并避免前掌持续受力。'
+      : '请调整走路姿势，尽量保持双脚受力均衡。';
+  return '本段行走发现${issues.map(_gaitIssueVoiceLabel).join('、')}。$guidance';
+}
+
+String _gaitIssueVoiceLabel(GaitIssue issue) {
+  final side = issue.side == 'left'
+      ? '左脚'
+      : issue.side == 'right'
+          ? '右脚'
+          : '';
+  return switch (issue.issueType) {
+    'walking_load_asymmetry' => '$side行走负荷持续偏高',
+    'walking_forefoot_concentration' => '$side前掌反复受压',
+    _ => '行走负荷趋势异常',
+  };
+}
 
 class MonitoringController extends ChangeNotifier {
   MonitoringController({
@@ -25,20 +74,36 @@ class MonitoringController extends ChangeNotifier {
   final FootGuardApiClient api;
   final BleCommandBridge? commandBridge;
   final FramePairingService _pairing = FramePairingService();
+  final LocalRiskEngine _localRiskEngine = LocalRiskEngine();
+  final OfflineMonitoringStore _offlineStore = OfflineMonitoringStore();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  List<FootFrame>? _pendingUploadPair;
+  final List<List<FootFrame>> _pendingUploadPairs = [];
+  final List<OfflineIntervention> _pendingOfflineInterventions = [];
   Timer? _refreshTimer;
+  Timer? _recoveryTimer;
+  Timer? _uploadKickTimer;
+  Timer? _queuePersistTimer;
   bool _uploading = false;
+  int _offlineReplayPairsRemaining = 0;
+  int _syncFailureCount = 0;
+  DateTime? _nextSyncAttemptAt;
+  bool _localBaselinePersisted = false;
   bool _refreshing = false;
   bool _disposed = false;
   final Map<String, List<double>> _displayPressureBySide = {};
-  bool _aiAdviceLoading = false;
   bool _aiQuestionLoading = false;
   bool _aiChatLoading = false;
   bool _calibrationResetting = false;
-  String? _lastAdviceSignature;
-  String? _aiQuestionSignature;
-  DateTime? _lastAdviceAttemptAt;
+  DateTime? _lastSessionAdviceAt;
+  LocalRiskResult? _localResult;
+  final RiskSpeechCoordinator _riskSpeechCoordinator = RiskSpeechCoordinator();
+  String? _announcedGaitEpisodeId;
+  String? _pendingLocalEventId;
+  OfflineIntervention? _activeOfflineIntervention;
+  int _noticeSequence = 0;
+  int _gaitNoticeSequence = 0;
+  int? _handledBackendResetAtMs;
+  DateTime? _lastAssessmentAt;
 
   FootFrame? left;
   FootFrame? right;
@@ -50,26 +115,48 @@ class MonitoringController extends ChangeNotifier {
   bool backendOnline = false;
   String? _sourceError;
   String? _backendError;
+  String? _syncWarning;
   String? get errorMessage => _sourceError ?? _backendError;
+  String? get syncWarningMessage => _syncWarning;
   String motorStatus = '暂无马达提醒';
   DateTime? lastUpdated;
   double? loadBias;
   double? loadDiff;
   int? syncErrorMs;
   String motionState = 'unavailable';
+  bool motorVibrationActive = false;
+  String leftMotionState = 'unavailable';
+  String rightMotionState = 'unavailable';
+  GaitSummary gait = const GaitSummary.insufficient();
   RegionalAnalysis? regionalAnalysis;
-  AiAdvice? aiAdvice;
   AiQuestionAnswer? aiQuestionAnswer;
   AiChatAnswer? aiChatAnswer;
   CalibrationStatus? calibrationStatus;
-  String aiAdviceStatus = '当前规则引擎未识别到需要解释的风险';
+  SessionAdvice? sessionAdvice;
+  TemperatureEvidence temperatureEvidence = const TemperatureEvidence();
+  bool sessionAdviceLoading = false;
+  RecoveryObservation? recoveryObservation;
+  String? riskNoticeMessage;
+  String? gaitNoticeMessage;
   String aiQuestionStatus = '请选择一个常见问题';
   String aiChatStatus = '可询问当前状态、设备检查或日常观察建议';
+  String calibrationStage = 'empty_reference';
 
-  bool get aiAdviceLoading => _aiAdviceLoading;
+  static const _calibrationStageOrder = {
+    'empty_reference': 0,
+    'put_on': 1,
+    'standing_baseline': 2,
+    'complete': 3,
+  };
+
   bool get aiQuestionLoading => _aiQuestionLoading;
   bool get aiChatLoading => _aiChatLoading;
   bool get calibrationResetting => _calibrationResetting;
+  int get noticeSequence => _noticeSequence;
+  int get gaitNoticeSequence => _gaitNoticeSequence;
+  int get offlinePairCount => _pendingUploadPairs.length;
+  String get ruleVersion => LocalRiskEngine.ruleVersion;
+  bool get bothFeetConnected => _bothFeetConnected;
 
   String get motionStatusLabel => switch (motionState) {
         'stationary' => '静止/稳定',
@@ -77,24 +164,119 @@ class MonitoringController extends ChangeNotifier {
         _ => '不可用',
       };
 
+  String footMotionStatusLabel(String side) =>
+      switch (side == 'left' ? leftMotionState : rightMotionState) {
+        'stationary' => '静止',
+        'moving' => '运动中',
+        _ => '不可用',
+      };
+
+  String get gaitStatusLabel => switch (gait.state) {
+        'stationary' => gait.lastCompletedEpisode == null ? '静止' : '最近已识别行走',
+        'walking' => '行走中',
+        _ => '数据不足',
+      };
+
+  String get gaitStepLabel {
+    final episode = gait.lastCompletedEpisode;
+    if (gait.state == 'walking') {
+      return '${gait.stepCount}（左 ${gait.leftSteps} / 右 ${gait.rightSteps}）';
+    }
+    return episode == null
+        ? '--'
+        : '${episode.stepCount}（左 ${episode.leftSteps} / 右 ${episode.rightSteps}）';
+  }
+
+  String get gaitCadenceLabel {
+    final cadence = gait.state == 'walking'
+        ? gait.cadenceSpm
+        : gait.lastCompletedEpisode?.cadenceSpm;
+    return cadence == null ? '--' : '${cadence.toStringAsFixed(0)} 步/分钟';
+  }
+
   Future<void> start() async {
+    final savedPairs = await _offlineStore.loadPairs();
+    _pendingUploadPairs.addAll(savedPairs);
+    _offlineReplayPairsRemaining = savedPairs.length;
+    _pendingOfflineInterventions.addAll(
+      await _offlineStore.loadInterventions(),
+    );
+    _localRiskEngine.restoreBaseline(await _offlineStore.loadBaseline());
+    _localBaselinePersisted = _localRiskEngine.baselineReady;
     _subscriptions.add(source.frames.listen(_onFrame));
     _subscriptions.add(source.connectionState.listen(_onConnections));
-    _subscriptions.add(source.errorState.listen((value) {
-      _sourceError = value;
-      notifyListeners();
-    }));
+    _subscriptions.add(
+      source.errorState.listen((value) {
+        _sourceError = value;
+        notifyListeners();
+      }),
+    );
     await source.start();
     if (commandBridge != null) {
       commandBridge!.start();
-      _subscriptions.add(commandBridge!.statuses.listen((value) {
-        motorStatus = value;
-        notifyListeners();
-      }));
+      _subscriptions.add(
+        commandBridge!.statuses.listen((value) {
+          motorStatus = value;
+          if (value.startsWith('设备返回executed') &&
+              value.contains('设备执行记录已保存') &&
+              _pendingLocalEventId != null) {
+            final pressureIntervention =
+                _activeOfflineIntervention?.activeRisks.any(
+                      (item) => item.isPressure,
+                    ) ??
+                    false;
+            if (pressureIntervention) {
+              final now = DateTime.now().millisecondsSinceEpoch;
+              recoveryObservation = RecoveryObservation(
+                eventId: _pendingLocalEventId!,
+                status: 'observing',
+                startedAtMs: now,
+                deadlineAtMs: now + 15000,
+                remainingMs: 15000,
+              );
+            } else {
+              _activeOfflineIntervention?.effectLabel = 'unknown';
+              _activeOfflineIntervention?.recoveryTimeMs = 0;
+              unawaited(
+                _offlineStore.saveInterventions(_pendingOfflineInterventions),
+              );
+            }
+            _pendingLocalEventId = null;
+          } else if (value.contains('设备执行记录已保存') &&
+              _activeOfflineIntervention != null) {
+            _activeOfflineIntervention!.effectLabel = 'unknown';
+            _activeOfflineIntervention!.recoveryTimeMs = 0;
+            _pendingLocalEventId = null;
+            unawaited(
+              _offlineStore.saveInterventions(_pendingOfflineInterventions),
+            );
+          }
+          notifyListeners();
+        }),
+      );
+      _subscriptions.add(
+        commandBridge!.localAcknowledgements.listen((ack) {
+          final intervention = _activeOfflineIntervention;
+          if (intervention == null ||
+              intervention.command.commandId != ack.commandId) {
+            return;
+          }
+          intervention.acknowledgements.add(ack);
+          unawaited(
+            _offlineStore.saveInterventions(_pendingOfflineInterventions),
+          );
+        }),
+      );
     }
     await refreshBackend();
-    _refreshTimer =
-        Timer.periodic(const Duration(seconds: 1), (_) => refreshBackend());
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => refreshBackend(),
+    );
+    _recoveryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _tickRecoveryObservation();
+      if (!_disposed) notifyListeners();
+    });
   }
 
   bool get _bothFeetConnected =>
@@ -126,6 +308,9 @@ class MonitoringController extends ChangeNotifier {
     loadDiff = null;
     syncErrorMs = null;
     motionState = 'unavailable';
+    leftMotionState = 'unavailable';
+    rightMotionState = 'unavailable';
+    gait = const GaitSummary.insufficient();
     regionalAnalysis = null;
     _clearAiQuestion();
     if (commandBridge == null) {
@@ -135,6 +320,7 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _onFrame(FootFrame frame) {
+    if (_calibrationResetting) return;
     final displayFrame = _frameForDisplay(frame);
     if (frame.side == 'left') {
       left = displayFrame;
@@ -146,6 +332,24 @@ class MonitoringController extends ChangeNotifier {
     // calibration, risk decisions, event history or motor commands.
     final pair = _pairing.add(frame);
     if (pair != null && source.shouldUploadToBackend) {
+      _localResult = _localRiskEngine.evaluate(pair);
+      final localStage = _localResult!.calibrationStage;
+      _advanceCalibrationStage(
+        backendOnline && localStage == 'complete'
+            ? 'standing_baseline'
+            : localStage,
+      );
+      if (!_localResult!.baselineReady) {
+        _localBaselinePersisted = false;
+      } else if (!_localBaselinePersisted) {
+        _localBaselinePersisted = true;
+        unawaited(
+          _offlineStore.saveBaseline(_localRiskEngine.exportBaseline()),
+        );
+      }
+      if (_usingLocalMonitoringFallback) {
+        _applyLocalResult(_localResult!);
+      }
       _enqueuePair(pair);
     }
     notifyListeners();
@@ -191,35 +395,115 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _enqueuePair(List<FootFrame> pair) {
-    // Sensor frames drive a live safety view, so stale backlog is less useful
-    // than the newest complete bilateral pair. Replacing the pending pair keeps
-    // backend risk evaluation close to real time when a request is slow.
-    _pendingUploadPair = List<FootFrame>.of(pair, growable: false);
-    if (!_uploading) {
-      unawaited(_drainUploadQueue());
+    // Keep a small bounded history. Replacing every pending pair can erase a
+    // short movement episode before the backend sees it; an unbounded queue
+    // would instead make risk decisions stale when the network is slow.
+    _pendingUploadPairs.add(List<FootFrame>.of(pair, growable: false));
+    if (_pendingUploadPairs.length > OfflineMonitoringStore.maxPairs) {
+      _pendingUploadPairs.removeAt(0);
+      if (_offlineReplayPairsRemaining > 0) {
+        _offlineReplayPairsRemaining -= 1;
+      }
     }
+    _scheduleQueuePersistence();
+    _scheduleUpload();
+  }
+
+  void _scheduleQueuePersistence() {
+    _queuePersistTimer?.cancel();
+    _queuePersistTimer = Timer(const Duration(milliseconds: 500), () {
+      final snapshot = _pendingUploadPairs
+          .map((pair) => List<FootFrame>.of(pair, growable: false))
+          .toList(growable: false);
+      unawaited(_offlineStore.savePairs(snapshot));
+    });
+  }
+
+  void _scheduleUpload([Duration delay = const Duration(milliseconds: 100)]) {
+    if (_uploading || _pendingUploadPairs.isEmpty || _uploadKickTimer != null) {
+      return;
+    }
+    _uploadKickTimer = Timer(delay, () {
+      _uploadKickTimer = null;
+      unawaited(_drainUploadQueue());
+    });
+  }
+
+  bool get _syncRetryReady =>
+      _nextSyncAttemptAt == null ||
+      !DateTime.now().isBefore(_nextSyncAttemptAt!);
+
+  bool get _usingLocalMonitoringFallback =>
+      source.shouldUploadToBackend &&
+      _localResult != null &&
+      _bothFeetConnected &&
+      (!backendOnline || _syncWarning != null);
+
+  void _recordSyncFailure(Object error) {
+    _syncFailureCount += 1;
+    const retryDelays = [2, 5, 10, 20, 30];
+    final delayIndex = _syncFailureCount > retryDelays.length
+        ? retryDelays.length - 1
+        : _syncFailureCount - 1;
+    final retrySeconds = retryDelays[delayIndex];
+    _nextSyncAttemptAt = DateTime.now().add(Duration(seconds: retrySeconds));
+    _syncWarning = '后端在线，但离线数据补传失败；将在 $retrySeconds 秒后重试'
+        '（待补传 ${_pendingUploadPairs.length} 对，'
+        '${_pendingOfflineInterventions.length} 条干预记录）：$error';
+  }
+
+  void _clearSyncFailureIfIdle() {
+    if (_pendingUploadPairs.isNotEmpty ||
+        _pendingOfflineInterventions.any((item) {
+          final expectedAcks = item.command.target == 'both' ? 2 : 1;
+          return item.acknowledgements.length >= expectedAcks &&
+              item.effectLabel != null;
+        })) {
+      return;
+    }
+    _syncFailureCount = 0;
+    _nextSyncAttemptAt = null;
+    _syncWarning = null;
   }
 
   Future<void> _drainUploadQueue() async {
-    if (_uploading) {
+    if (_uploading || !_syncRetryReady) {
       return;
     }
+    _uploadKickTimer?.cancel();
+    _uploadKickTimer = null;
+    if (_pendingUploadPairs.isEmpty) return;
     _uploading = true;
     try {
-      while (_pendingUploadPair != null) {
-        final batch = _pendingUploadPair!;
-        _pendingUploadPair = null;
-        try {
-          await api.uploadFrames(batch);
-          backendOnline = true;
-          _backendError = null;
-        } catch (error) {
-          backendOnline = false;
-          _backendError = '数据上传失败：$error';
+      final replaying = _offlineReplayPairsRemaining > 0;
+      final available = replaying
+          ? math.min(_offlineReplayPairsRemaining, _pendingUploadPairs.length)
+          : _pendingUploadPairs.length;
+      final take = math.min(available, 100);
+      final queuedPairs = _pendingUploadPairs.sublist(0, take);
+      final batch = [for (final pair in queuedPairs) ...pair];
+      try {
+        await api.uploadFrames(batch, offlineReplay: replaying);
+        _pendingUploadPairs.removeRange(0, take);
+        if (replaying) {
+          _offlineReplayPairsRemaining =
+              math.max(0, _offlineReplayPairsRemaining - take);
         }
+        _scheduleQueuePersistence();
+        _syncFailureCount = 0;
+        _nextSyncAttemptAt = null;
+      } catch (error) {
+        _recordSyncFailure(error);
+      }
+      if (_pendingUploadPairs.isEmpty) {
+        _offlineReplayPairsRemaining = 0;
+        _clearSyncFailureIfIdle();
       }
     } finally {
       _uploading = false;
+      if (_pendingUploadPairs.isNotEmpty && _syncRetryReady) {
+        _scheduleUpload();
+      }
       notifyListeners();
     }
   }
@@ -227,8 +511,13 @@ class MonitoringController extends ChangeNotifier {
   Future<void> refreshBackend() async {
     if (_refreshing) return;
     _refreshing = true;
+    _tickRecoveryObservation();
     try {
       backendOnline = await api.health();
+      if (_pendingUploadPairs.isNotEmpty && !_uploading) {
+        await _drainUploadQueue();
+      }
+      await _syncOfflineInterventions();
       final snapshot = await api.realtime();
       final backendIsFrameSource = !source.shouldUploadToBackend;
       if (backendIsFrameSource) {
@@ -236,32 +525,98 @@ class MonitoringController extends ChangeNotifier {
         right = snapshot.right ?? right;
       }
       if (backendIsFrameSource || _bothFeetConnected) {
-        loadBias = snapshot.loadBias;
-        loadDiff = snapshot.loadDiff;
-        syncErrorMs = snapshot.syncErrorMs;
-        motionState = snapshot.motionState;
-        risk = snapshot.risk;
-        activeRisks = snapshot.activeRisks;
-        regionalAnalysis = snapshot.regionalAnalysis;
-        try {
-          calibrationStatus = await api.calibrationStatus();
-        } catch (_) {
-          final analysis = regionalAnalysis;
-          if (analysis != null) {
-            calibrationStatus = CalibrationStatus(
-              baselineReady: analysis.baselineReady,
-              sampleCount: analysis.baselineSampleCount,
-              requiredSamples: analysis.baselineRequiredSamples,
-              statusReason:
-                  analysis.baselineReady ? 'ready' : 'waiting_for_data',
-            );
+        if (_usingLocalMonitoringFallback) {
+          motorCommand = null;
+          regionalAnalysis = null;
+          _applyLocalResult(_localResult!);
+        } else {
+          loadBias = snapshot.loadBias;
+          loadDiff = snapshot.loadDiff;
+          syncErrorMs = snapshot.syncErrorMs;
+          motionState = snapshot.motionState;
+          motorVibrationActive = snapshot.motorVibrationActive;
+          leftMotionState = snapshot.leftMotionState;
+          rightMotionState = snapshot.rightMotionState;
+          gait = snapshot.gait;
+          _updateGaitNotice();
+          risk = snapshot.risk;
+          activeRisks = snapshot.activeRisks;
+          regionalAnalysis = snapshot.regionalAnalysis;
+          recoveryObservation = snapshot.recoveryObservation;
+          _updateRiskNotice();
+        }
+        if (!_usingLocalMonitoringFallback) {
+          try {
+            calibrationStatus = await api.calibrationStatus();
+          } catch (_) {
+            final analysis = regionalAnalysis;
+            if (analysis != null) {
+              calibrationStatus = CalibrationStatus(
+                baselineReady: analysis.baselineReady,
+                sampleCount: analysis.baselineSampleCount,
+                requiredSamples: analysis.baselineRequiredSamples,
+                statusReason:
+                    analysis.baselineReady ? 'ready' : 'waiting_for_data',
+                emptyTemperatureReferenceReady: analysis.temperatureOffsetStatus
+                    .every((item) => item != 'unstable' && item != 'raw_invalid'),
+                emptySampleCount: _localResult?.emptySampleCount ?? 0,
+                emptyRequiredSamples:
+                    _localResult?.emptyRequiredSamples ??
+                        LocalRiskEngine.emptyRequiredSamples,
+                temperatureRiskEnabled: analysis.temperatureRiskEnabled,
+                temperatureOffsetChannels: analysis.temperatureOffsetChannels,
+                temperatureUntrustedChannels:
+                    analysis.temperatureUntrustedChannels,
+                temperatureRiskReason: analysis.temperatureRiskReason,
+              );
+            }
+          }
+          final backendResetAt = calibrationStatus?.resetAtMs;
+          if (backendResetAt != null &&
+              _handledBackendResetAtMs != backendResetAt &&
+              (_localRiskEngine.baselineCreatedAtMs ?? 0) < backendResetAt) {
+            _pairing.clear();
+            _localRiskEngine.reset();
+            _localResult = null;
+            _localBaselinePersisted = false;
+            await _offlineStore.clearBaseline();
+          }
+          if (backendResetAt != null) {
+            _handledBackendResetAtMs = backendResetAt;
+          }
+          if (calibrationStatus?.baselineReady == true) {
+            _advanceCalibrationStage('complete');
+          } else if (calibrationStatus?.emptyTemperatureReferenceReady ==
+              true) {
+            _advanceCalibrationStage('put_on');
+          }
+          final now = DateTime.now();
+          if (_lastAssessmentAt == null ||
+              now.difference(_lastAssessmentAt!) >=
+                  const Duration(seconds: 5)) {
+            try {
+              final previousDemoDays = temperatureEvidence.demoDays;
+              temperatureEvidence = (await api.latestAssessment()).temperature;
+              if (previousDemoDays < 1 &&
+                  temperatureEvidence.demoDays > 0 &&
+                  activeRisks.any((item) => item.isTemperature)) {
+                riskNoticeMessage = '已记录一次右脚 T4 温度演示，不代表真实临床诊断';
+                _noticeSequence += 1;
+              }
+              _lastAssessmentAt = now;
+            } catch (_) {
+              // Realtime pressure and gait monitoring remain available.
+            }
           }
         }
-        _updateAiAdviceIfNeeded();
       } else {
         _resetBilateralState();
       }
-      if (commandBridge != null || backendIsFrameSource || _bothFeetConnected) {
+      if (_usingLocalMonitoringFallback) {
+        motorStatus = commandBridge?.status ?? '本地风险监测运行中，暂无马达提醒';
+      } else if (commandBridge != null ||
+          backendIsFrameSource ||
+          _bothFeetConnected) {
         motorCommand = await api.pendingCommand();
         if (motorCommand != null) {
           if (commandBridge != null) {
@@ -280,17 +635,23 @@ class MonitoringController extends ChangeNotifier {
       _backendError = null;
     } catch (error) {
       backendOnline = false;
-      risk = const RiskState.incomplete();
-      activeRisks = const [];
-      regionalAnalysis = null;
-      loadBias = null;
-      loadDiff = null;
-      syncErrorMs = null;
       motorCommand = null;
-      motorStatus = '后端离线，风险闭环与马达提醒已暂停';
-      _backendError = source.shouldUploadToBackend
-          ? '后端离线：本地 BLE 压力图继续显示，风险判断与马达提醒已暂停'
-          : '后端不可用：$error';
+      final local = _localResult;
+      if (source.shouldUploadToBackend && local != null && _bothFeetConnected) {
+        regionalAnalysis = null;
+        _applyLocalResult(local);
+        motorStatus = commandBridge?.status ?? '本地风险监测运行中，暂无马达提醒';
+      } else {
+        risk = const RiskState.incomplete();
+        activeRisks = const [];
+        regionalAnalysis = null;
+        loadBias = null;
+        loadDiff = null;
+        syncErrorMs = null;
+        motorStatus = '双足数据不完整，暂停马达提醒';
+      }
+      _backendError =
+          source.shouldUploadToBackend ? '后端暂不可用，实时监测已切换为本地规则' : '后端不可用：$error';
     } finally {
       _refreshing = false;
       notifyListeners();
@@ -314,66 +675,31 @@ class MonitoringController extends ChangeNotifier {
       motorStatus = '已执行 ${command.target} ${command.pattern} 马达振动';
       motorCommand = null;
     } catch (error) {
-      motorStatus = '马达 ACK 失败：$error';
+      motorStatus = '马达确认失败：$error';
     }
     notifyListeners();
   }
 
-  void _updateAiAdviceIfNeeded() {
-    if (_aiQuestionSignature != null &&
-        _aiQuestionSignature != _currentMonitoringSignature) {
-      _clearAiQuestion();
-    }
-    final signature = _currentMonitoringSignature;
-    final now = DateTime.now();
-    final withinCooldown = _lastAdviceSignature == signature &&
-        _lastAdviceAttemptAt != null &&
-        now.difference(_lastAdviceAttemptAt!) < const Duration(seconds: 30);
-    final alreadyExplained =
-        _lastAdviceSignature == signature && aiAdvice != null;
-    if (_aiAdviceLoading || withinCooldown || alreadyExplained) {
-      return;
-    }
-
-    _lastAdviceSignature = signature;
-    _lastAdviceAttemptAt = now;
-    _aiAdviceLoading = true;
-    aiAdvice = null;
-    aiAdviceStatus = '正在生成辅助解释…';
-    unawaited(_requestAiAdvice(signature, risk, regionalAnalysis));
-  }
-
-  Future<void> _requestAiAdvice(
-    String signature,
-    RiskState requestedRisk,
-    RegionalAnalysis? requestedAnalysis,
-  ) async {
+  Future<void> _syncOfflineInterventions() async {
+    if (!_syncRetryReady) return;
+    final ready = _pendingOfflineInterventions.where((item) {
+      final expectedAcks = item.command.target == 'both' ? 2 : 1;
+      return item.acknowledgements.length >= expectedAcks &&
+          item.effectLabel != null;
+    }).toList();
+    if (ready.isEmpty) return;
     try {
-      final advice = await api.aiAdvice(
-        risk: requestedRisk,
-        activeRisks: activeRisks,
-        loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(requestedAnalysis?.temperatureDeltaC),
-        baselineReady: requestedAnalysis?.baselineReady ?? false,
-        pressureAvailable: requestedAnalysis?.pressureAvailable ?? false,
-        temperatureAvailable: requestedAnalysis?.temperatureAvailable ?? false,
-        leftConnected: left != null,
-        rightConnected: right != null,
+      await api.uploadOfflineInterventions(ready);
+      final syncedIds = ready.map((item) => item.command.commandId).toSet();
+      _pendingOfflineInterventions.removeWhere(
+        (item) => syncedIds.contains(item.command.commandId),
       );
-      if (_currentMonitoringSignature == signature) {
-        aiAdvice = advice;
-        aiAdviceStatus = advice.usedFallback ? '云端暂不可用，已使用本地安全降级解释' : '辅助解释已更新';
-      }
+      await _offlineStore.saveInterventions(_pendingOfflineInterventions);
+      _syncFailureCount = 0;
+      _nextSyncAttemptAt = null;
+      _clearSyncFailureIfIdle();
     } catch (error) {
-      if (_currentMonitoringSignature == signature) {
-        aiAdviceStatus = 'AI 辅助解释暂不可用：$error';
-      }
-    } finally {
-      _aiAdviceLoading = false;
-      if (!_disposed) {
-        notifyListeners();
-      }
+      _recordSyncFailure(error);
     }
   }
 
@@ -382,7 +708,6 @@ class MonitoringController extends ChangeNotifier {
       return;
     }
     final signature = _currentMonitoringSignature;
-    _aiQuestionSignature = signature;
     _aiQuestionLoading = true;
     aiQuestionAnswer = null;
     aiQuestionStatus = '正在生成回答…';
@@ -393,13 +718,15 @@ class MonitoringController extends ChangeNotifier {
         risk: risk,
         activeRisks: activeRisks,
         loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(regionalAnalysis?.temperatureDeltaC),
+        temperatureDeltaMaxC: _maximumTemperatureDelta(
+          regionalAnalysis?.temperatureDeltaC,
+        ),
         baselineReady: regionalAnalysis?.baselineReady ?? false,
         pressureAvailable: regionalAnalysis?.pressureAvailable ?? false,
         temperatureAvailable: regionalAnalysis?.temperatureAvailable ?? false,
         leftConnected: left != null,
         rightConnected: right != null,
+        gait: gait,
       );
       if (_currentMonitoringSignature == signature) {
         aiQuestionAnswer = answer;
@@ -437,8 +764,9 @@ class MonitoringController extends ChangeNotifier {
         risk: risk,
         activeRisks: activeRisks,
         loadDiff: loadDiff,
-        temperatureDeltaMaxC:
-            _maximumTemperatureDelta(analysis?.temperatureDeltaC),
+        temperatureDeltaMaxC: _maximumTemperatureDelta(
+          analysis?.temperatureDeltaC,
+        ),
         baselineReady: analysis?.baselineReady ?? false,
         pressureAvailable: analysis?.pressureAvailable ??
             (left?.pressureChannelsValid == true &&
@@ -448,6 +776,7 @@ class MonitoringController extends ChangeNotifier {
         motionState: motionState,
         leftConnected: left != null,
         rightConnected: right != null,
+        gait: gait,
       );
       aiChatStatus =
           aiChatAnswer!.usedFallback ? '云端暂不可用，已使用当前状态对应的本地回答' : '回答已更新';
@@ -459,12 +788,59 @@ class MonitoringController extends ChangeNotifier {
     }
   }
 
+  void _updateSessionAdviceIfNeeded({bool force = false}) {
+    final now = DateTime.now();
+    if (sessionAdviceLoading ||
+        (!force &&
+            _lastSessionAdviceAt != null &&
+            now.difference(_lastSessionAdviceAt!) <
+                const Duration(seconds: 30))) {
+      return;
+    }
+    _lastSessionAdviceAt = now;
+    sessionAdviceLoading = true;
+    unawaited(_requestSessionAdvice());
+  }
+
+  Future<void> _requestSessionAdvice() async {
+    try {
+      sessionAdvice = await api.sessionAdvice();
+      await _offlineStore.saveSessionAdvice(sessionAdvice!.toJson());
+    } catch (_) {
+      // Keep the most recent completed session advice visible while offline.
+    } finally {
+      sessionAdviceLoading = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void refreshSessionAdvice() => _updateSessionAdviceIfNeeded(force: true);
+
   Future<void> restartWearingCalibration() async {
     if (_calibrationResetting) return;
+    calibrationStage = 'empty_reference';
+    _riskSpeechCoordinator.reset();
+    _announcedGaitEpisodeId = null;
+    gaitNoticeMessage = null;
     _calibrationResetting = true;
+    _pairing.clear();
     notifyListeners();
+    _localRiskEngine.reset();
+    _localResult = null;
+    _localBaselinePersisted = false;
+    await _offlineStore.clearBaseline();
     try {
-      calibrationStatus = await api.resetCalibration();
+      if (backendOnline) {
+        calibrationStatus = await api.resetCalibration();
+        _handledBackendResetAtMs = calibrationStatus?.resetAtMs;
+      } else {
+        calibrationStatus = const CalibrationStatus(
+          baselineReady: false,
+          sampleCount: 0,
+          requiredSamples: LocalRiskEngine.requiredSamples,
+          statusReason: 'waiting_for_data',
+        );
+      }
       risk = const RiskState(
         riskType: 'normal',
         riskSide: 'none',
@@ -474,14 +850,17 @@ class MonitoringController extends ChangeNotifier {
       regionalAnalysis = null;
       motorCommand = null;
       motorStatus = '基线学习中，压力马达提醒已暂停';
-      aiAdvice = null;
       aiQuestionAnswer = null;
-      _lastAdviceSignature = null;
-      _aiQuestionSignature = null;
       _backendError = null;
     } catch (error) {
-      _backendError = '无法开始本次穿戴标定：$error';
-      rethrow;
+      backendOnline = false;
+      calibrationStatus = const CalibrationStatus(
+        baselineReady: false,
+        sampleCount: 0,
+        requiredSamples: LocalRiskEngine.requiredSamples,
+        statusReason: 'waiting_for_data',
+      );
+      _backendError = '后端离线，已开始 App 本地穿戴标定：$error';
     } finally {
       _calibrationResetting = false;
       if (!_disposed) notifyListeners();
@@ -491,7 +870,220 @@ class MonitoringController extends ChangeNotifier {
   void _clearAiQuestion() {
     aiQuestionAnswer = null;
     aiQuestionStatus = '请选择一个常见问题';
-    _aiQuestionSignature = null;
+  }
+
+  void _applyLocalResult(LocalRiskResult result) {
+    risk = result.risk;
+    activeRisks = result.activeRisks;
+    loadBias = result.loadBias;
+    loadDiff = result.loadDiff;
+    motionState = result.motionState;
+    motorVibrationActive = result.motorVibrationActive;
+    leftMotionState = result.motionState;
+    rightMotionState = result.motionState;
+    final previousGait = gait;
+    final localState = result.motionState == 'moving'
+        ? 'walking'
+        : previousGait.lastCompletedEpisode == null
+            ? 'insufficient_data'
+            : 'stationary';
+    gait = GaitSummary(
+      state: localState,
+      windowMs: previousGait.windowMs,
+      stepCount: localState == 'walking' ? previousGait.stepCount : 0,
+      leftSteps: localState == 'walking' ? previousGait.leftSteps : 0,
+      rightSteps: localState == 'walking' ? previousGait.rightSteps : 0,
+      cadenceSpm: localState == 'walking' ? previousGait.cadenceSpm : null,
+      lastCompletedEpisode: previousGait.lastCompletedEpisode,
+      confirmedIssues: previousGait.confirmedIssues,
+      evidenceEpisodeCount: previousGait.evidenceEpisodeCount,
+      evidenceStepCount: previousGait.evidenceStepCount,
+    );
+    syncErrorMs = left == null || right == null
+        ? null
+        : (left!.timestampMs - right!.timestampMs).abs();
+    calibrationStatus = CalibrationStatus(
+      baselineReady: result.baselineReady,
+      sampleCount: result.baselineSamples,
+      requiredSamples: LocalRiskEngine.requiredSamples,
+      statusReason: result.baselineReady ? 'ready' : 'waiting_for_data',
+      emptyTemperatureReferenceReady: result.temperatureOffsetStatus.every(
+        (item) => item != 'unstable' && item != 'raw_invalid',
+      ),
+      emptySampleCount: result.emptySampleCount,
+      emptyRequiredSamples: result.emptyRequiredSamples,
+      temperatureRiskEnabled: result.temperatureRiskEnabled,
+      temperatureOffsetChannels: [
+        for (var index = 0;
+            index < result.temperatureOffsetStatus.length;
+            index += 1)
+          if (result.temperatureOffsetStatus[index] == 'assembly_offset') index,
+      ],
+      temperatureUntrustedChannels: [
+        for (var index = 0;
+            index < result.temperatureOffsetStatus.length;
+            index += 1)
+          if (result.temperatureOffsetStatus[index] == 'unstable' ||
+              result.temperatureOffsetStatus[index] == 'raw_invalid')
+            index,
+      ],
+      temperatureRiskReason: result.temperatureRiskReason,
+    );
+    _advanceCalibrationStage(result.calibrationStage);
+    _updateRiskNotice();
+    _updateGaitNotice();
+    if (result.motorTarget != null &&
+        result.motorPattern != null &&
+        commandBridge != null &&
+        !commandBridge!.hasActiveCommand) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final eventId = 'local_evt_$now';
+      final command = DeviceCommand(
+        commandId: 'cmd_local_$now',
+        target: result.motorTarget!,
+        pattern: result.motorPattern!,
+        durationMs: result.motorPattern == 'long'
+            ? 1500
+            : result.motorPattern == 'double'
+                ? 800
+                : 500,
+        expireAtMs: now + 30000,
+        reasonCode: result.risk.riskType,
+      );
+      _pendingLocalEventId = eventId;
+      _activeOfflineIntervention = OfflineIntervention(
+        eventId: eventId,
+        command: command,
+        risk: result.risk,
+        activeRisks: List<RiskState>.of(result.activeRisks),
+        startedAtMs: now - result.risk.durationMs,
+        beforeLoadDiff: result.loadDiff,
+      );
+      _pendingOfflineInterventions.add(_activeOfflineIntervention!);
+      unawaited(_offlineStore.saveInterventions(_pendingOfflineInterventions));
+      motorCommand = command;
+      unawaited(commandBridge!.submitLocal(command));
+    }
+  }
+
+  void _advanceCalibrationStage(String next) {
+    final currentRank = _calibrationStageOrder[calibrationStage] ?? -1;
+    final nextRank = _calibrationStageOrder[next] ?? -1;
+    if (nextRank > currentRank) calibrationStage = next;
+  }
+
+  void _updateRiskNotice() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final actionable = activeRisks
+        .where(
+          (item) =>
+              item.riskLevel >= 2 &&
+              (!item.isPressure || motionState != 'moving'),
+        )
+        .toList(growable: false);
+    final newlyActionable = _riskSpeechCoordinator.takeNew(actionable, now);
+    if (newlyActionable.isEmpty) return;
+    riskNoticeMessage = newlyActionable.map(riskVoiceMessage).join('；');
+    _noticeSequence += 1;
+  }
+
+  void _updateGaitNotice() {
+    final episode = gait.lastCompletedEpisode;
+    final latestTimestampMs = math.max(
+      left?.timestampMs ?? 0,
+      right?.timestampMs ?? 0,
+    );
+    final message = gaitEpisodeNotice(
+      gait,
+      latestTimestampMs: latestTimestampMs,
+    );
+    if (episode == null ||
+        message == null ||
+        episode.episodeId == _announcedGaitEpisodeId) {
+      return;
+    }
+    _announcedGaitEpisodeId = episode.episodeId;
+    gaitNoticeMessage = message;
+    _gaitNoticeSequence += 1;
+  }
+
+  void _tickRecoveryObservation() {
+    final observation = recoveryObservation;
+    if (observation == null || observation.status != 'observing') return;
+    if (!backendOnline && !observation.eventId.startsWith('local_evt_')) {
+      return;
+    }
+    final remaining = observation.deadlineAtMs -
+        (backendOnline
+            ? api.serverNowMs
+            : DateTime.now().millisecondsSinceEpoch);
+    final componentResults = remaining > 0
+        ? observation.componentFeedback
+        : _localRecoveryComponents(observation);
+    final pressureEffects = componentResults
+        .where((item) => item.pressureIntervention)
+        .map((item) => item.effectLabel)
+        .toList(growable: false);
+    final localEffect =
+        pressureEffects.isEmpty || pressureEffects.contains('unknown')
+            ? (activeRisks.isEmpty ? 'effective' : 'ineffective')
+            : pressureEffects.every((item) => item == 'effective')
+                ? 'effective'
+                : pressureEffects.any(
+                    (item) => item == 'effective' || item == 'partial',
+                  )
+                    ? 'partial'
+                    : pressureEffects.any((item) => item == 'worsened')
+                        ? 'worsened'
+                        : 'ineffective';
+    recoveryObservation = RecoveryObservation(
+      eventId: observation.eventId,
+      status: remaining > 0 ? 'observing' : 'completed',
+      startedAtMs: observation.startedAtMs,
+      deadlineAtMs: observation.deadlineAtMs,
+      remainingMs: remaining > 0 ? remaining : 0,
+      effectLabel: remaining > 0 ? null : localEffect,
+      componentFeedback: componentResults,
+    );
+    if (remaining <= 0) {
+      final intervention = _activeOfflineIntervention;
+      if (intervention != null && intervention.effectLabel == null) {
+        intervention.afterLoadDiff = _localResult?.loadDiff;
+        intervention.effectLabel =
+            activeRisks.isEmpty ? 'effective' : 'ineffective';
+        intervention.recoveryTimeMs = 15000;
+        unawaited(
+          _offlineStore.saveInterventions(_pendingOfflineInterventions),
+        );
+      }
+    }
+  }
+
+  List<RiskComponentFeedbackRecord> _localRecoveryComponents(
+    RecoveryObservation observation,
+  ) {
+    if (!observation.eventId.startsWith('local_evt_')) {
+      return observation.componentFeedback;
+    }
+    final original = _activeOfflineIntervention?.activeRisks ?? const [];
+    return original.map((item) {
+      final remains = activeRisks.any(
+        (current) =>
+            current.riskType == item.riskType &&
+            current.riskSide == item.riskSide &&
+            current.riskLevel >= 2,
+      );
+      return RiskComponentFeedbackRecord(
+        riskType: item.riskType,
+        riskSide: item.riskSide,
+        effectLabel: item.riskType == 'temperature_asymmetry'
+            ? 'observation_only'
+            : remains
+                ? 'ineffective'
+                : 'effective',
+        pressureIntervention: item.riskType != 'temperature_asymmetry',
+      );
+    }).toList(growable: false);
   }
 
   String get _currentMonitoringSignature => [
@@ -524,6 +1116,13 @@ class MonitoringController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _refreshTimer?.cancel();
+    _recoveryTimer?.cancel();
+    _uploadKickTimer?.cancel();
+    _queuePersistTimer?.cancel();
+    final pendingSnapshot = _pendingUploadPairs
+        .map((pair) => List<FootFrame>.of(pair, growable: false))
+        .toList(growable: false);
+    unawaited(_offlineStore.savePairs(pendingSnapshot));
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }

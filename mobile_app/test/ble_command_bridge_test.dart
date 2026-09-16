@@ -112,7 +112,7 @@ void main() {
     expect(requests.single['command_id'], command.commandId);
     expect(requests.single['device_id'], 'foot_left_001');
     expect(requests.single['status'], 'executed');
-    expect(bridge.status, '设备返回executed，ACK已上传后端');
+    expect(bridge.status, '设备返回executed，执行结果已记录');
 
     await bridge.dispose();
     await gateway.close();
@@ -145,7 +145,7 @@ void main() {
       requests.map((value) => value['device_id']).toSet(),
       {'foot_left_001', 'foot_right_001'},
     );
-    expect(bridge.status, '设备返回executed，ACK已上传后端');
+    expect(bridge.status, '设备返回executed，执行结果已记录');
 
     await bridge.dispose();
     await gateway.close();
@@ -168,6 +168,28 @@ void main() {
     await bridge.submit(_command('right'));
     expect(gateway.sent, isEmpty);
     expect(bridge.status, '右脚设备未连接，命令暂未下发');
+
+    await bridge.dispose();
+    await gateway.close();
+    api.close();
+  });
+
+  test('local command status avoids offline-sync wording', () async {
+    final gateway = _FakeGateway();
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: MockClient((request) async => http.Response('{}', 200)),
+    );
+    final bridge = BleCommandBridge(api: api, gateway: gateway)..start();
+    final command = _command('left');
+
+    await bridge.submitLocal(command);
+    gateway.emit(_ack(command.commandId, 'foot_left_001'));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(bridge.status, '设备返回executed，设备执行记录已保存');
+    expect(bridge.status, isNot(contains('离线')));
+    expect(bridge.status, isNot(contains('补传')));
 
     await bridge.dispose();
     await gateway.close();

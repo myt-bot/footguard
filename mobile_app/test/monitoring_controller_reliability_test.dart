@@ -46,6 +46,7 @@ FootFrame _frame(
   String side,
   int timestampMs, {
   int packetSeq = 3,
+  List<double> pressure = const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
 }) {
   return FootFrame(
     protocolVersion: 1,
@@ -55,7 +56,7 @@ FootFrame _frame(
     syncId: 9,
     packetSeq: packetSeq,
     timestampMs: timestampMs,
-    pressure: const [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+    pressure: pressure,
     temperature: const [30.1, 30.2, 30.3, 30.4],
     imu: const ImuData(
       ax: 0,
@@ -152,11 +153,10 @@ void main() {
     controller.dispose();
   });
 
-  test('slow backend upload keeps only the newest pending bilateral pair',
-      () async {
+  test('slow backend upload preserves a bounded recent pair history', () async {
     final firstUploadStarted = Completer<void>();
     final releaseFirstUpload = Completer<void>();
-    final uploadedPacketSeqs = <int>[];
+    final uploadedPacketSeqBatches = <List<int>>[];
     var uploadCount = 0;
 
     final client = MockClient((request) async {
@@ -192,9 +192,11 @@ void main() {
       if (request.url.path == '/api/v1/sensor/batch') {
         final body = jsonDecode(request.body) as Map<String, dynamic>;
         final frames = body['frames'] as List<dynamic>;
-        uploadedPacketSeqs.add(
-          (frames.first as Map<String, dynamic>)['packet_seq'] as int,
-        );
+        uploadedPacketSeqBatches.add(frames
+            .cast<Map<String, dynamic>>()
+            .map((frame) => frame['packet_seq'] as int)
+            .toSet()
+            .toList());
         uploadCount += 1;
         if (uploadCount == 1) {
           firstUploadStarted.complete();
@@ -234,12 +236,159 @@ void main() {
     releaseFirstUpload.complete();
 
     for (var attempt = 0;
-        attempt < 20 && uploadedPacketSeqs.length < 2;
+        attempt < 20 && uploadedPacketSeqBatches.length < 2;
         attempt += 1) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
 
-    expect(uploadedPacketSeqs, [1, 5]);
+    expect(uploadedPacketSeqBatches, [
+      [1],
+      [2, 3, 4, 5],
+    ]);
+    controller.dispose();
+  });
+
+  test('offline upload failure keeps a healthy backend online and backs off',
+      () async {
+    var uploadCount = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/health') {
+        return http.Response(
+          jsonEncode({'status': 'ok', 'server_time_ms': 1000}),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/realtime') {
+        return http.Response(
+          jsonEncode({
+            'left': null,
+            'right': null,
+            'paired_timestamp_ms': null,
+            'load_bias': null,
+            'load_diff': null,
+            'sync_error_ms': null,
+            'risk': {
+              'risk_type': 'data_incomplete',
+              'risk_side': 'none',
+              'risk_level': 0,
+              'duration_ms': 0,
+            },
+            'regional_analysis': null,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/command/pending') {
+        return http.Response(jsonEncode({'command': null}), 200);
+      }
+      if (request.url.path == '/api/v1/sensor/batch' ||
+          request.url.path == '/api/v1/sensor/offline-sync') {
+        uploadCount += 1;
+        return http.Response('Internal Server Error', 500);
+      }
+      return http.Response('not found', 404);
+    });
+    final source = _FakeFootDataSource();
+    final controller = MonitoringController(
+      source: source,
+      api: FootGuardApiClient(baseUrl: 'http://footguard.test', client: client),
+    );
+    await controller.start();
+    source.emitConnections(const FootConnectionSnapshot(
+      left: FootConnectionStatus.connected,
+      right: FootConnectionStatus.connected,
+    ));
+    source.emitFrame(_frame('left', 1000, packetSeq: 20));
+    source.emitFrame(_frame('right', 1001, packetSeq: 20));
+
+    for (var attempt = 0;
+        attempt < 20 && controller.syncWarningMessage == null;
+        attempt += 1) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(controller.backendOnline, isTrue);
+    expect(controller.errorMessage, isNull);
+    expect(controller.syncWarningMessage, contains('离线数据补传失败'));
+    expect(controller.offlinePairCount, 1);
+    expect(uploadCount, 1);
+
+    await controller.refreshBackend();
+    await controller.refreshBackend();
+    expect(controller.backendOnline, isTrue);
+    expect(uploadCount, 1);
+    controller.dispose();
+  });
+
+  test('healthy backend still follows the local calibration speech stage',
+      () async {
+    final client = MockClient((request) async {
+      if (request.url.path == '/health') {
+        return http.Response(
+          jsonEncode({'status': 'ok', 'server_time_ms': 1000}),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/realtime') {
+        return http.Response(
+          jsonEncode({
+            'left': null,
+            'right': null,
+            'paired_timestamp_ms': null,
+            'load_bias': null,
+            'load_diff': null,
+            'sync_error_ms': null,
+            'risk': {
+              'risk_type': 'data_incomplete',
+              'risk_side': 'none',
+              'risk_level': 0,
+              'duration_ms': 0,
+            },
+            'regional_analysis': null,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/api/v1/command/pending') {
+        return http.Response(jsonEncode({'command': null}), 200);
+      }
+      if (request.url.path.startsWith('/api/v1/sensor/')) {
+        return http.Response(
+          jsonEncode({'accepted': 2, 'rejected': 0}),
+          200,
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final source = _FakeFootDataSource();
+    final controller = MonitoringController(
+      source: source,
+      api: FootGuardApiClient(baseUrl: 'http://footguard.test', client: client),
+    );
+    await controller.start();
+    source.emitConnections(const FootConnectionSnapshot(
+      left: FootConnectionStatus.connected,
+      right: FootConnectionStatus.connected,
+    ));
+
+    for (var packetSeq = 0; packetSeq <= 136; packetSeq += 1) {
+      final timestamp = 100000 + packetSeq * 200;
+      source.emitFrame(_frame(
+        'left',
+        timestamp,
+        packetSeq: packetSeq,
+        pressure: const [0, 0, 0, 0, 0, 0],
+      ));
+      source.emitFrame(_frame(
+        'right',
+        timestamp + 10,
+        packetSeq: packetSeq,
+        pressure: const [0, 0, 0, 0, 0, 0],
+      ));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(controller.backendOnline, isTrue);
+    expect(controller.calibrationStage, 'put_on');
     controller.dispose();
   });
 }

@@ -16,6 +16,7 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
   static const _mockScenarioKey = 'settings.mock_scenario';
   static const _csvAssetKey = 'settings.csv_asset';
   static const _replaySpeedKey = 'settings.replay_speed';
+  static const _voiceEnabledKey = 'settings.voice_enabled';
 
   @override
   Future<AppSettings> load() async {
@@ -30,11 +31,17 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
         csvReplayOptions.map((option) => option.assetPath).toSet();
     final savedReplaySpeed = preferences.getDouble(_replaySpeedKey);
 
+    final parsedMode = _parseDataMode(savedMode);
+    final dataMode =
+        diagnosticReplayEnabled && parsedMode == FootDataMode.csvReplay
+            ? FootDataMode.csvReplay
+            : FootDataMode.ble;
+
     return AppSettings(
       backendUrl: savedBackendUrl == null || !isValidBackendUrl(savedBackendUrl)
           ? defaults.backendUrl
           : normalizeBackendUrl(savedBackendUrl),
-      dataMode: _parseDataMode(savedMode) ?? defaults.dataMode,
+      dataMode: dataMode,
       mockScenario:
           savedScenario != null && mockScenarios.contains(savedScenario)
               ? savedScenario
@@ -47,18 +54,25 @@ class SharedPreferencesAppSettingsStore implements AppSettingsStore {
       replaySpeed: savedReplaySpeed == null
           ? defaults.replaySpeed
           : savedReplaySpeed.clamp(0.5, 4.0).toDouble(),
+      voiceEnabled:
+          preferences.getBool(_voiceEnabledKey) ?? defaults.voiceEnabled,
     );
   }
 
   @override
   Future<void> save(AppSettings settings) async {
     final preferences = await SharedPreferences.getInstance();
+    final dataMode =
+        diagnosticReplayEnabled && settings.dataMode == FootDataMode.csvReplay
+            ? FootDataMode.csvReplay
+            : FootDataMode.ble;
     await Future.wait([
       preferences.setString(_backendUrlKey, settings.backendUrl),
-      preferences.setString(_dataModeKey, settings.dataMode.name),
+      preferences.setString(_dataModeKey, dataMode.name),
       preferences.setString(_mockScenarioKey, settings.mockScenario),
       preferences.setString(_csvAssetKey, settings.csvAsset),
       preferences.setDouble(_replaySpeedKey, settings.replaySpeed),
+      preferences.setBool(_voiceEnabledKey, settings.voiceEnabled),
     ]);
   }
 

@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/data/api_client.dart';
 import 'package:footguard/models/device_command.dart';
+import 'package:footguard/models/gait_summary.dart';
 import 'package:footguard/models/risk_state.dart';
+import 'package:footguard/models/assessment.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -16,6 +18,8 @@ void main() {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       expect(body['risk']['risk_type'], 'left_load_bias');
       expect(body['temperature_delta_max_c'], 2.6);
+      expect(body['gait']['state'], 'stationary');
+      expect(body['gait']['last_completed_episode']['step_count'], 8);
       return http.Response.bytes(
         utf8.encode(jsonEncode({
           'protocol_version': 1,
@@ -49,6 +53,33 @@ void main() {
       temperatureAvailable: true,
       leftConnected: true,
       rightConnected: true,
+      gait: const GaitSummary(
+        state: 'stationary',
+        windowMs: 12000,
+        stepCount: 0,
+        leftSteps: 0,
+        rightSteps: 0,
+        lastCompletedEpisode: GaitEpisodeSummary(
+          episodeId: 'gait_7_1000_7000',
+          startedAtMs: 1000,
+          endedAtMs: 7000,
+          durationMs: 6000,
+          stepCount: 8,
+          leftSteps: 4,
+          rightSteps: 4,
+          cadenceSpm: 80,
+          stepIntervalCv: 0.12,
+          leftLoadIndex: 1.2,
+          rightLoadIndex: 1.0,
+          loadAsymmetry: 0.091,
+          leftForefootRatio: 0.55,
+          rightForefootRatio: 0.52,
+          leftMedialRatio: 0.30,
+          rightMedialRatio: 0.28,
+          leftLateralRatio: 0.18,
+          rightLateralRatio: 0.20,
+        ),
+      ),
     );
 
     expect(result.sourceLabel, 'DeepSeek 云端解释');
@@ -157,14 +188,15 @@ void main() {
       if (request.url.path == '/api/v1/calibration/reset') {
         expect(request.method, 'POST');
         resetRequested = true;
-        return http.Response(
-          jsonEncode({
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
             'baseline_ready': false,
             'sample_count': 0,
             'required_samples': 15,
             'reset_at_ms': 1785000000000,
-          }),
+          })),
           200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
         );
       }
       expect(request.method, 'GET');
@@ -229,6 +261,65 @@ void main() {
     expect(api.hasServerClockOffset, isTrue);
     expect((resolvedTimeMs - backendTimeMs).abs(), lessThan(1000));
     expect(command.isExpiredAt(resolvedTimeMs), isFalse);
+    api.close();
+  });
+
+  test('assessment API keeps demo temperature separate and posts glucose',
+      () async {
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/v1/assessment/latest') {
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'rating': {
+              'rating': 'attention',
+              'level': 1,
+              'label': '关注',
+              'trend': 'stable',
+              'trend_label': '与上次会话基本稳定',
+              'evidence': ['本次会话记录 1 条持续压力事件'],
+              'data_quality': [],
+            },
+            'previous_rating': null,
+            'temperature': {
+              'real_days': 0,
+              'real_consecutive_days': 0,
+              'demo_days': 2,
+              'status': 'insufficient_data',
+              'records': [],
+            },
+            'health_profile': {
+              'ulcer_or_amputation': 'unknown',
+              'sensory_or_circulation_issue': 'unknown',
+              'completeness': 'incomplete',
+            },
+            'glucose_readings': [],
+          })),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      expect(request.url.path, '/api/v1/glucose');
+      expect(request.method, 'POST');
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['context'], 'fasting');
+      return http.Response(
+          jsonEncode({...body, 'reading_id': 'glucose_1'}), 200);
+    });
+    final api =
+        FootGuardApiClient(baseUrl: 'http://footguard.test', client: client);
+
+    final assessment = await api.latestAssessment();
+    expect(assessment.rating.label, '关注');
+    expect(assessment.temperature.demoDays, 2);
+    expect(assessment.temperature.realDays, 0);
+
+    final reading = await api.addGlucose(const GlucoseReading(
+      value: 6.1,
+      unit: 'mmol/L',
+      context: 'fasting',
+      measuredAtMs: 1785000000000,
+    ));
+    expect(reading.readingId, 'glucose_1');
     api.close();
   });
 }
