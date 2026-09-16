@@ -14,6 +14,7 @@ import '../models/risk_state.dart';
 import '../models/regional_analysis.dart';
 import '../models/session_advice.dart';
 import '../models/offline_intervention.dart';
+import '../models/assessment.dart';
 import 'frame_pairing_service.dart';
 import 'ble_command_bridge.dart';
 import 'local_risk_engine.dart';
@@ -41,7 +42,12 @@ String? gaitEpisodeNotice(
       )
       .toList(growable: false);
   if (issues.isEmpty) return null;
-  return '本段行走检测到${issues.map(_gaitIssueVoiceLabel).join('、')}，请停下检查鞋内异物、鞋垫贴合和足部皮肤。';
+  final guidance = issues.any(
+    (issue) => issue.issueType == 'walking_forefoot_concentration',
+  )
+      ? '请调整走路姿势，放慢脚步并避免前掌持续受力。'
+      : '请调整走路姿势，尽量保持双脚受力均衡。';
+  return '本段行走发现${issues.map(_gaitIssueVoiceLabel).join('、')}。$guidance';
 }
 
 String _gaitIssueVoiceLabel(GaitIssue issue) {
@@ -97,6 +103,7 @@ class MonitoringController extends ChangeNotifier {
   int _noticeSequence = 0;
   int _gaitNoticeSequence = 0;
   int? _handledBackendResetAtMs;
+  DateTime? _lastAssessmentAt;
 
   FootFrame? left;
   FootFrame? right;
@@ -117,6 +124,7 @@ class MonitoringController extends ChangeNotifier {
   double? loadDiff;
   int? syncErrorMs;
   String motionState = 'unavailable';
+  bool motorVibrationActive = false;
   String leftMotionState = 'unavailable';
   String rightMotionState = 'unavailable';
   GaitSummary gait = const GaitSummary.insufficient();
@@ -125,6 +133,7 @@ class MonitoringController extends ChangeNotifier {
   AiChatAnswer? aiChatAnswer;
   CalibrationStatus? calibrationStatus;
   SessionAdvice? sessionAdvice;
+  TemperatureEvidence temperatureEvidence = const TemperatureEvidence();
   bool sessionAdviceLoading = false;
   RecoveryObservation? recoveryObservation;
   String? riskNoticeMessage;
@@ -311,6 +320,7 @@ class MonitoringController extends ChangeNotifier {
   }
 
   void _onFrame(FootFrame frame) {
+    if (_calibrationResetting) return;
     final displayFrame = _frameForDisplay(frame);
     if (frame.side == 'left') {
       left = displayFrame;
@@ -524,6 +534,7 @@ class MonitoringController extends ChangeNotifier {
           loadDiff = snapshot.loadDiff;
           syncErrorMs = snapshot.syncErrorMs;
           motionState = snapshot.motionState;
+          motorVibrationActive = snapshot.motorVibrationActive;
           leftMotionState = snapshot.leftMotionState;
           rightMotionState = snapshot.rightMotionState;
           gait = snapshot.gait;
@@ -547,7 +558,11 @@ class MonitoringController extends ChangeNotifier {
                 statusReason:
                     analysis.baselineReady ? 'ready' : 'waiting_for_data',
                 emptyTemperatureReferenceReady: analysis.temperatureOffsetStatus
-                    .any((item) => item != 'unstable' && item != 'raw_invalid'),
+                    .every((item) => item != 'unstable' && item != 'raw_invalid'),
+                emptySampleCount: _localResult?.emptySampleCount ?? 0,
+                emptyRequiredSamples:
+                    _localResult?.emptyRequiredSamples ??
+                        LocalRiskEngine.emptyRequiredSamples,
                 temperatureRiskEnabled: analysis.temperatureRiskEnabled,
                 temperatureOffsetChannels: analysis.temperatureOffsetChannels,
                 temperatureUntrustedChannels:
@@ -560,6 +575,7 @@ class MonitoringController extends ChangeNotifier {
           if (backendResetAt != null &&
               _handledBackendResetAtMs != backendResetAt &&
               (_localRiskEngine.baselineCreatedAtMs ?? 0) < backendResetAt) {
+            _pairing.clear();
             _localRiskEngine.reset();
             _localResult = null;
             _localBaselinePersisted = false;
@@ -573,6 +589,24 @@ class MonitoringController extends ChangeNotifier {
           } else if (calibrationStatus?.emptyTemperatureReferenceReady ==
               true) {
             _advanceCalibrationStage('put_on');
+          }
+          final now = DateTime.now();
+          if (_lastAssessmentAt == null ||
+              now.difference(_lastAssessmentAt!) >=
+                  const Duration(seconds: 5)) {
+            try {
+              final previousDemoDays = temperatureEvidence.demoDays;
+              temperatureEvidence = (await api.latestAssessment()).temperature;
+              if (previousDemoDays < 1 &&
+                  temperatureEvidence.demoDays > 0 &&
+                  activeRisks.any((item) => item.isTemperature)) {
+                riskNoticeMessage = '已记录一次右脚 T4 温度演示，不代表真实临床诊断';
+                _noticeSequence += 1;
+              }
+              _lastAssessmentAt = now;
+            } catch (_) {
+              // Realtime pressure and gait monitoring remain available.
+            }
           }
         }
       } else {
@@ -789,6 +823,7 @@ class MonitoringController extends ChangeNotifier {
     _announcedGaitEpisodeId = null;
     gaitNoticeMessage = null;
     _calibrationResetting = true;
+    _pairing.clear();
     notifyListeners();
     _localRiskEngine.reset();
     _localResult = null;
@@ -843,6 +878,7 @@ class MonitoringController extends ChangeNotifier {
     loadBias = result.loadBias;
     loadDiff = result.loadDiff;
     motionState = result.motionState;
+    motorVibrationActive = result.motorVibrationActive;
     leftMotionState = result.motionState;
     rightMotionState = result.motionState;
     final previousGait = gait;
@@ -871,9 +907,11 @@ class MonitoringController extends ChangeNotifier {
       sampleCount: result.baselineSamples,
       requiredSamples: LocalRiskEngine.requiredSamples,
       statusReason: result.baselineReady ? 'ready' : 'waiting_for_data',
-      emptyTemperatureReferenceReady: result.temperatureOffsetStatus.any(
+      emptyTemperatureReferenceReady: result.temperatureOffsetStatus.every(
         (item) => item != 'unstable' && item != 'raw_invalid',
       ),
+      emptySampleCount: result.emptySampleCount,
+      emptyRequiredSamples: result.emptyRequiredSamples,
       temperatureRiskEnabled: result.temperatureRiskEnabled,
       temperatureOffsetChannels: [
         for (var index = 0;

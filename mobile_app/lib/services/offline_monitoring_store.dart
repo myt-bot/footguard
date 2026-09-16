@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/foot_frame.dart';
 import '../models/offline_intervention.dart';
+import '../models/assessment.dart';
 
 class OfflineMonitoringStore {
   static const _framesKey = 'footguard.offline_frame_pairs.v1';
@@ -13,6 +14,8 @@ class OfflineMonitoringStore {
   static const _sessionAdviceKey = 'footguard.session_advice.v1';
   static const _historyEventsKey = 'footguard.history_events.v1';
   static const _sessionSummaryKey = 'footguard.session_summary.v1';
+  static const _pendingHealthProfileKey = 'footguard.pending_health_profile.v1';
+  static const _pendingGlucoseKey = 'footguard.pending_glucose.v1';
   static const maxPairs = 1800;
 
   Future<List<List<FootFrame>>> loadPairs() async {
@@ -176,5 +179,55 @@ class OfflineMonitoringStore {
       final preferences = await SharedPreferences.getInstance();
       await preferences.setString(_sessionSummaryKey, jsonEncode(summary));
     } catch (_) {}
+  }
+
+  Future<HealthProfile?> loadPendingHealthProfile() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_pendingHealthProfileKey);
+      return raw == null
+          ? null
+          : HealthProfile.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> savePendingHealthProfile(HealthProfile profile) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+        _pendingHealthProfileKey, jsonEncode(profile.toJson()));
+  }
+
+  Future<void> clearPendingHealthProfile() async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.remove(_pendingHealthProfileKey);
+  }
+
+  Future<List<GlucoseReading>> loadPendingGlucose() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_pendingGlucoseKey);
+      if (raw == null) return [];
+      return (jsonDecode(raw) as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .map(GlucoseReading.fromJson)
+          .toList(growable: false);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> savePendingGlucose(List<GlucoseReading> readings) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _pendingGlucoseKey,
+      jsonEncode(readings.map((item) => item.toJson()).toList()),
+    );
+  }
+
+  Future<void> clearPendingGlucose() async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.remove(_pendingGlucoseKey);
   }
 }

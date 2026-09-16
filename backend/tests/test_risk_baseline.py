@@ -12,10 +12,12 @@ from backend.app.services.risk_service import (
     _current_risks,
     _confirmed_gait_trend,
     _completed_gait_segment,
+    _completed_gait_segments,
     _empty_baseline,
     _empty_temperature_reference,
     _gait_episode_from_segment,
     _gait_summary,
+    _mask_motor_vibration,
     _pressure_metric_from_window,
     _prebaseline_residual_suspect_channels,
     _regional_analysis,
@@ -778,6 +780,57 @@ def test_short_pause_does_not_end_the_current_gait_segment() -> None:
 
     assert segment[0].timestamp_ms == walking[0].timestamp_ms
     assert segment[-1].timestamp_ms == walking[-1].timestamp_ms
+
+
+def test_pressure_transfer_keeps_walk_together_across_imu_stationary_gap() -> None:
+    baseline = _baseline_profile(
+        [_metric(index) for index in range(BASELINE_MIN_SAMPLES)]
+    )
+    walking = _gait_episode_metrics(intervals_ms=(600,) * 11)
+    pause_start = walking[5].timestamp_ms + 1_200
+    pause = [
+        replace(
+            _metric(300 + index, motion_state="stationary"),
+            timestamp_ms=pause_start + index * 600,
+        )
+        for index in range(3)
+    ]
+    shift = pause[-1].timestamp_ms - walking[5].timestamp_ms + 600
+    resumed = [
+        replace(item, timestamp_ms=item.timestamp_ms + shift)
+        for item in walking[6:]
+    ]
+    trailing_stop = [
+        replace(
+            _metric(400 + index, motion_state="stationary"),
+            timestamp_ms=resumed[-1].timestamp_ms + (index + 1) * 1_100,
+        )
+        for index in range(3)
+    ]
+    segments = _completed_gait_segments(walking[:6] + pause + resumed + trailing_stop)
+
+    assert len(segments) == 1
+    episode = _gait_episode_from_segment(segments[0], baseline)
+    assert episode is not None
+    assert episode.step_count >= 6
+
+
+def test_motor_vibration_masks_only_target_foot_motion() -> None:
+    metric = replace(
+        _metric(10, motion_state="moving"),
+        left_motion_state="moving",
+        right_motion_state="stationary",
+    )
+
+    masked, active = _mask_motor_vibration(
+        [metric],
+        (metric.timestamp_ms - 100, metric.timestamp_ms + 100, {"left"}),
+    )
+
+    assert active is True
+    assert masked[0].left_motion_state == "stationary"
+    assert masked[0].right_motion_state == "stationary"
+    assert masked[0].motion_state == "stationary"
 
 
 def test_old_gait_events_do_not_revive_after_one_new_motion_frame() -> None:

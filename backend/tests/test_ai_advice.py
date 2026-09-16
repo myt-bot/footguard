@@ -18,6 +18,9 @@ from backend.app.schemas import (
     AiQuestionRequest,
     RiskImprovementSummary,
     SessionSummary,
+    TemperatureDailyRecordOut,
+    TemperatureEvidenceSummary,
+    HealthProfile,
 )
 from backend.app.services.ai_advisor_service import (
     generate_advice,
@@ -285,11 +288,101 @@ def test_session_advice_prioritizes_evidence_instead_of_replaying_events() -> No
 
     result = generate_session_advice(summary)
 
-    assert "结论：" in result.advice
+    assert "最近情况：" in result.advice
     assert "依据：" in result.advice
-    assert "行动：" in result.advice
-    assert "数据限制：" in result.advice
-    assert "记录 5 次风险事件" in result.advice
+    assert "建议：" in result.advice
+    assert "左脚受力偏高" in result.advice
+    assert "3次提醒" in result.advice
+    assert "有效通道" not in result.advice
+    assert "工程" not in result.advice
+
+
+def test_session_advice_includes_demo_temperature_and_foot_background() -> None:
+    summary = SessionSummary(
+        session_status="recent",
+        baseline_ready=True,
+        pressure_available=True,
+        event_count=0,
+        highest_risk_level=1,
+        monitoring_rating={
+            "rating": "attention",
+            "level": 1,
+            "label": "关注",
+            "trend": "stable",
+            "trend_label": "与上次会话基本稳定",
+        },
+        temperature_evidence=TemperatureEvidenceSummary(
+            demo_days=1,
+            status="demo_single",
+            records=[
+                TemperatureDailyRecordOut(
+                    record_id="temp_demo_1",
+                    record_date="2026-08-23",
+                    side="right",
+                    zone="T4",
+                    raw_delta_c=3.0,
+                    corrected_delta_c=2.8,
+                    started_at_ms=1,
+                    ended_at_ms=2,
+                    valid_zone_count=4,
+                    source="demo",
+                    load_state="unloaded",
+                    motion_state="stationary",
+                    quality="usable",
+                )
+            ],
+        ),
+        health_profile=HealthProfile(
+            ulcer_or_amputation="yes",
+            sensory_or_circulation_issue="unknown",
+            completeness="incomplete",
+        ),
+    )
+
+    result = generate_session_advice(summary)
+
+    assert "右脚T4" in result.advice
+    assert "足部背景" in result.advice
+    assert "演示" in result.advice
+
+
+def test_cloud_session_advice_receives_and_returns_audience_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOOTGUARD_AI_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("FOOTGUARD_AI_BASE_URL", "https://model.example/v1")
+    monkeypatch.setenv("FOOTGUARD_AI_API_KEY", "test-secret")
+    monkeypatch.setenv("FOOTGUARD_AI_MODEL", "competition-model")
+    summary = SessionSummary(
+        session_status="recent",
+        baseline_ready=True,
+        pressure_available=True,
+        event_count=2,
+        highest_risk_level=2,
+        risk_counts={"left_load_bias": 2},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        audience_summary = body["messages"][1]["content"]
+        assert "risk_counts" not in audience_summary
+        assert "left_valid_pressure_channels" not in audience_summary
+        assert "左脚受力偏高" in audience_summary
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"advice":"最近左脚受力偏高，建议检查鞋内情况。"}'}},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as cloud_client:
+        result = generate_session_advice(summary, client=cloud_client)
+
+    assert result.provider == "openai-compatible:competition-model"
+    assert result.advice.startswith("最近左脚受力偏高")
+    assert "不能替代医疗诊断" in result.advice
 
 
 def test_configured_cloud_provider_returns_narrative_but_local_motor_candidate(

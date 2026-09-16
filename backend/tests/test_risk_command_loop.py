@@ -356,7 +356,7 @@ def test_combined_motor_uses_persistent_side_union_once(app) -> None:
         assert command.reason_code == "right_load_bias"
 
 
-def test_temperature_motor_targets_hotter_side_once_at_persistent_level(app) -> None:
+def test_temperature_never_creates_motor_command(app) -> None:
     with app.state.session_factory() as session:
         event = RiskEvent(
             event_id="evt_temperature_motor",
@@ -383,10 +383,7 @@ def test_temperature_motor_targets_hotter_side_once_at_persistent_level(app) -> 
             ],
         )
 
-        assert command is not None
-        assert command.target == "right"
-        assert command.pattern == "long"
-        assert command.duration_ms == 1_500
+        assert command is None
 
 
 def test_new_sync_window_creates_a_new_motor_reminder(
@@ -493,3 +490,37 @@ def test_intervention_recovery_records_motor_effect(client: TestClient, app) -> 
         assert feedback.user_action == "motor_vibration"
         assert feedback.effect_label == "effective"
         assert feedback.after_load_diff < feedback.before_load_diff
+
+
+def test_motor_observation_does_not_report_normal_immediately(client: TestClient) -> None:
+    calibrate(client)
+    risk_frames = scenario_frames("left_load_bias")
+    upload(client, risk_frames)
+    pending = client.get("/api/v1/command/pending?target=left").json()["command"]
+    now_ms = int(time() * 1000)
+    ack = {
+        "protocol_version": 1,
+        "command_id": pending["command_id"],
+        "device_id": "foot_left_001",
+        "status": "executed",
+        "ack_at_ms": now_ms,
+        "executed_at_ms": now_ms,
+        "error_code": "none",
+    }
+    assert client.post("/api/v1/ack", json=ack).status_code == 200
+
+    recovery_frames = scenario_frames("left_load_bias")
+    timestamp_shift = (
+        max(frame["timestamp_ms"] for frame in risk_frames)
+        - min(frame["timestamp_ms"] for frame in recovery_frames)
+        + 1_000
+    )
+    for frame in recovery_frames:
+        frame["sync_id"] += 2_000
+        frame["timestamp_ms"] += timestamp_shift
+
+    result = upload(client, recovery_frames)
+    realtime = client.get("/api/v1/realtime").json()
+
+    assert result["latest_risk"] == "left_load_bias"
+    assert realtime["recovery_observation"]["status"] == "observing"

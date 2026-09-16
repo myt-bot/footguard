@@ -58,7 +58,12 @@ def ensure_combined_motor_command(
     event: RiskEvent,
     risks: list[RiskState],
 ) -> Command | None:
-    actionable = [risk for risk in risks if risk.risk_level >= MOTOR_COMMAND_LEVEL]
+    actionable = [
+        risk
+        for risk in risks
+        if risk.risk_level >= MOTOR_COMMAND_LEVEL
+        and risk.risk_type != "temperature_asymmetry"
+    ]
     if not actionable:
         return None
     existing_for_event = session.scalar(

@@ -148,6 +148,8 @@ class _FootGuardAppState extends State<FootGuardApp> {
           index: selectedIndex,
           children: [
             HomeScreen(
+              key: ValueKey('home-${settings.backendUrl}'),
+              backendUrl: settings.backendUrl,
               onStartMonitoring: () => setState(() => selectedIndex = 1),
             ),
             RealtimeScreen(

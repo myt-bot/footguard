@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:footguard/config/app_config.dart';
 import 'package:footguard/data/api_client.dart';
 import 'package:footguard/screens/settings_screen.dart';
+import 'package:footguard/models/assessment.dart';
 import 'package:footguard/services/local_tts_service.dart';
 
 class _FakeTtsSpeaker implements TtsSpeaker {
@@ -148,5 +149,46 @@ void main() {
     expect(resetCalls, 1);
     expect(resetNotifications, 1);
     expect(find.textContaining('学习中：0/40'), findsOneWidget);
+  });
+
+  testWidgets('temperature demo can be prepared and reset with explicit state',
+      (
+    tester,
+  ) async {
+    var starts = 0;
+    var resets = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            settings: const AppSettings(),
+            onChanged: (_) {},
+            temperatureDemoStarter: (_) async {
+              starts += 1;
+              return const TemperatureDemoState(active: true, status: 'ready');
+            },
+            temperatureDemoResetter: (_) async {
+              resets += 1;
+              return const TemperatureDemoState();
+            },
+          ),
+        ),
+      ),
+    );
+
+    await _scrollUntilVisible(tester, find.text('准备演示'));
+    await tester.tap(find.text('准备演示'));
+    await tester.pumpAndSettle();
+    expect(starts, 1);
+    expect(
+      find.byKey(const ValueKey('temperature-demo-status')),
+      findsOneWidget,
+    );
+    expect(find.text('演示已准备：请脱鞋手按右脚 T4，持续到语音提醒。'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('重置温度演示'));
+    await tester.pumpAndSettle();
+    expect(resets, 1);
+    expect(find.text('温度演示记录已重置'), findsOneWidget);
   });
 }

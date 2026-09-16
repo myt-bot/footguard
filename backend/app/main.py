@@ -10,6 +10,7 @@ from .database import create_database
 from .repositories.command_repository import expire_pending_commands
 from .routers import (
     ai_advice,
+    assessment,
     analytics,
     calibration,
     commands,
@@ -38,6 +39,7 @@ def create_app(database_url_override: str | None = None) -> FastAPI:
     application.state.session_factory = session_factory
     application.include_router(health.router)
     application.include_router(ai_advice.router)
+    application.include_router(assessment.router)
     application.include_router(analytics.router)
     application.include_router(calibration.router)
     application.include_router(sensor.router)

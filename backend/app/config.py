@@ -95,7 +95,10 @@ GAIT_MIN_STEP_CANDIDATES = 4
 GAIT_MIN_MOVING_RATIO = 0.35
 GAIT_MIN_CADENCE_SPM = 20.0
 GAIT_MAX_CADENCE_SPM = 180.0
-GAIT_ACTIVE_RECENCY_MS = 1_500
+# IMU stationary classification can briefly win while a foot is in stance.
+# Internal gaps are allowed a second hold window; a true stop still closes the
+# episode using this end-of-segment threshold.
+GAIT_ACTIVE_RECENCY_MS = 2_500
 GAIT_EPISODE_END_HOLD_MS = 2_000
 GAIT_EPISODE_MIN_STEPS = 6
 GAIT_MIN_SIDE_STEPS = 3
@@ -144,6 +147,9 @@ TEMPERATURE_PERSISTENT_AFTER_MS = 30_000
 MOTOR_COMMAND_LEVEL = 3
 MOTOR_PERSISTENT_PATTERN = "long"
 MOTOR_PERSISTENT_DURATION_MS = 1_500
+# The motor pulse can ring through the shoe-mounted MPU after the electrical
+# pulse ends. This is an engineering debounce window, not a gait threshold.
+MOTOR_VIBRATION_SETTLE_MS = 1_500
 # Human-facing competition demo: leave enough time for the App polling cycle
 # and for the user to press the simulated execution button.
 MOTOR_COMMAND_TTL_MS = 30_000

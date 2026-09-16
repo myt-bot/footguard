@@ -29,6 +29,10 @@ def create_database(url: str) -> tuple[Engine, sessionmaker[Session]]:
                 "wearing_temperature_mad_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
                 "regional_share_mad_json": "VARCHAR(256) NOT NULL DEFAULT '[0,0,0,0]'",
             },
+            "temperature_daily_records": {
+                "demo_session_id": "VARCHAR(64)",
+                "motion_state": "VARCHAR(16) NOT NULL DEFAULT 'unknown'",
+            },
         }
         with engine.begin() as connection:
             connection.execute(

@@ -100,7 +100,7 @@ class _AiAdviceCardState extends State<AiAdviceCard> {
                 value.provider,
                 style: const TextStyle(
                   color: Color(0xFF718096),
-                  fontSize: 11,
+                  fontSize: 12,
                 ),
               ),
               const SizedBox(height: 8),

@@ -6,11 +6,50 @@ from time import time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import RECOVERY_OBSERVATION_MS
+from ..config import (
+    MOTOR_PERSISTENT_DURATION_MS,
+    MOTOR_VIBRATION_SETTLE_MS,
+    RECOVERY_OBSERVATION_MS,
+)
 from ..models import Command, RiskEvent
 from ..repositories.calibration_repository import calibration_state
 from ..schemas import RecoveryObservation, RiskState
 from .session_metrics import component_feedback
+
+
+def motor_vibration_window(
+    session: Session,
+) -> tuple[int, int, set[str]] | None:
+    """Return the latest command's short MPU-vibration suppression window."""
+    wearing = calibration_state(session)
+    reset_at_ms = wearing.reset_at_ms if wearing and wearing.reset_at_ms else 0
+    command = session.scalar(
+        select(Command)
+        .where(
+            Command.event_id.is_not(None),
+            Command.status == "executed",
+            Command.created_at_ms >= reset_at_ms,
+        )
+        .order_by(Command.executed_at_ms.desc(), Command.created_at_ms.desc())
+        .limit(1)
+    )
+    if command is None:
+        return None
+    sides = (
+        {"left", "right"}
+        if command.target == "both"
+        else {command.target}
+        if command.target in {"left", "right"}
+        else set()
+    )
+    if not sides:
+        return None
+    started_at_ms = command.created_at_ms
+    executed_at_ms = command.executed_at_ms or command.ack_at_ms or started_at_ms
+    ended_at_ms = (
+        executed_at_ms + MOTOR_PERSISTENT_DURATION_MS + MOTOR_VIBRATION_SETTLE_MS
+    )
+    return started_at_ms, ended_at_ms, sides
 
 
 def recovery_observation(

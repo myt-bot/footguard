@@ -20,6 +20,31 @@ http.Response _supportingResponse(http.Request request) {
           'motor_command_count': 1,
           'motor_executed_count': 1,
           'motor_ack_count': 1,
+          'left_valid_pressure_channels': 6,
+          'right_valid_pressure_channels': 6,
+          'temperature_valid_pairs': 4,
+          'monitoring_rating': {
+            'rating': 'attention',
+            'level': 1,
+            'label': '关注',
+            'trend': 'stable',
+            'trend_label': '与上次会话基本稳定',
+            'evidence': ['本次会话记录 1 条持续压力事件'],
+            'data_quality': [],
+          },
+          'temperature_evidence': {
+            'real_days': 0,
+            'real_consecutive_days': 0,
+            'demo_days': 2,
+            'status': 'insufficient_data',
+            'records': [],
+          },
+          'health_profile': {
+            'ulcer_or_amputation': 'unknown',
+            'sensory_or_circulation_issue': 'unknown',
+            'completeness': 'incomplete',
+          },
+          'recent_glucose_readings': [],
           'gait_episode_count': 1,
           'latest_gait_episodes': [
             {
@@ -200,11 +225,44 @@ void main() {
     await tester.tap(find.text('左侧负载持续偏高'));
     await tester.pumpAndSettle();
 
-    expect(find.text('干预后评估：明显改善'), findsOneWidget);
+    expect(find.text('提醒后变化：明显改善'), findsOneWidget);
     expect(find.textContaining('40.0% → 15.0%'), findsOneWidget);
     expect(find.textContaining('改善 63%'), findsOneWidget);
     expect(find.textContaining('恢复用时 2.5 秒'), findsOneWidget);
-    expect(find.textContaining('马达提醒后调整姿势'), findsOneWidget);
+    expect(find.textContaining('提醒后调整姿势'), findsOneWidget);
+  });
+
+  testWidgets('history comprehensive assessment separates demo evidence', (
+    tester,
+  ) async {
+    final api = FootGuardApiClient(
+      baseUrl: 'http://footguard.test',
+      client: MockClient((request) async {
+        if (request.url.path == '/api/v1/events') {
+          return http.Response('[]', 200);
+        }
+        return _supportingResponse(request);
+      }),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HistoryScreen(
+            backendUrl: 'http://footguard.test',
+            apiClient: api,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('综合评估'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('关注'), findsOneWidget);
+    expect(find.text('演示证据：单次演示已准备/完成'), findsOneWidget);
+    expect(find.textContaining('不改变真实评级'), findsOneWidget);
+    expect(find.text('足部背景提示'), findsOneWidget);
+    expect(find.text('血糖记录'), findsOneWidget);
   });
 
   testWidgets('history asks a preset question with session context', (
@@ -297,7 +355,7 @@ void main() {
     await tester.tap(find.text('右侧负载持续偏高'));
     await tester.pumpAndSettle();
 
-    expect(find.text('干预后评估：偏离增加'), findsOneWidget);
+    expect(find.text('提醒后变化：偏离增加'), findsOneWidget);
     expect(find.textContaining('65.0% → 70.0%'), findsOneWidget);
     expect(find.textContaining('增加 8%'), findsOneWidget);
   });
@@ -354,7 +412,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('事件已解除'), findsOneWidget);
-    expect(find.textContaining('温差事件不能用左右负载差判定'), findsOneWidget);
+    expect(find.textContaining('温度提醒单独观察'), findsOneWidget);
     expect(find.textContaining('90.0% → 10.0%'), findsNothing);
     expect(find.textContaining('明显改善'), findsNothing);
   });

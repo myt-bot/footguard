@@ -45,7 +45,8 @@ void main() {
       latestTimestampMs: 8500,
     );
 
-    expect(notice, contains('本段行走检测到左脚行走负荷持续偏高'));
+    expect(notice, contains('本段行走发现左脚行走负荷持续偏高'));
+    expect(notice, contains('调整走路姿势'));
   });
 
   test('engineering-only metrics and stale episodes stay silent', () {

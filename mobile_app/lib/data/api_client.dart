@@ -13,6 +13,7 @@ import '../models/regional_analysis.dart';
 import '../models/risk_state.dart';
 import '../models/session_advice.dart';
 import '../models/offline_intervention.dart';
+import '../models/assessment.dart';
 
 class RealtimeSnapshot {
   const RealtimeSnapshot({
@@ -22,6 +23,7 @@ class RealtimeSnapshot {
     required this.loadDiff,
     required this.syncErrorMs,
     this.motionState = 'unavailable',
+    this.motorVibrationActive = false,
     this.leftMotionState = 'unavailable',
     this.rightMotionState = 'unavailable',
     this.gait = const GaitSummary.insufficient(),
@@ -39,6 +41,7 @@ class RealtimeSnapshot {
   final double? loadDiff;
   final int? syncErrorMs;
   final String motionState;
+  final bool motorVibrationActive;
   final String leftMotionState;
   final String rightMotionState;
   final GaitSummary gait;
@@ -61,6 +64,7 @@ class RealtimeSnapshot {
         loadDiff: (json['load_diff'] as num?)?.toDouble(),
         syncErrorMs: json['sync_error_ms'] as int?,
         motionState: json['motion_state'] as String? ?? 'unavailable',
+        motorVibrationActive: json['motor_vibration_active'] as bool? ?? false,
         leftMotionState: json['left_motion_state'] as String? ?? 'unavailable',
         rightMotionState:
             json['right_motion_state'] as String? ?? 'unavailable',
@@ -356,6 +360,10 @@ class SessionSummary {
     this.leftValidPressureChannels = 0,
     this.rightValidPressureChannels = 0,
     this.lastDataAtMs,
+    this.monitoringRating,
+    this.temperatureEvidence = const TemperatureEvidence(),
+    this.healthProfile = const HealthProfile(),
+    this.recentGlucoseReadings = const [],
   });
 
   final String sessionStatus;
@@ -372,6 +380,10 @@ class SessionSummary {
   final int temperatureValidPairs;
   final int leftValidPressureChannels;
   final int rightValidPressureChannels;
+  final MonitoringRating? monitoringRating;
+  final TemperatureEvidence temperatureEvidence;
+  final HealthProfile healthProfile;
+  final List<GlucoseReading> recentGlucoseReadings;
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) => SessionSummary(
         sessionStatus: json['session_status'] as String? ?? 'empty',
@@ -403,6 +415,22 @@ class SessionSummary {
             json['left_valid_pressure_channels'] as int? ?? 0,
         rightValidPressureChannels:
             json['right_valid_pressure_channels'] as int? ?? 0,
+        monitoringRating: json['monitoring_rating'] == null
+            ? null
+            : MonitoringRating.fromJson(
+                json['monitoring_rating'] as Map<String, dynamic>,
+              ),
+        temperatureEvidence: TemperatureEvidence.fromJson(
+          json['temperature_evidence'] as Map<String, dynamic>? ?? const {},
+        ),
+        healthProfile: HealthProfile.fromJson(
+          json['health_profile'] as Map<String, dynamic>? ?? const {},
+        ),
+        recentGlucoseReadings:
+            (json['recent_glucose_readings'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(GlucoseReading.fromJson)
+                .toList(growable: false),
       );
 
   Map<String, dynamic> toJson() => {
@@ -422,6 +450,46 @@ class SessionSummary {
         'temperature_valid_pairs': temperatureValidPairs,
         'left_valid_pressure_channels': leftValidPressureChannels,
         'right_valid_pressure_channels': rightValidPressureChannels,
+        'monitoring_rating': monitoringRating == null
+            ? null
+            : {
+                'rating': monitoringRating!.rating,
+                'level': monitoringRating!.level,
+                'label': monitoringRating!.label,
+                'trend': monitoringRating!.trend,
+                'trend_label': monitoringRating!.trendLabel,
+                'evidence': monitoringRating!.evidence,
+                'data_quality': monitoringRating!.dataQuality,
+                'session_id': monitoringRating!.sessionId,
+                'previous_session_id': monitoringRating!.previousSessionId,
+                'is_demo_only': monitoringRating!.isDemoOnly,
+              },
+        'temperature_evidence': {
+          'real_days': temperatureEvidence.realDays,
+          'real_consecutive_days': temperatureEvidence.realConsecutiveDays,
+          'demo_days': temperatureEvidence.demoDays,
+          'status': temperatureEvidence.status,
+          'records': temperatureEvidence.records
+              .map((record) => {
+                    'record_date': record.recordDate,
+                    'side': record.side,
+                    'zone': record.zone,
+                    'raw_delta_c': record.rawDeltaC,
+                    'corrected_delta_c': record.correctedDeltaC,
+                    'started_at_ms': record.startedAtMs,
+                    'ended_at_ms': record.endedAtMs,
+                    'valid_zone_count': record.validZoneCount,
+                    'source': record.source,
+                    'load_state': record.loadState,
+                    'motion_state': record.motionState,
+                    'quality': record.quality,
+                    'demo_session_id': record.demoSessionId,
+                  })
+              .toList(),
+        },
+        'health_profile': healthProfile.toJson(),
+        'recent_glucose_readings':
+            recentGlucoseReadings.map((item) => item.toJson()).toList(),
       };
 }
 
@@ -511,6 +579,8 @@ class CalibrationStatus {
     this.resetAtMs,
     this.statusReason = 'waiting_for_data',
     this.emptyTemperatureReferenceReady = false,
+    this.emptySampleCount = 0,
+    this.emptyRequiredSamples = 60,
     this.temperatureRiskEnabled = false,
     this.temperatureOffsetChannels = const [],
     this.temperatureUntrustedChannels = const [],
@@ -523,6 +593,8 @@ class CalibrationStatus {
   final int? resetAtMs;
   final String statusReason;
   final bool emptyTemperatureReferenceReady;
+  final int emptySampleCount;
+  final int emptyRequiredSamples;
   final bool temperatureRiskEnabled;
   final List<int> temperatureOffsetChannels;
   final List<int> temperatureUntrustedChannels;
@@ -531,6 +603,10 @@ class CalibrationStatus {
   double get progress => requiredSamples <= 0
       ? 0.0
       : (sampleCount / requiredSamples).clamp(0, 1).toDouble();
+
+  double get emptyProgress => emptyRequiredSamples <= 0
+      ? 0.0
+      : (emptySampleCount / emptyRequiredSamples).clamp(0, 1).toDouble();
 
   factory CalibrationStatus.fromJson(
     Map<String, dynamic> json,
@@ -543,6 +619,8 @@ class CalibrationStatus {
         statusReason: json['status_reason'] as String? ?? 'waiting_for_data',
         emptyTemperatureReferenceReady:
             json['empty_temperature_reference_ready'] as bool? ?? false,
+        emptySampleCount: json['empty_sample_count'] as int? ?? 0,
+        emptyRequiredSamples: json['empty_required_samples'] as int? ?? 60,
         temperatureRiskEnabled:
             json['temperature_risk_enabled'] as bool? ?? false,
         temperatureOffsetChannels:
@@ -671,6 +749,95 @@ class FootGuardApiClient {
     return SessionSummary.fromJson(
       await _decode(response) as Map<String, dynamic>,
     );
+  }
+
+  Future<AssessmentSummary> latestAssessment() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/assessment/latest'))
+        .timeout(const Duration(seconds: 8));
+    return AssessmentSummary.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<List<MonitoringRating>> assessmentHistory() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/assessment/history'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(MonitoringRating.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<List<TemperatureDailyRecord>> dailyTemperature() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/temperature/daily'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(TemperatureDailyRecord.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<TemperatureDemoState> startTemperatureDemo() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/temperature-demo/start'))
+        .timeout(const Duration(seconds: 8));
+    return TemperatureDemoState.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<TemperatureDemoState> resetTemperatureDemo() async {
+    final response = await _client
+        .post(Uri.parse('$baseUrl/api/v1/temperature-demo/reset'))
+        .timeout(const Duration(seconds: 8));
+    return TemperatureDemoState.fromJson(
+      await _decode(response) as Map<String, dynamic>,
+    );
+  }
+
+  Future<HealthProfile> healthProfile() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/health-profile'))
+        .timeout(const Duration(seconds: 8));
+    return HealthProfile.fromJson(
+        await _decode(response) as Map<String, dynamic>);
+  }
+
+  Future<HealthProfile> updateHealthProfile(HealthProfile profile) async {
+    final response = await _client
+        .put(
+          Uri.parse('$baseUrl/api/v1/health-profile'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(profile.toJson()),
+        )
+        .timeout(const Duration(seconds: 8));
+    return HealthProfile.fromJson(
+        await _decode(response) as Map<String, dynamic>);
+  }
+
+  Future<List<GlucoseReading>> glucoseReadings() async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl/api/v1/glucose'))
+        .timeout(const Duration(seconds: 8));
+    return (await _decode(response) as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map(GlucoseReading.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<GlucoseReading> addGlucose(GlucoseReading reading) async {
+    final response = await _client
+        .post(
+          Uri.parse('$baseUrl/api/v1/glucose'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(reading.toJson()),
+        )
+        .timeout(const Duration(seconds: 8));
+    return GlucoseReading.fromJson(
+        await _decode(response) as Map<String, dynamic>);
   }
 
   Future<CalibrationStatus> calibrationStatus() async {

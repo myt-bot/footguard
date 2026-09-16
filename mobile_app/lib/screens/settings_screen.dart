@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../config/app_config.dart';
 import '../data/api_client.dart';
+import '../models/assessment.dart';
 import '../services/local_tts_service.dart';
 import '../services/offline_monitoring_store.dart';
 
@@ -12,6 +13,9 @@ typedef CalibrationStatusLoader = Future<CalibrationStatus> Function(
   String baseUrl,
 );
 typedef CalibrationResetter = Future<CalibrationStatus> Function(
+  String baseUrl,
+);
+typedef TemperatureDemoAction = Future<TemperatureDemoState> Function(
   String baseUrl,
 );
 
@@ -24,6 +28,8 @@ class SettingsScreen extends StatefulWidget {
     this.healthCheck,
     this.calibrationStatusLoader,
     this.calibrationResetter,
+    this.temperatureDemoStarter,
+    this.temperatureDemoResetter,
     this.ttsSpeaker,
   });
 
@@ -33,6 +39,8 @@ class SettingsScreen extends StatefulWidget {
   final BackendHealthCheck? healthCheck;
   final CalibrationStatusLoader? calibrationStatusLoader;
   final CalibrationResetter? calibrationResetter;
+  final TemperatureDemoAction? temperatureDemoStarter;
+  final TemperatureDemoAction? temperatureDemoResetter;
   final TtsSpeaker? ttsSpeaker;
 
   @override
@@ -50,6 +58,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loadingCalibration = false;
   CalibrationStatus? _calibrationStatus;
   String? _calibrationError;
+  bool _changingTemperatureDemo = false;
+  String? _temperatureDemoStatus;
   late final TtsSpeaker _ttsSpeaker = widget.ttsSpeaker ?? AndroidTtsService();
 
   @override
@@ -244,6 +254,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         setState(() => _loadingCalibration = false);
       }
+    }
+  }
+
+  Future<void> _startTemperatureDemo() async {
+    if (_backendUrlError() != null) {
+      setState(() => _temperatureDemoStatus = '请先填写有效的后端地址');
+      return;
+    }
+    setState(() {
+      _changingTemperatureDemo = true;
+      _temperatureDemoStatus = null;
+    });
+    try {
+      final state = await (widget.temperatureDemoStarter ??
+          _defaultStartTemperatureDemo)(backend.text.trim());
+      if (!mounted) return;
+      setState(() {
+        _temperatureDemoStatus =
+            state.active ? '演示已准备：请脱鞋手按右脚 T4，持续到语音提醒。' : '演示准备失败';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '无法准备演示：$error');
+    } finally {
+      if (mounted) setState(() => _changingTemperatureDemo = false);
+    }
+  }
+
+  Future<void> _resetTemperatureDemo() async {
+    setState(() => _changingTemperatureDemo = true);
+    try {
+      await (widget.temperatureDemoResetter ?? _defaultResetTemperatureDemo)(
+        backend.text.trim(),
+      );
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '温度演示记录已重置');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _temperatureDemoStatus = '重置失败：$error');
+    } finally {
+      if (mounted) setState(() => _changingTemperatureDemo = false);
+    }
+  }
+
+  static Future<TemperatureDemoState> _defaultStartTemperatureDemo(
+    String baseUrl,
+  ) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.startTemperatureDemo();
+    } finally {
+      api.close();
+    }
+  }
+
+  static Future<TemperatureDemoState> _defaultResetTemperatureDemo(
+    String baseUrl,
+  ) async {
+    final api = FootGuardApiClient(baseUrl: baseUrl);
+    try {
+      return await api.resetTemperatureDemo();
+    } finally {
+      api.close();
     }
   }
 
@@ -447,9 +520,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
           body: '每次更换体验者或重新穿鞋后，先采集 40 组稳定双足承重样本。'
               '偏载使用左右载荷对数比相对本次基线的变化，前掌使用足内占比变化，'
               '并结合基线波动自动提高噪声较大场景的阈值。压力持续 5/10/20 秒分别进入趋势观察、需要减负、持续未改善；'
-              '压力 10 秒或温度 15 秒时文字与语音提醒一次，压力 20 秒或温度 30 秒仍未恢复时马达执行一次。'
+              '压力 10 秒或温度 15 秒时文字与语音提醒一次；只有压力持续 20 秒仍未恢复时才执行马达。'
               '趋势观察不弹窗、不播报、不震动。'
               '以上为工程原型规则，不是医疗诊断标准。',
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.science_outlined),
+                    const SizedBox(width: 10),
+                    Text('单次温度演示',
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '准备后脱鞋，手按右脚 T4 温度传感器直到语音提醒。系统只生成一条演示证据，不计入真实评级。',
+                  style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
+                ),
+                if (_temperatureDemoStatus != null) ...[
+                  const SizedBox(height: 8),
+                  Text(_temperatureDemoStatus!,
+                      key: const ValueKey('temperature-demo-status')),
+                ],
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _changingTemperatureDemo
+                            ? null
+                            : _startTemperatureDemo,
+                        icon: const Icon(Icons.play_arrow_rounded),
+                        label: const Text('准备演示'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.outlined(
+                      tooltip: '重置温度演示',
+                      onPressed: _changingTemperatureDemo
+                          ? null
+                          : _resetTemperatureDemo,
+                      icon: const Icon(Icons.restart_alt_rounded),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
         const SizedBox(height: 12),
         Card(
@@ -483,9 +608,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                Text(
+                  Text(
                   _calibrationStatus == null
                       ? '点击刷新，从后端读取当前学习进度。'
+                      : !_calibrationStatus!.emptyTemperatureReferenceReady &&
+                              _calibrationStatus!.emptySampleCount > 0
+                          ? '空载温度采集：${_calibrationStatus!.emptySampleCount}/'
+                              '${_calibrationStatus!.emptyRequiredSamples} 组样本'
                       : _calibrationStatus!.baselineReady
                           ? '本次穿戴基线已完成，压力风险与马达已启用'
                           : _calibrationStatus!.sampleCount >=
@@ -498,13 +627,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (_calibrationStatus != null &&
                     !_calibrationStatus!.baselineReady) ...[
                   const SizedBox(height: 8),
-                  LinearProgressIndicator(value: _calibrationStatus!.progress),
+                  LinearProgressIndicator(
+                    value: !_calibrationStatus!.emptyTemperatureReferenceReady &&
+                            _calibrationStatus!.emptySampleCount > 0
+                        ? _calibrationStatus!.emptyProgress
+                        : _calibrationStatus!.progress,
+                  ),
                   const SizedBox(height: 6),
                   Text(
                     _calibrationReason(_calibrationStatus!.statusReason),
                     style: const TextStyle(
                       color: Color(0xFF718096),
-                      fontSize: 12,
+                      fontSize: 13,
                     ),
                   ),
                 ],

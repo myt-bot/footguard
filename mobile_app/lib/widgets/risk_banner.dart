@@ -12,6 +12,8 @@ class RiskBanner extends StatelessWidget {
     this.pressureAvailable = true,
     this.recoveryObservation,
     this.backendOnline = true,
+    this.motionState = 'unavailable',
+    this.motorVibrationActive = false,
   });
 
   final RiskState risk;
@@ -20,6 +22,8 @@ class RiskBanner extends StatelessWidget {
   final bool pressureAvailable;
   final RecoveryObservation? recoveryObservation;
   final bool backendOnline;
+  final String motionState;
+  final bool motorVibrationActive;
 
   @override
   Widget build(BuildContext context) {
@@ -48,6 +52,8 @@ class RiskBanner extends StatelessWidget {
         ? (const Color(0xFF39758C), Icons.tune_rounded, '本次穿戴基线学习中')
         : !pressureAvailable && risk.isNormal
             ? (const Color(0xFFC77822), Icons.sensors_off_rounded, '未检测到有效承重')
+            : motionState == 'moving' && risk.isNormal
+                ? (const Color(0xFF39758C), Icons.directions_walk_rounded, '行走中')
             : switch (primary.riskType) {
                 'normal' => (
                     const Color(0xFF1A9B78),
@@ -84,9 +90,9 @@ class RiskBanner extends StatelessWidget {
                     primary.isIncomplete ? '双足数据不完整' : _riskLabel(primary),
                   ),
               };
-    final resolvedTitle = multiplePressureRisks ? '多项压力风险' : title;
     final observation = recoveryObservation;
     final observing = observation?.status == 'observing';
+    final resolvedTitle = multiplePressureRisks ? '多项压力风险' : title;
     final seconds =
         observation == null ? 0 : (observation.remainingMs / 1000).ceil();
     final progress = observation == null
@@ -131,8 +137,10 @@ class RiskBanner extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      !baselineReady && risk.isNormal
-                          ? '热力图继续显示，压力风险与马达暂未启用'
+                      motionState == 'moving' && risk.isNormal
+                          ? '当前处于运动状态，静态压力风险暂不判定'
+                          : !baselineReady && risk.isNormal
+                              ? '热力图继续显示，压力风险与马达暂未启用'
                           : !pressureAvailable && risk.isNormal
                               ? '压力风险已暂停；请确认已穿戴并检查压力采集连接'
                               : primary.isNormal
@@ -208,6 +216,13 @@ class RiskBanner extends StatelessWidget {
                     .toList(growable: false),
               ),
             ],
+          ],
+          if (motorVibrationActive) ...[
+            const SizedBox(height: 8),
+            const Text(
+              '马达振动已隔离；当前状态仍按实时压力和运动数据判断',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
           ],
           if (temperatureRisks.isNotEmpty) ...[
             const SizedBox(height: 10),

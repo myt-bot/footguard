@@ -22,7 +22,7 @@ import '../widgets/risk_banner.dart';
 
 String? realtimeTemperatureStatusText(CalibrationStatus? current) {
   if (current == null || !current.emptyTemperatureReferenceReady) {
-    return '温度参考学习中：双脚先离开鞋垫，保持约 27 秒；此阶段温差只显示、不报警。';
+    return '温度参考学习中：请保持双脚离开鞋垫，等待采集进度完成；此阶段温差只显示、不报警。';
   }
   if (!current.baselineReady) {
     return '空载温度参考已完成，请穿鞋自然站立完成本次穿戴基线。';
@@ -251,7 +251,15 @@ class _RealtimeScreenState extends State<RealtimeScreen>
                           controller.right?.pressureChannelsValid == true),
               recoveryObservation: controller.recoveryObservation,
               backendOnline: controller.backendOnline,
+              motionState: controller.motionState,
+              motorVibrationActive: controller.motorVibrationActive,
             ),
+            if (controller.activeRisks.any(
+              (risk) => risk.riskType == 'temperature_asymmetry',
+            )) ...[
+              const SizedBox(height: 8),
+              _TemperatureObservationCard(controller: controller),
+            ],
             if (controller.activeRisks.any(
                   (risk) => risk.riskType == 'temperature_asymmetry',
                 ) &&
@@ -259,7 +267,7 @@ class _RealtimeScreenState extends State<RealtimeScreen>
               const SizedBox(height: 8),
               const Text(
                 '当前无承重，温度变化仅用于演示或辅助观察，不表示真实穿鞋状态下的医学风险。',
-                style: TextStyle(color: Color(0xFFA86612), fontSize: 12),
+                style: TextStyle(color: Color(0xFFA86612), fontSize: 13),
               ),
             ],
             const SizedBox(height: 10),
@@ -431,6 +439,79 @@ class _RealtimeScreenState extends State<RealtimeScreen>
   }
 }
 
+class _TemperatureObservationCard extends StatelessWidget {
+  const _TemperatureObservationCard({required this.controller});
+
+  final MonitoringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final deltas =
+        controller.regionalAnalysis?.temperatureDeltaC ?? const <double?>[];
+    var zone = -1;
+    double? strongest;
+    for (var index = 0; index < deltas.length; index += 1) {
+      final value = deltas[index];
+      if (value != null &&
+          (strongest == null || value.abs() > strongest.abs())) {
+        strongest = value;
+        zone = index;
+      }
+    }
+    final side = strongest == null
+        ? '未确定'
+        : strongest >= 0
+            ? '左脚'
+            : '右脚';
+    final zoneLabel = switch (zone) {
+      0 => 'T1 前掌外侧',
+      1 => 'T2 拇趾/第一跖骨头邻近',
+      2 => 'T3 足跟中央',
+      3 => 'T4 中足中央',
+      _ => '温区待确认',
+    };
+    final active = controller.activeRisks
+        .where((item) => item.riskType == 'temperature_asymmetry')
+        .fold<int>(0,
+            (value, item) => item.durationMs > value ? item.durationMs : value);
+    final evidence = controller.temperatureEvidence;
+    final demoComplete = evidence.demoDays > 0;
+    return Card(
+      elevation: 0,
+      color: const Color(0xFFFFF8E8),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(children: [
+              Icon(Icons.device_thermostat_rounded, color: Color(0xFF9A6A08)),
+              SizedBox(width: 8),
+              Text('温度观察', style: TextStyle(fontWeight: FontWeight.w800)),
+            ]),
+            const SizedBox(height: 8),
+            Text('$side · $zoneLabel · '
+                '${strongest == null ? '--' : '${strongest.abs().toStringAsFixed(1)}℃'}'),
+            Text('持续 ${(active / 1000).toStringAsFixed(1)} 秒 · '
+                '${controller.calibrationStatus?.temperatureRiskEnabled == true ? '已基线校正' : '基线状态待确认'}'),
+            const SizedBox(height: 6),
+            Text(demoComplete
+                ? '单次温度演示已记录；不计入真实评级'
+                : evidence.realConsecutiveDays >= 2
+                    ? '真实设备已记录连续自然日变化'
+                    : evidence.realDays > 0
+                        ? '真实设备已记录 ${evidence.realDays} 个自然日'
+                        : '暂无真实设备日记录；现场演示不要求两日数据'),
+            const SizedBox(height: 6),
+            const Text('温度仅触发文字和语音观察，不触发马达；本结果不等同于医学诊断。',
+                style: TextStyle(fontSize: 13, color: Color(0xFF795A1D))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _WearingCalibrationCard extends StatelessWidget {
   const _WearingCalibrationCard({
     required this.status,
@@ -477,7 +558,9 @@ class _WearingCalibrationCard extends StatelessWidget {
       };
 
   String get _stageReason => switch (stage) {
-        'empty_reference' => '请保持双脚完全离开鞋垫，空载完成后会立即语音提示',
+        'empty_reference' => status == null
+            ? '请保持双脚完全离开鞋垫，等待空载温度采集进度完成'
+            : '空载温度采集进度：${status!.emptySampleCount}/${status!.emptyRequiredSamples}，请保持双脚离开鞋垫',
         'put_on' => '空载温度已完成，现在可以穿鞋并开始个人基线采集',
         'standing_baseline' => _progressReason,
         'complete' => '个人基线已锁定，风险识别与马达提醒已启用',
@@ -489,7 +572,9 @@ class _WearingCalibrationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ready = status?.baselineReady ?? false;
-    final progress = status?.progress ?? 0.0;
+    final progress = stage == 'empty_reference'
+        ? status?.emptyProgress ?? 0.0
+        : status?.progress ?? 0.0;
     final color = ready ? const Color(0xFF168A70) : const Color(0xFF39758C);
     return Card(
       elevation: 0,
@@ -540,13 +625,13 @@ class _WearingCalibrationCard extends StatelessWidget {
             const SizedBox(height: 7),
             Text(
               _stageReason,
-              style: const TextStyle(color: Color(0xFF63757B), fontSize: 12),
+              style: const TextStyle(color: Color(0xFF63757B), fontSize: 13),
             ),
             if (_temperatureReason case final reason?) ...[
               const SizedBox(height: 5),
               Text(
                 reason,
-                style: const TextStyle(color: Color(0xFF39758C), fontSize: 12),
+                style: const TextStyle(color: Color(0xFF39758C), fontSize: 13),
               ),
             ],
           ],
@@ -715,7 +800,7 @@ class _Metric extends StatelessWidget {
           children: [
             Text(
               label,
-              style: const TextStyle(color: Color(0xFF718096), fontSize: 12),
+      style: const TextStyle(color: Color(0xFF718096), fontSize: 13),
             ),
             const SizedBox(height: 3),
             Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),

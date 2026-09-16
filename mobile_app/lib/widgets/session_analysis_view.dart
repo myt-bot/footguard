@@ -154,7 +154,7 @@ class _AdviceCard extends StatelessWidget {
             Text(advice?.advice ?? '暂无可用会话建议。完成一次穿戴监测后可在此查看。'),
             const SizedBox(height: 6),
             const Text('仅用于辅助观察，不替代医疗诊断。',
-                style: TextStyle(fontSize: 11, color: Color(0xFF60706F))),
+                style: TextStyle(fontSize: 12, color: Color(0xFF60706F))),
           ],
         ),
       );
@@ -199,7 +199,7 @@ class _TrendCard extends StatelessWidget {
         Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
         const SizedBox(height: 4),
         Text(subtitle,
-            style: const TextStyle(fontSize: 11, color: Color(0xFF6E7B7A))),
+            style: const TextStyle(fontSize: 12, color: Color(0xFF6E7B7A))),
         const SizedBox(height: 10),
         Wrap(
           spacing: 12,
@@ -207,7 +207,7 @@ class _TrendCard extends StatelessWidget {
               .map((item) => Row(mainAxisSize: MainAxisSize.min, children: [
                     Container(width: 10, height: 3, color: item.color),
                     const SizedBox(width: 5),
-                    Text(item.label, style: const TextStyle(fontSize: 11)),
+                    Text(item.label, style: const TextStyle(fontSize: 12)),
                   ]))
               .toList(growable: false),
         ),
@@ -223,7 +223,7 @@ class _TrendCard extends StatelessWidget {
               child: Align(
                 alignment: Alignment.topRight,
                 child: Text('${format(maximum)}  ',
-                    style: const TextStyle(fontSize: 10)),
+                    style: const TextStyle(fontSize: 11)),
               ),
             ),
           ),

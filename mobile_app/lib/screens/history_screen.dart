@@ -7,6 +7,7 @@ import '../models/offline_intervention.dart';
 import '../models/gait_summary.dart';
 import '../models/ai_question_answer.dart';
 import '../models/session_advice.dart';
+import '../models/assessment.dart';
 import '../services/offline_monitoring_store.dart';
 
 class HistoryScreen extends StatefulWidget {
@@ -21,7 +22,7 @@ class HistoryScreen extends StatefulWidget {
 
 enum _HistoryFilter { all, active, finished }
 
-enum _HistoryView { risks, gait }
+enum _HistoryView { assessment, risks, gait }
 
 class _HistoryPayload {
   const _HistoryPayload({
@@ -97,7 +98,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  '汇总站立风险、干预前后变化和完整行走评估。',
+                  '查看最近监测情况、变化趋势和下一步建议。',
                   style: TextStyle(color: Color(0xFF607D7B), height: 1.4),
                 ),
                 const SizedBox(height: 16),
@@ -124,7 +125,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: _SummaryTile(
-                        label: '已执行干预',
+                        label: '已发出提醒',
                         value:
                             '${result.summary?.motorExecutedCount ?? data.where((event) => event.interventionStartedAtMs != null).length} 次',
                         icon: Icons.warning_amber_rounded,
@@ -146,6 +147,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 SegmentedButton<_HistoryView>(
                   segments: const [
                     ButtonSegment(
+                      value: _HistoryView.assessment,
+                      icon: Icon(Icons.assessment_outlined),
+                      label: Text('综合评估'),
+                    ),
+                    ButtonSegment(
                       value: _HistoryView.risks,
                       icon: Icon(Icons.warning_amber_rounded),
                       label: Text('风险事件'),
@@ -161,7 +167,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       setState(() => view = value.first),
                 ),
                 const SizedBox(height: 12),
-                if (view == _HistoryView.risks) ...[
+                if (view == _HistoryView.assessment)
+                  _AssessmentPanel(
+                    summary: result.summary,
+                    onEditProfile: result.summary == null
+                        ? null
+                        : () => _editHealthProfile(result.summary!),
+                    onAddGlucose: _addGlucose,
+                  )
+                else if (view == _HistoryView.risks) ...[
                   Wrap(
                     spacing: 8,
                     children: [
@@ -210,6 +224,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     SessionAdvice? advice;
     SessionSummary? summary;
     var cached = false;
+    await _syncPendingHealthData();
     try {
       events = await api.events();
       await _store.saveHistoryEvents(
@@ -303,10 +318,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
     return SessionAdvice(
       provider: 'local-session-template',
       sessionStatus: 'recent',
-      advice: '当前无实时后端数据，以下为最近会话辅助建议：'
-          '本地记录 ${pressureEvents.length} 次压力减负事件，'
-          '其中 ${recovered.length} 次在观察期内有改善。'
-          '建议优先核对反复出现的一侧和前掌区域，并结合皮肤外观、鞋内异物与鞋垫贴合情况观察。'
+      advice: '最近情况：出现过 ${pressureEvents.length} 次受力提醒，'
+          '其中 ${recovered.length} 次随后有所缓解。\n'
+          '建议：优先检查反复出现的一侧和前掌区域，留意皮肤外观、鞋内异物与鞋垫贴合；'
+          '下一次自然行走时观察是否仍在同一侧。'
           '本建议仅用于辅助监测，不替代医疗诊断。',
     );
   }
@@ -338,6 +353,181 @@ class _HistoryScreenState extends State<HistoryScreen> {
       if (mounted) setState(() => sessionQuestionLoading = false);
     }
   }
+
+  Future<void> _editHealthProfile(SessionSummary summary) async {
+    var ulcer = summary.healthProfile.ulcerOrAmputation;
+    var sensory = summary.healthProfile.sensoryOrCirculationIssue;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('足部背景提示'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: ulcer,
+                decoration: const InputDecoration(labelText: '既往足部溃疡或截肢'),
+                items: _healthOptions(),
+                onChanged: (value) =>
+                    setDialogState(() => ulcer = value ?? 'unknown'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: sensory,
+                decoration: const InputDecoration(labelText: '医生提示感觉减退或供血问题'),
+                items: _healthOptions(),
+                onChanged: (value) =>
+                    setDialogState(() => sensory = value ?? 'unknown'),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                '这里只保存背景提示，不生成 IWGDF 临床分级。',
+                style: TextStyle(fontSize: 13, color: Color(0xFF718096)),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    final profile = HealthProfile(
+      ulcerOrAmputation: ulcer,
+      sensoryOrCirculationIssue: sensory,
+      completeness: ulcer != 'unknown' && sensory != 'unknown'
+          ? 'complete'
+          : 'incomplete',
+    );
+    try {
+      await api.updateHealthProfile(profile);
+      await _store.clearPendingHealthProfile();
+    } catch (_) {
+      await _store.savePendingHealthProfile(profile);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('后端暂不可用，足部背景已在本地等待同步')),
+        );
+      }
+    }
+    await _reload();
+  }
+
+  Future<void> _addGlucose() async {
+    final controller = TextEditingController();
+    var unit = 'mmol/L';
+    var contextValue = 'random';
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('新增血糖记录'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                    labelText: '血糖数值', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: unit,
+                decoration: const InputDecoration(labelText: '单位'),
+                items: const [
+                  DropdownMenuItem(value: 'mmol/L', child: Text('mmol/L')),
+                  DropdownMenuItem(value: 'mg/dL', child: Text('mg/dL')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => unit = value ?? unit),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: contextValue,
+                decoration: const InputDecoration(labelText: '测量时点'),
+                items: const [
+                  DropdownMenuItem(value: 'fasting', child: Text('空腹')),
+                  DropdownMenuItem(value: 'pre_meal', child: Text('餐前')),
+                  DropdownMenuItem(value: 'post_meal', child: Text('餐后')),
+                  DropdownMenuItem(value: 'random', child: Text('随机')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => contextValue = value ?? contextValue),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    final value = double.tryParse(controller.text.trim());
+    controller.dispose();
+    if (saved != true || value == null || value <= 0) return;
+    final reading = GlucoseReading(
+      value: value,
+      unit: unit,
+      context: contextValue,
+      measuredAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    try {
+      await api.addGlucose(reading);
+    } catch (_) {
+      final pending = await _store.loadPendingGlucose();
+      await _store.savePendingGlucose([...pending, reading]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('后端暂不可用，血糖记录已在本地等待同步')),
+        );
+      }
+    }
+    await _reload();
+  }
+
+  Future<void> _syncPendingHealthData() async {
+    final profile = await _store.loadPendingHealthProfile();
+    if (profile != null) {
+      try {
+        await api.updateHealthProfile(profile);
+        await _store.clearPendingHealthProfile();
+      } catch (_) {
+        return;
+      }
+    }
+    final readings = await _store.loadPendingGlucose();
+    if (readings.isEmpty) return;
+    for (var index = 0; index < readings.length; index += 1) {
+      try {
+        final reading = readings[index];
+        await api.addGlucose(reading);
+      } catch (_) {
+        await _store.savePendingGlucose(readings.sublist(index));
+        return;
+      }
+    }
+    await _store.clearPendingGlucose();
+  }
+
+  static List<DropdownMenuItem<String>> _healthOptions() => const [
+        DropdownMenuItem(value: 'no', child: Text('无')),
+        DropdownMenuItem(value: 'yes', child: Text('有')),
+        DropdownMenuItem(value: 'unknown', child: Text('不确定')),
+      ];
 }
 
 class _SessionAdvicePanel extends StatelessWidget {
@@ -398,12 +588,6 @@ class _SessionAdvicePanel extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(advice!.advice),
-                const SizedBox(height: 6),
-                Text(
-                  advice!.provider,
-                  style:
-                      const TextStyle(color: Color(0xFF718096), fontSize: 11),
-                ),
               ],
               const SizedBox(height: 14),
               const Divider(height: 1),
@@ -470,7 +654,7 @@ class _SessionAdvicePanel extends StatelessWidget {
                   questionStatus,
                   style: const TextStyle(
                     color: Color(0xFF718096),
-                    fontSize: 12,
+                    fontSize: 13,
                   ),
                 ),
             ],
@@ -697,37 +881,8 @@ class _HistoryEventCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF2F5F5),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Wrap(
-              spacing: 18,
-              runSpacing: 8,
-              children: [
-                Text(
-                  event.interventionStartedAtMs == null
-                      ? '马达：未执行'
-                      : '马达：已执行一次${event.motorTarget == null ? '' : '（${_sideLabel(event.motorTarget!)}）'}',
-                ),
-                if (event.interventionStartedAtMs != null)
-                  Text('干预时间：${_formatClock(event.interventionStartedAtMs!)}'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 2),
           _RecoveryPanel(event: event),
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              '事件编号 ${event.eventId}',
-              style: const TextStyle(fontSize: 11, color: Color(0xFF879291)),
-            ),
-          ),
         ],
       ),
     );
@@ -751,15 +906,13 @@ class _GaitTrendPanel extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '行走趋势证据 ${trend.evidenceEpisodeCount}/3 段 · ${trend.evidenceStepCount} 次落脚',
+              '最近行走情况 · ${trend.evidenceStepCount} 次落脚',
               style: const TextStyle(fontWeight: FontWeight.w800),
             ),
             const SizedBox(height: 7),
             if (trend.confirmedIssues.isEmpty)
               Text(
-                trend.evidenceEpisodeCount < 3
-                    ? '重复趋势证据仍在收集中；单段达到主问题阈值时仍会实时提醒。'
-                    : '最近三段未形成同一方向的偏载或前掌反复受压趋势。',
+                '最近行走记录中暂未出现重复的同向受力变化。',
                 style: const TextStyle(color: Color(0xFF147D73)),
               )
             else
@@ -829,16 +982,12 @@ class _GaitEpisodeCard extends StatelessWidget {
                   value: '${episode.leftSteps} / ${episode.rightSteps}',
                 ),
                 _DetailValue(
-                  label: '估算步频',
+                  label: '平均步频',
                   value: '${episode.cadenceSpm.toStringAsFixed(0)} 步/分钟',
                 ),
                 _DetailValue(
-                  label: '负荷不对称',
+                  label: '左右受力差',
                   value: _formatPercent(episode.loadAsymmetry),
-                ),
-                _DetailValue(
-                  label: '步时变异',
-                  value: _formatPercent(episode.stepIntervalCv),
                 ),
               ],
             ),
@@ -885,7 +1034,7 @@ class _StatusPill extends StatelessWidget {
         label,
         style: TextStyle(
           color: color,
-          fontSize: 12,
+          fontSize: 13,
           fontWeight: FontWeight.w700,
         ),
       ),
@@ -905,7 +1054,7 @@ class _DetailValue extends StatelessWidget {
         children: [
           Text(
             label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
+            style: const TextStyle(fontSize: 13, color: Color(0xFF71807F)),
           ),
           const SizedBox(height: 3),
           Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
@@ -939,8 +1088,8 @@ class _RecoveryPanel extends StatelessWidget {
         ),
         child: Text(
           event.status == 'active'
-              ? '事件仍在持续，结束后将评估提醒前后的负载变化。'
-              : '本次事件没有完整的提醒前后对比数据。',
+              ? '提醒仍在持续，结束后再观察受力是否回到平稳状态。'
+              : '本次提醒前后没有足够资料，暂时无法判断是否改善。',
           style: const TextStyle(color: Color(0xFF60706F)),
         ),
       );
@@ -981,7 +1130,7 @@ class _RecoveryPanel extends StatelessWidget {
               ),
               const SizedBox(width: 7),
               Text(
-                '干预后评估：$result',
+                '提醒后变化：$result',
                 style: TextStyle(color: color, fontWeight: FontWeight.w800),
               ),
             ],
@@ -999,7 +1148,7 @@ class _RecoveryPanel extends StatelessWidget {
           if (event.interventionAction != null) ...[
             const SizedBox(height: 5),
             Text(
-              '干预记录：${_actionLabel(event.interventionAction!)}',
+              '观察方式：${_actionLabel(event.interventionAction!)}',
               style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
             ),
           ],
@@ -1059,7 +1208,7 @@ class _ComponentRecoveryPanel extends StatelessWidget {
                               '${_formatComponentValue(item, item.beforeValue!)} → '
                               '${_formatComponentValue(item, item.afterValue!)}'
                               '${_componentChangeLabel(item)}'
-                          : '有效静止配对数据不足，未计算改善程度',
+                          : '前后资料不足，暂时无法判断改善程度',
                       style: const TextStyle(
                         color: Color(0xFF60706F),
                         fontSize: 12,
@@ -1082,10 +1231,9 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final isActive = event.status == 'active';
     final description = switch (event.riskType) {
-      'temperature_asymmetry' => '温差事件不能用左右负载差判定干预效果；本页仅记录事件是否解除和恢复用时。',
-      _ when event.interventionStartedAtMs == null =>
-        '本次未执行马达提醒，因此不评价干预后的改善程度。',
-      _ => '本次干预前后没有取得足够的有效静止配对数据，暂不计算改善程度。',
+      'temperature_asymmetry' => '温度提醒单独观察，不用受力变化来判断是否改善。',
+      _ when event.interventionStartedAtMs == null => '本次没有形成可比较的提醒前后记录。',
+      _ => '本次提醒前后资料不足，暂不判断改善程度。',
     };
     return Container(
       width: double.infinity,
@@ -1107,7 +1255,7 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             description,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF60706F)),
+              style: const TextStyle(fontSize: 13, color: Color(0xFF60706F)),
           ),
           if (event.recoveryTimeMs != null) ...[
             const SizedBox(height: 5),
@@ -1116,13 +1264,180 @@ class _NonLoadBiasRecoveryPanel extends StatelessWidget {
           if (event.interventionAction != null) ...[
             const SizedBox(height: 5),
             Text(
-              '干预记录：${_actionLabel(event.interventionAction!)}',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF71807F)),
+              '提醒记录：${_actionLabel(event.interventionAction!)}',
+              style: const TextStyle(fontSize: 13, color: Color(0xFF71807F)),
             ),
           ],
         ],
       ),
     );
+  }
+}
+
+class _AssessmentPanel extends StatelessWidget {
+  const _AssessmentPanel({
+    required this.summary,
+    required this.onEditProfile,
+    required this.onAddGlucose,
+  });
+
+  final SessionSummary? summary;
+  final VoidCallback? onEditProfile;
+  final VoidCallback onAddGlucose;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = summary;
+    final rating = data?.monitoringRating;
+    if (data == null || rating == null) {
+      return const _Message(
+        icon: Icons.assessment_outlined,
+        text: '暂无综合评估数据\n连接后端并完成本次穿戴基线后再刷新',
+      );
+    }
+    final realRecords =
+        data.temperatureEvidence.records.where((item) => !item.isDemo);
+    final demoRecords =
+        data.temperatureEvidence.records.where((item) => item.isDemo);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const Icon(Icons.assessment_outlined),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                      child: Text('近期监测评级',
+                          style: TextStyle(fontWeight: FontWeight.w800))),
+                  Text(rating.label,
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                ]),
+                const SizedBox(height: 8),
+                Text(rating.trendLabel),
+                if (rating.evidence.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  for (final item in rating.evidence) Text('• $item'),
+                ],
+                const Divider(height: 22),
+                Text(
+                  rating.dataQuality.isEmpty
+                      ? '本次资料完整，可用于趋势观察。'
+                      : '本次资料仍有部分缺失，评级仅供当前展示参考。',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF607D7B),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text('本评级仅描述 FootGuard 近期监测证据，不是医疗诊断、溃疡预测或 IWGDF 临床等级。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF718096))),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('温度日记录',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text(
+                    '真实设备观察：${data.temperatureEvidence.realConsecutiveDays >= 2 ? '已记录连续自然日变化' : data.temperatureEvidence.realDays > 0 ? '已记录 ${data.temperatureEvidence.realDays} 个自然日' : '暂无记录；现场演示不要求两日数据'}'),
+                if (realRecords.isEmpty)
+                  const Text('暂无真实设备日记录',
+                      style: TextStyle(color: Color(0xFF718096)))
+                else
+                  for (final item in realRecords.take(4)) _temperatureRow(item),
+                const Divider(height: 22),
+                Text(
+                    '演示证据：${data.temperatureEvidence.demoDays > 0 ? '单次演示已准备/完成' : '尚未准备'}'),
+                if (demoRecords.isEmpty)
+                  const Text('暂无演示记录',
+                      style: TextStyle(color: Color(0xFF718096)))
+                else
+                  for (final item in demoRecords.take(4)) _temperatureRow(item),
+                const SizedBox(height: 8),
+                const Text('演示记录始终与真实自然日证据分开，不改变真实评级。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF9A6A08))),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Card(
+          elevation: 0,
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.medical_information_outlined),
+                title: const Text('足部背景提示',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: Text(data.healthProfile.completeness == 'complete'
+                    ? '背景资料已填写'
+                    : '背景资料不足；不会猜测临床分级'),
+                trailing: IconButton(
+                  tooltip: '编辑足部背景',
+                  onPressed: onEditProfile,
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.bloodtype_outlined),
+                title: const Text('血糖记录',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: data.recentGlucoseReadings.isEmpty
+                    ? const Text('暂无记录；血糖仅作为综合解释背景')
+                    : Text(_glucoseLabel(data.recentGlucoseReadings.first)),
+                trailing: IconButton(
+                  tooltip: '新增血糖记录',
+                  onPressed: onAddGlucose,
+                  icon: const Icon(Icons.add_rounded),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  static Widget _temperatureRow(TemperatureDailyRecord item) => Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Row(children: [
+          if (item.isDemo)
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child: Text('演示',
+                  style: TextStyle(
+                      color: Color(0xFF9A6A08), fontWeight: FontWeight.w700)),
+            ),
+          Expanded(
+              child: Text(
+                  '${item.recordDate} ${_sideLabel(item.side)} ${item.zone}')),
+          Text('${item.correctedDeltaC.abs().toStringAsFixed(1)}℃'),
+        ]),
+      );
+
+  static String _glucoseLabel(GlucoseReading item) {
+    final context = switch (item.context) {
+      'fasting' => '空腹',
+      'pre_meal' => '餐前',
+      'post_meal' => '餐后',
+      _ => '随机',
+    };
+    return '最近：$context ${item.value.toStringAsFixed(1)} ${item.unit}；仅作背景，不改变评级';
   }
 }
 
@@ -1164,7 +1479,7 @@ String _gaitIssueLabel(GaitIssue issue) {
   return switch (issue.issueType) {
     'walking_load_asymmetry' => '$side行走负荷偏高',
     'walking_forefoot_concentration' => '$side前掌反复受压',
-    _ => '行走工程观察',
+    _ => '行走受力观察',
   };
 }
 
@@ -1207,7 +1522,7 @@ bool _pressureEventImproved(RiskEventRecord event) {
 }
 
 String _actionLabel(String action) => switch (action) {
-      'motor_vibration' => '马达提醒后调整姿势',
+      'motor_vibration' => '提醒后调整姿势',
       'followed_vibration' => '按震动提醒调整',
       _ => action,
     };

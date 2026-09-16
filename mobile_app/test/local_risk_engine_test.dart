@@ -240,6 +240,22 @@ void main() {
     expect(result!.calibrationStage, 'put_on');
   });
 
+  test('empty reference waits for every temperature zone to be usable', () {
+    final engine = LocalRiskEngine();
+    const unloaded = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    LocalRiskResult? result;
+    for (var sequence = 0; sequence <= 536; sequence += 1) {
+      result = engine.evaluate([
+        frame('left', sequence, unloaded, qualityFlags: 0x40,
+            timestampMs: 200000 + sequence * 50),
+        frame('right', sequence, unloaded,
+            timestampMs: 200011 + sequence * 50),
+      ]);
+    }
+    expect(result!.calibrationStage, 'empty_reference');
+    expect(result.emptySampleCount, LocalRiskEngine.emptyRequiredSamples);
+  });
+
   test(
     'uses timestamps rather than a fixed sample interval for motor timing',
     () {
@@ -425,8 +441,8 @@ void main() {
       ]);
     }
     expect(result!.risk.riskLevel, 3);
-    expect(result.motorTarget, 'both');
-    expect(result.motorPattern, 'long');
+    expect(result.motorTarget, isNull);
+    expect(result.motorPattern, isNull);
 
     result = engine.evaluate([
       frame(

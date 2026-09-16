@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -228,6 +228,7 @@ class RealtimeResponse(StrictModel):
     load_bias: float | None
     load_diff: float | None
     motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
+    motor_vibration_active: bool = False
     left_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
     right_motion_state: Literal["stationary", "moving", "unavailable"] = "unavailable"
     gait: GaitSummary = Field(
@@ -389,6 +390,8 @@ class CalibrationStatus(StrictModel):
         "temperature_unstable",
     ] = "waiting_for_data"
     empty_temperature_reference_ready: bool = False
+    empty_sample_count: int = Field(default=0, ge=0)
+    empty_required_samples: int = Field(default=60, gt=0)
     temperature_risk_enabled: bool = False
     temperature_offset_channels: list[int] = Field(default_factory=list)
     temperature_untrusted_channels: list[int] = Field(default_factory=list)
@@ -450,6 +453,109 @@ class GaitTrendSummary(StrictModel):
     confirmed_issues: list[GaitIssue] = Field(default_factory=list)
 
 
+class TemperatureDailyRecordOut(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    record_id: str
+    record_date: str
+    side: Literal["left", "right"]
+    zone: Literal["T1", "T2", "T3", "T4"]
+    raw_delta_c: float
+    corrected_delta_c: float
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int = Field(ge=0)
+    valid_zone_count: int = Field(ge=0, le=4)
+    source: Literal["device_observation", "demo"]
+    load_state: str
+    motion_state: str
+    quality: str
+    demo_session_id: str | None = None
+
+
+class TemperatureEvidenceSummary(StrictModel):
+    real_days: int = Field(default=0, ge=0)
+    real_consecutive_days: int = Field(default=0, ge=0)
+    demo_days: int = Field(default=0, ge=0)
+    status: Literal[
+        "no_data",
+        "single_day",
+        "two_day",
+        "demo_single",
+        "insufficient_data",
+    ] = "no_data"
+    records: list[TemperatureDailyRecordOut] = Field(default_factory=list)
+
+
+class MonitoringRatingSummary(StrictModel):
+    rating: Literal["normal", "attention", "review", "persistent", "insufficient_data"]
+    level: int = Field(ge=0, le=4)
+    label: str
+    trend: Literal["improving", "stable", "worsening", "insufficient_data", "unavailable"] = "unavailable"
+    trend_label: str
+    evidence: list[str] = Field(default_factory=list)
+    data_quality: list[str] = Field(default_factory=list)
+    session_id: str | None = None
+    previous_session_id: str | None = None
+    is_demo_only: bool = False
+
+
+class HealthProfile(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    ulcer_or_amputation: Literal["no", "yes", "unknown"] = "unknown"
+    sensory_or_circulation_issue: Literal["no", "yes", "unknown"] = "unknown"
+    completeness: Literal["complete", "incomplete"] = "incomplete"
+
+
+class HealthProfileUpdate(StrictModel):
+    ulcer_or_amputation: Literal["no", "yes", "unknown"] = "unknown"
+    sensory_or_circulation_issue: Literal["no", "yes", "unknown"] = "unknown"
+
+
+class GlucoseReading(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+    reading_id: str
+    value: float = Field(gt=0, le=1000)
+    unit: Literal["mmol/L", "mg/dL"]
+    context: Literal["fasting", "pre_meal", "post_meal", "random"]
+    measured_at_ms: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=200)
+
+    @computed_field
+    @property
+    def value_mmol_l(self) -> float:
+        return self.value if self.unit == "mmol/L" else self.value / 18.0
+
+
+class GlucoseReadingCreate(StrictModel):
+    value: float = Field(gt=0, le=1000)
+    unit: Literal["mmol/L", "mg/dL"]
+    context: Literal["fasting", "pre_meal", "post_meal", "random"]
+    measured_at_ms: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_unit_range(self) -> "GlucoseReadingCreate":
+        upper = 55.5 if self.unit == "mmol/L" else 1000.0
+        if self.value > upper:
+            raise ValueError(f"value exceeds the supported range for {self.unit}")
+        return self
+
+
+class AssessmentSummary(StrictModel):
+    rating: MonitoringRatingSummary
+    previous_rating: MonitoringRatingSummary | None = None
+    temperature: TemperatureEvidenceSummary = Field(default_factory=TemperatureEvidenceSummary)
+    health_profile: HealthProfile = Field(default_factory=HealthProfile)
+    glucose_readings: list[GlucoseReading] = Field(default_factory=list)
+
+
+class TemperatureDemoResponse(StrictModel):
+    active: bool
+    demo_session_id: str | None = None
+    seed_date: str | None = None
+    current_date: str | None = None
+    status: str = "inactive"
+
+
 class SessionSummary(StrictModel):
     session_status: Literal["live", "recent", "empty"]
     data_source: Literal["ble", "mock", "csv_replay", "none"] = "none"
@@ -477,6 +583,10 @@ class SessionSummary(StrictModel):
     gait_episode_count: int = Field(default=0, ge=0)
     latest_gait_episodes: list[GaitEpisodeSummary] = Field(default_factory=list)
     gait_trend: GaitTrendSummary = Field(default_factory=GaitTrendSummary)
+    monitoring_rating: MonitoringRatingSummary | None = None
+    temperature_evidence: TemperatureEvidenceSummary = Field(default_factory=TemperatureEvidenceSummary)
+    health_profile: HealthProfile = Field(default_factory=HealthProfile)
+    recent_glucose_readings: list[GlucoseReading] = Field(default_factory=list)
 
 
 class SessionAdviceResponse(StrictModel):

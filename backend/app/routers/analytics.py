@@ -37,6 +37,13 @@ from ..services.ai_advisor_service import (
     generate_session_advice,
     generate_session_question_answer,
 )
+from ..services.assessment_service import (
+    current_rating,
+    glucose_readings,
+    health_profile,
+    save_session_snapshot,
+    temperature_evidence,
+)
 from ..repositories.calibration_repository import BASELINE_STATE_KEY, calibration_profile
 
 router = APIRouter(prefix="/api/v1", tags=["analytics"])
@@ -162,6 +169,8 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
     gait_episodes, gait_trend = gait_history_summary(
         session, window_start_ms, limit=200
     )
+    monitoring_rating = save_session_snapshot(session)
+    previous_rating = None
     event_outputs = [_event_out(session, event) for event in events]
     pressure_feedback = [
         item
@@ -220,6 +229,17 @@ def latest_session(session: Session = Depends(get_db)) -> SessionSummary:
         gait_episode_count=len(gait_episodes),
         latest_gait_episodes=gait_episodes[:8],
         gait_trend=gait_trend,
+        monitoring_rating=monitoring_rating,
+        temperature_evidence=temperature_evidence(
+            session,
+            after_ms=(
+                calibration_state.reset_at_ms
+                if calibration_state and calibration_state.reset_at_ms
+                else None
+            ),
+        ),
+        health_profile=health_profile(session),
+        recent_glucose_readings=glucose_readings(session, limit=10),
     )
 
 

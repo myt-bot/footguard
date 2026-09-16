@@ -153,7 +153,7 @@ def test_session_summary_and_csv_exports_work_without_live_data(
     advice = client.post("/api/v1/ai/session-advice")
     assert advice.status_code == 200
     assert advice.json()["session_status"] == "recent"
-    assert "当前无实时数据" in advice.json()["advice"]
+    assert "最近情况：" in advice.json()["advice"]
 
     question = client.post(
         "/api/v1/ai/session-question",

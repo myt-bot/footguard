@@ -4,6 +4,8 @@ class FramePairingService {
   static const _maxPendingKeys = 128;
   final Map<(int, int), Map<String, FootFrame>> _pending = {};
 
+  void clear() => _pending.clear();
+
   List<FootFrame>? add(FootFrame frame) {
     final key = (frame.syncId, frame.packetSeq);
     final frames = _pending.putIfAbsent(key, () => {});

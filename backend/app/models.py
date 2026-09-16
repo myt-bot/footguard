@@ -167,3 +167,68 @@ class CalibrationProfile(Base):
     empty_temperature_slope_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")
     temperature_offset_status_json: Mapped[str] = mapped_column(String(256), default='["unstable","unstable","unstable","unstable"]')
     wearing_temperature_mad_json: Mapped[str] = mapped_column(String(256), default="[0,0,0,0]")
+
+
+class MonitoringSession(Base):
+    __tablename__ = "monitoring_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at_ms: Mapped[int] = mapped_column(Integer, index=True)
+    ended_at_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_source: Mapped[str] = mapped_column(String(16), default="ble")
+    rating: Mapped[str] = mapped_column(String(24), default="insufficient_data")
+    rating_level: Mapped[int] = mapped_column(Integer, default=0)
+    summary_json: Mapped[str] = mapped_column(String(8192), default="{}")
+
+
+class TemperatureDailyRecord(Base):
+    __tablename__ = "temperature_daily_records"
+    __table_args__ = (
+        UniqueConstraint("record_date", "side", "zone", "source"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    record_date: Mapped[str] = mapped_column(String(10), index=True)
+    side: Mapped[str] = mapped_column(String(5))
+    zone: Mapped[str] = mapped_column(String(2))
+    raw_delta_c: Mapped[float] = mapped_column(Float)
+    corrected_delta_c: Mapped[float] = mapped_column(Float)
+    started_at_ms: Mapped[int] = mapped_column(Integer)
+    ended_at_ms: Mapped[int] = mapped_column(Integer)
+    valid_zone_count: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(24), default="device_observation")
+    load_state: Mapped[str] = mapped_column(String(16), default="unknown")
+    motion_state: Mapped[str] = mapped_column(String(16), default="unknown")
+    quality: Mapped[str] = mapped_column(String(24), default="usable")
+    demo_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class TemperatureDemoState(Base):
+    __tablename__ = "temperature_demo_state"
+
+    state_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    demo_session_id: Mapped[str] = mapped_column(String(64), unique=True)
+    started_at_ms: Mapped[int] = mapped_column(Integer)
+    seed_date: Mapped[str] = mapped_column(String(10))
+    current_date: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(16), default="ready")
+
+
+class HealthProfile(Base):
+    __tablename__ = "health_profile"
+
+    profile_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ulcer_or_amputation: Mapped[str] = mapped_column(String(12), default="unknown")
+    sensory_or_circulation_issue: Mapped[str] = mapped_column(String(12), default="unknown")
+    updated_at_ms: Mapped[int] = mapped_column(Integer)
+
+
+class GlucoseReading(Base):
+    __tablename__ = "glucose_readings"
+
+    reading_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str] = mapped_column(String(8))
+    context: Mapped[str] = mapped_column(String(16))
+    measured_at_ms: Mapped[int] = mapped_column(Integer, index=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)

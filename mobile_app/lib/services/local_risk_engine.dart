@@ -13,6 +13,7 @@ class LocalRiskResult {
     required this.loadDiff,
     required this.calibrationStage,
     this.motionState = 'unavailable',
+    this.motorVibrationActive = false,
     this.motorTarget,
     this.motorPattern,
     this.temperatureOffsetStatus = const [
@@ -23,6 +24,8 @@ class LocalRiskResult {
     ],
     this.temperatureRiskEnabled = false,
     this.temperatureRiskReason = 'baseline_not_ready',
+    this.emptySampleCount = 0,
+    this.emptyRequiredSamples = LocalRiskEngine.emptyRequiredSamples,
   });
 
   final RiskState risk;
@@ -33,11 +36,14 @@ class LocalRiskResult {
   final double? loadDiff;
   final String calibrationStage;
   final String motionState;
+  final bool motorVibrationActive;
   final String? motorTarget;
   final String? motorPattern;
   final List<String> temperatureOffsetStatus;
   final bool temperatureRiskEnabled;
   final String temperatureRiskReason;
+  final int emptySampleCount;
+  final int emptyRequiredSamples;
 }
 
 class LocalRiskEngine {
@@ -246,7 +252,7 @@ class LocalRiskEngine {
     if (statuses is List && statuses.length == 4) {
       _temperatureOffsetStatus =
           statuses.map((item) => item.toString()).toList(growable: false);
-      _emptyTemperatureReferenceReady = _temperatureOffsetStatus.any(
+      _emptyTemperatureReferenceReady = _temperatureOffsetStatus.every(
         (item) => item != 'unstable' && item != 'raw_invalid',
       );
     }
@@ -312,7 +318,9 @@ class LocalRiskEngine {
         }
       }
     }
-    if (baselineContact) {
+    final emptyCalibrationStarted = _emptyStartedAtMs != null;
+    if (baselineContact &&
+        (_emptyTemperatureReferenceReady || !emptyCalibrationStarted)) {
       _wearingSeen = true;
     }
 
@@ -320,6 +328,7 @@ class LocalRiskEngine {
         left.pressureChannelsValid &&
         right.pressureChannelsValid &&
         baselineContact &&
+        (_emptyTemperatureReferenceReady || !emptyCalibrationStarted) &&
         leftMotion == true &&
         rightMotion == true &&
         _calibrationSampleDue(timestamp, _lastBaselineSampleAtMs)) {
@@ -394,6 +403,8 @@ class LocalRiskEngine {
         temperatureOffsetStatus: List.unmodifiable(_temperatureOffsetStatus),
         temperatureRiskEnabled: false,
         temperatureRiskReason: 'baseline_not_ready',
+        emptySampleCount: _emptyTemperatureDeltas.length,
+        emptyRequiredSamples: emptyRequiredSamples,
       );
     }
 
@@ -570,7 +581,9 @@ class LocalRiskEngine {
     String? target;
     String? pattern;
     final motorRisks = motionState == 'stationary'
-        ? active.where((item) => item.riskLevel >= 3).toList()
+        ? active
+            .where((item) => item.riskLevel >= 3 && !item.isTemperature)
+            .toList()
         : <RiskState>[];
     if (motorRisks.isNotEmpty) {
       final sides = motorRisks.map((item) => item.riskSide).toSet();
@@ -610,6 +623,8 @@ class LocalRiskEngine {
       temperatureRiskReason: validTemperatureZones.length >= 2
           ? 'ready'
           : 'fewer_than_two_trusted_channels',
+      emptySampleCount: _emptyTemperatureDeltas.length,
+      emptyRequiredSamples: emptyRequiredSamples,
     );
   }
 
@@ -654,7 +669,9 @@ class LocalRiskEngine {
           ? 'assembly_offset'
           : 'normal_offset';
     }, growable: false);
-    _emptyTemperatureReferenceReady = true;
+    _emptyTemperatureReferenceReady = _temperatureOffsetStatus.every(
+      (item) => item != 'unstable' && item != 'raw_invalid',
+    );
   }
 
   static int _validCount(FootFrame frame, int count, bool temperature) =>

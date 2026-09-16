@@ -128,6 +128,11 @@ from ..schemas import (
     RealtimeResponse,
     RiskState,
 )
+from .assessment_service import (
+    active_temperature_demo,
+    record_temperature_event,
+    save_session_snapshot,
+)
 from .command_service import ensure_combined_motor_command, ensure_motor_command
 
 
@@ -409,6 +414,49 @@ def _pair_history(
     return sorted(metrics, key=lambda item: item.timestamp_ms)
 
 
+def _mask_motor_vibration(
+    metrics: list[PairMetric],
+    window: tuple[int, int, set[str]] | None,
+) -> tuple[list[PairMetric], bool]:
+    """Remove command-induced MPU motion from the targeted foot only."""
+    if not metrics or window is None:
+        return metrics, False
+    started_at_ms, ended_at_ms, sides = window
+    active = started_at_ms <= metrics[-1].timestamp_ms <= ended_at_ms
+    masked: list[PairMetric] = []
+    for metric in metrics:
+        if not started_at_ms <= metric.timestamp_ms <= ended_at_ms:
+            masked.append(metric)
+            continue
+        left_state = (
+            "stationary" if "left" in sides else metric.left_motion_state
+        )
+        right_state = (
+            "stationary" if "right" in sides else metric.right_motion_state
+        )
+        states = [
+            state
+            for state in (left_state, right_state)
+            if state != "unavailable"
+        ]
+        motion = (
+            "unavailable"
+            if not states
+            else "moving"
+            if "moving" in states
+            else "stationary"
+        )
+        masked.append(
+            replace(
+                metric,
+                motion_state=motion,
+                left_motion_state=left_state,
+                right_motion_state=right_state,
+            )
+        )
+    return masked, active
+
+
 def _gait_step_events(
     segment: list[PairMetric], baseline: BaselineProfile
 ) -> list[tuple[int, str, PairMetric]]:
@@ -441,8 +489,7 @@ def _gait_step_events(
                 )
             )
         if (
-            metric.motion_state != "moving"
-            or not metric.pressure_valid
+            not metric.pressure_valid
             or any(
                 count < PRESSURE_MIN_VALID_CHANNELS_PER_FOOT
                 for count in credible_channels
@@ -835,7 +882,7 @@ def _completed_gait_segment(
             if end_at_ms - metric.timestamp_ms >= GAIT_EPISODE_END_HOLD_MS:
                 break
             continue
-        if previous_moving_at_ms - metric.timestamp_ms > GAIT_EPISODE_END_HOLD_MS:
+        if previous_moving_at_ms - metric.timestamp_ms > GAIT_EPISODE_END_HOLD_MS * 2:
             break
         start_index = index
         previous_moving_at_ms = metric.timestamp_ms
@@ -853,7 +900,7 @@ def _completed_gait_segments(metrics: list[PairMetric]) -> list[list[PairMetric]
         if (
             last_moving_index is not None
             and metric.timestamp_ms - metrics[last_moving_index].timestamp_ms
-            > GAIT_EPISODE_END_HOLD_MS
+            > GAIT_EPISODE_END_HOLD_MS * 2
         ):
             if start_index is not None:
                 segments.append(metrics[start_index : last_moving_index + 1])
@@ -904,11 +951,21 @@ def _gait_summary(
     ]
     live_episode = _gait_episode_from_segment(recent, baseline)
     live_events = _gait_step_events(recent, baseline)
+    recent_event_age = (
+        latest_at_ms - live_events[-1][0] if live_events else None
+    )
+    # The IMU can label a stance phase stationary even while pressure is
+    # transferring between feet. Recent alternating pressure events are a more
+    # useful active-walk signal than requiring the newest frame to be moving.
+    alternating_events = any(
+        live_events[index][1] != live_events[index - 1][1]
+        for index in range(1, len(live_events))
+    )
     live_valid = (
         live_episode is not None
-        and metrics[-1].motion_state == "moving"
         and bool(live_events)
-        and latest_at_ms - live_events[-1][0] <= GAIT_ACTIVE_RECENCY_MS
+        and recent_event_age is not None
+        and recent_event_age <= GAIT_ACTIVE_RECENCY_MS
     )
     active_motion_frames = 0
     for item in reversed(recent):
@@ -916,8 +973,16 @@ def _gait_summary(
             break
         active_motion_frames += 1
     active_motion = (
-        metrics[-1].motion_state == "moving"
-        and active_motion_frames >= GAIT_MIN_ACTIVE_MOTION_FRAMES
+        (
+            len(live_events) >= GAIT_MIN_ACTIVE_MOTION_FRAMES
+            and alternating_events
+            and recent_event_age is not None
+            and recent_event_age <= GAIT_ACTIVE_RECENCY_MS
+        )
+        or (
+            metrics[-1].motion_state == "moving"
+            and active_motion_frames >= GAIT_MIN_ACTIVE_MOTION_FRAMES
+        )
     )
 
     completed = [
@@ -1169,10 +1234,7 @@ def _empty_baseline(sample_count: int = 0) -> BaselineProfile:
     )
 
 
-def _empty_temperature_reference(
-    metrics: list[PairMetric],
-) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[str, ...]]:
-    """Extract the initial no-load temperature run after a re-wear reset."""
+def _empty_temperature_run(metrics: list[PairMetric]) -> list[PairMetric]:
     run: list[PairMetric] = []
     for metric in metrics:
         left_contact_points = sum(
@@ -1198,6 +1260,14 @@ def _empty_temperature_reference(
         if run and metric.timestamp_ms - run[-1].timestamp_ms > CONTINUITY_GAP_MS:
             break
         run.append(metric)
+    return run
+
+
+def _empty_temperature_reference(
+    metrics: list[PairMetric],
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[str, ...]]:
+    """Extract the initial no-load temperature run after a re-wear reset."""
+    run = _empty_temperature_run(metrics)
     if not run:
         return (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, ("unstable",) * 4
     # The warm-up period is deliberately discarded so glue/contact drift is
@@ -1232,6 +1302,24 @@ def _empty_temperature_reference(
         for index in range(4)
     )
     return centers, mads, slopes, statuses
+
+
+def _empty_temperature_sample_count(metrics: list[PairMetric]) -> int:
+    run = _empty_temperature_run(metrics)
+    if not run:
+        return 0
+    warmup_end = run[0].timestamp_ms + 15_000
+    stable = _time_gated_calibration_samples(
+        [metric for metric in run if metric.timestamp_ms >= warmup_end]
+    )
+    return min(60, len(stable))
+
+
+def _empty_temperature_ready(metrics: list[PairMetric]) -> bool:
+    _, _, _, statuses = _empty_temperature_reference(metrics)
+    return _empty_temperature_sample_count(metrics) >= 60 and all(
+        status not in {"raw_invalid", "unstable"} for status in statuses
+    )
 
 
 def _active_channel_count(values: tuple[float, ...]) -> int:
@@ -2736,6 +2824,9 @@ def calibration_status(session: Session) -> CalibrationStatus:
         resolved = _saved_baseline(session, left_model, right_model) or _baseline_profile(
             metrics
         )
+    if resolved.ready and _empty_temperature_run(metrics):
+        if not _empty_temperature_ready(metrics):
+            resolved = _empty_baseline(resolved.sample_count)
     residual_suspects = (
         (False,) * 12
         if resolved.ready
@@ -2743,6 +2834,7 @@ def calibration_status(session: Session) -> CalibrationStatus:
     )
     state = calibration_state(session)
     _, _, _, empty_status = _empty_temperature_reference(metrics)
+    empty_sample_count = _empty_temperature_sample_count(metrics)
     temperature_status = (
         resolved.temperature_offset_status
         if resolved.ready
@@ -2759,9 +2851,10 @@ def calibration_status(session: Session) -> CalibrationStatus:
         required_samples=BASELINE_MIN_SAMPLES,
         reset_at_ms=state.reset_at_ms if state is not None else None,
         status_reason=_calibration_reason(metrics, resolved, residual_suspects),
-        empty_temperature_reference_ready=bool(metrics) and any(
-            status not in {"raw_invalid", "unstable"} for status in empty_status
-        ),
+        empty_temperature_reference_ready=empty_sample_count >= 60
+        and all(status not in {"raw_invalid", "unstable"} for status in empty_status),
+        empty_sample_count=empty_sample_count,
+        empty_required_samples=60,
         temperature_risk_enabled=temperature_enabled,
         temperature_offset_channels=[
             index for index, status in enumerate(temperature_status)
@@ -2783,6 +2876,7 @@ def calibration_status(session: Session) -> CalibrationStatus:
 
 def restart_calibration(session: Session) -> CalibrationStatus:
     now_ms = int(time() * 1000)
+    save_session_snapshot(session)
     reset_calibration(session, now_ms)
     session.execute(
         update(RiskEvent)
@@ -2802,6 +2896,8 @@ def restart_calibration(session: Session) -> CalibrationStatus:
         reset_at_ms=now_ms,
         status_reason="waiting_for_data",
         empty_temperature_reference_ready=False,
+        empty_sample_count=0,
+        empty_required_samples=60,
         temperature_risk_enabled=False,
         temperature_offset_channels=[],
         temperature_untrusted_channels=list(range(4)),
@@ -3148,12 +3244,7 @@ def _record_combined_risks(
         event.risk_components_json = components_json
     session.commit()
     if allow_motor_command:
-        motor_risks = [
-            risk
-            for risk in risks
-            if risk.risk_type == "temperature_asymmetry"
-            or metric.motion_state != "moving"
-        ]
+        motor_risks = [risk for risk in risks if risk.risk_type != "temperature_asymmetry"]
         ensure_combined_motor_command(session, event, motor_risks)
 
 
@@ -3164,7 +3255,7 @@ def evaluate_risk(
     record_gait: bool = False,
     allow_motor_command: bool = True,
 ) -> RealtimeResponse:
-    from .session_service import recovery_observation
+    from .session_service import motor_vibration_window, recovery_observation
     left_latest = latest_frame(session, "left")
     right_latest = latest_frame(session, "right")
     latest_pair = _latest_complete_pair(session, left_latest, right_latest)
@@ -3200,15 +3291,21 @@ def evaluate_risk(
     left = to_schema(left_model)
     right = to_schema(right_model)
     metrics = _pair_history(session, left_model, right_model)
+    empty_run_started = bool(_empty_temperature_run(metrics))
+    empty_reference_ready = _empty_temperature_ready(metrics)
     learned_baseline = _saved_baseline(session, left_model, right_model)
     if learned_baseline is None:
         candidate_baseline = _baseline_profile(metrics)
-        if candidate_baseline.ready:
+        if candidate_baseline.ready and (not empty_run_started or empty_reference_ready):
             save_calibration_profile(
                 session,
                 _profile_to_model(candidate_baseline, left_model, right_model),
             )
-        baseline = candidate_baseline
+        baseline = (
+            candidate_baseline
+            if not empty_run_started or empty_reference_ready
+            else _empty_baseline(candidate_baseline.sample_count)
+        )
     else:
         baseline = learned_baseline
         if not any(
@@ -3245,6 +3342,9 @@ def evaluate_risk(
                     _profile_to_model(baseline, left_model, right_model),
                 )
     risk_metrics = metrics or [_metric(left_model, right_model)]
+    risk_metrics, motor_vibration_active = _mask_motor_vibration(
+        risk_metrics, motor_vibration_window(session)
+    )
     baseline_trust = baseline.pressure_channel_trust
     analysis_baseline, residual_suspects = _diagnosed_baseline(
         risk_metrics, baseline
@@ -3257,6 +3357,8 @@ def evaluate_risk(
         session=session,
         record=record or record_gait,
     )
+    observation = recovery_observation(session)
+    observing_recovery = observation is not None and observation.status == "observing"
     if active_risks:
         risk = active_risks[0]
     if record:
@@ -3267,21 +3369,52 @@ def evaluate_risk(
             metric,
             allow_motor_command=(
                 allow_motor_command
-                and (
-                    any(
-                        item.risk_type == "temperature_asymmetry"
-                        for item in active_risks
-                    )
-                    or (
-                        analysis_baseline.ready
-                        and metric.pressure_valid
-                        and metric.motion_state != "moving"
-                    )
-                )
+                and not observing_recovery
+                and analysis_baseline.ready
+                and metric.pressure_valid
+                and metric.motion_state != "moving"
             ),
             baseline=analysis_baseline,
             fallback_risk=risk,
         )
+        temperature_risks = [
+            item for item in active_risks if item.risk_type == "temperature_asymmetry"
+        ]
+        item_duration = max(
+            (item.duration_ms for item in temperature_risks), default=0
+        )
+        if temperature_risks and item_duration:
+            zone = max(
+                (
+                    (index, abs(value))
+                    for index, value in enumerate(metric.temperature_delta_c)
+                    if value is not None
+                ),
+                key=lambda item: item[1],
+                default=None,
+            )
+            if zone is not None and item_duration >= TEMPERATURE_ATTENTION_AFTER_MS:
+                index, _ = zone
+                source = "demo" if active_temperature_demo(session) is not None else "device_observation"
+                corrected = _temperature_delta_from_baseline(metric, analysis_baseline)[index]
+                record_temperature_event(
+                    session,
+                    timestamp_ms=metric.timestamp_ms,
+                    side=temperature_risks[0].risk_side,
+                    zone=f"T{index + 1}",
+                    raw_delta_c=metric.temperature_delta_c[index] or 0.0,
+                    corrected_delta_c=corrected or metric.temperature_delta_c[index] or 0.0,
+                    valid_zone_count=_temperature_pair_count(metric),
+                    started_at_ms=metric.timestamp_ms - item_duration,
+                    source=source,
+                    load_state=(
+                        "loaded"
+                        if _pressure_contact_present(metric, analysis_baseline)
+                        else "unloaded"
+                    ),
+                    motion_state=metric.motion_state,
+                    quality="usable",
+                )
     return RealtimeResponse(
         left=left,
         right=right,
@@ -3290,6 +3423,7 @@ def evaluate_risk(
         load_bias=metric.load_bias,
         load_diff=metric.load_diff,
         motion_state=metric.motion_state,
+        motor_vibration_active=motor_vibration_active,
         left_motion_state=metric.left_motion_state,
         right_motion_state=metric.right_motion_state,
         gait=gait,
@@ -3309,5 +3443,5 @@ def evaluate_risk(
             baseline_trust=baseline_trust,
             residual_suspects=residual_suspects,
         ),
-        recovery_observation=recovery_observation(session),
+        recovery_observation=observation,
     )
